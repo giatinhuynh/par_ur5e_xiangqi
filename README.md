@@ -1,6 +1,6 @@
 # Autonomous Xiangqi-Playing UR5e Cobot
 
-A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a human opponent using a Universal Robots UR5e collaborative arm, overhead RealSense camera, vacuum suction gripper, and a Three-Tier hierarchical software architecture in ROS 2 Humble.
+A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a human opponent using a Universal Robots UR5e collaborative arm, overhead RealSense camera, **OnRobot RG2 two-finger parallel gripper** (Modbus TCP via the lab EyeBox), and a Three-Tier hierarchical software architecture in ROS 2 Humble.
 
 ## System Architecture
 

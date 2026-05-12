@@ -36,7 +36,7 @@ todos:
     content: Implement MoveIt2 pick-and-place action client with approach/grasp/transit waypoints
     status: completed
   - id: gripper-control
-    content: Implement vacuum gripper control node via UR I/O or EyeBox
+    content: Implement RG2 two-finger gripper bridge (Modbus via EyeBox / onrobot_rg2_driver)
     status: completed
   - id: turn-detection
     content: Implement vision-based turn detection (board-state change + stability timeout) with keyboard fallback
@@ -64,7 +64,7 @@ The VXLab provides the following hardware, per [ur5evxlabdoc.md](ur5evxlabdoc.md
 
 - **Dev box** (Ubuntu, IP 10.234.7.84) running Docker with ROS 2 Humble
 - **UR5e arm** via controller (IP 10.234.6.49, port 50002) with teach pendant for External Control
-- **Vacuum gripper** via EyeBox (IP 10.234.6.47) -- controlled through UR I/O or EyeBox service
+- **OnRobot RG2 two-finger gripper** via EyeBox (IP 10.234.6.47, Modbus TCP) — `onrobot_rg2_driver` in UR5e_Env
 - **RGB camera** (Intel RealSense) connected via USB3 to the dev box
 - **Existing Docker environment** from `Kibibibit/UR5e_Env` with aliases: `arm_drivers`, `moveit_config_driver`, `find_object_2d`, `realsense_driver`
 
@@ -351,17 +351,17 @@ Each leaf node (PickPiece, PlacePiece, etc.) is a `py_trees_ros` action client t
 - Motion sequence for each pick-and-place:
   1. Move to approach pose (above pick position, +Z offset ~80mm)
   2. Descend to grasp pose (piece surface height)
-  3. Activate vacuum gripper
+  3. Close RG2 to grasp piece
   4. Ascend to transit height
   5. Move to approach pose above place position
   6. Descend to place pose
-  7. Deactivate vacuum gripper
+  7. Open RG2 to release piece
   8. Ascend to safe transit height
 
 ### 8b. Gripper Control
 
-The VXLab vacuum gripper is controlled via the EyeBox (IP 10.234.6.47). Based on the existing lab setup:
-- Control via UR I/O pins (digital output) toggling the vacuum on/off.
+The VXLab UR5e uses an OnRobot RG2 two-finger gripper via the EyeBox (IP 10.234.6.47). Based on the existing lab setup:
+- Control via Modbus TCP (`onrobot_rg2_driver`: set width / force actions).
 - ROS service wrapper: `GripperControl.srv` with `activate: bool`.
 - Alternatively, if the EyeBox has a REST/TCP API, wrap that instead.
 
@@ -401,7 +401,7 @@ Config files in `config/`:
 ## 10. Physical Setup
 
 - **Xiangqi board**: Print a custom board mat (A2 or A3 size) with four ArUco markers at the outer corners for automatic calibration. Design the board digitally (e.g., Inkscape/Illustrator) with precise grid spacing ~40-50mm per intersection, standard Xiangqi line markings (river, palace diagonals), and the ArUco markers embedded into the corner margins. Print on thick card stock or laminate for durability. This gives full control over grid dimensions and marker placement.
-- **Pieces**: Standard round Xiangqi pieces (~30-40mm diameter). The flat top surface is ideal for vacuum suction.
+- **Pieces**: Standard round Xiangqi pieces (~30–40 mm diameter). Cylindrical sides are ideal for RG2 side grasps; flat tops help vision.
 - **Graveyard zones**: Two designated areas on either side of the board for captured pieces (red graveyard, black graveyard).
 - **Camera mount**: Camera mounted on or near the robot, positioned to give a top-down view of the entire board. The RealSense is already USB-connected to the dev box.
 - **Robot base position**: UR5e must be positioned so the full board + graveyard zones are within the ~850mm reach radius.
@@ -495,7 +495,7 @@ These are not off-the-shelf and demonstrate original work:
 
 ## 16. Risk Mitigation
 
-- **Gripper fails on smooth pieces**: Add thin rubber/silicone pad to suction cup; test with actual pieces early.
+- **Gripper slips**: Tune `grasp_width` / `grasp_force` in `manipulation_config.yaml`; ensure smooth cylindrical sides; test with actual pieces early.
 - **Camera calibration drift**: Re-calibrate at start of each session; ArUco markers are fast to detect.
 - **MoveIt timeout**: Set generous planning time (5s); use cartesian path planning for simple vertical moves.
 - **Fairy-Stockfish subprocess hangs**: Set timeouts on UCI communication; restart engine process if needed.

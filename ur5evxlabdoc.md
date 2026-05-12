@@ -26,9 +26,9 @@ via Controller (IP 10.234.6.49; MAC 00:30:d6:2e:b2:aa)
 
 UR5e MoveIt Git URL: https://github.com/Kibibibit/UR5e_Env 
 
-Gripper 
+Gripper (OnRobot RG2 two-finger parallel gripper)
 
-via EyeBox (IP 10.234.6.47; MAC 18:fd:74:e4:fc:18) 
+via EyeBox (IP 10.234.6.47; MAC 18:fd:74:e4:fc:18) — Modbus TCP to the gripper; see `onrobot_rg2_driver` in UR5e_Env 
 
 Camera 
 

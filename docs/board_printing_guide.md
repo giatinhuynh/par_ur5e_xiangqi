@@ -112,7 +112,7 @@ Laminate the printed mat before use:
 
 - Use a **cold lamination pouch** (A2 or A3 size) to avoid heat warping
 - Cold laminate or ask the print shop to laminate
-- Benefits: prevents creasing, protects from suction gripper contact, stays flat on table
+- Benefits: prevents creasing, protects the print from gripper and handling wear, stays flat on table
 - After lamination, the mat should lie perfectly flat — if it curls, place it under a heavy book overnight
 
 ---

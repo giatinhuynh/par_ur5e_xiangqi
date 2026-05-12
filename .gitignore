@@ -1,2 +1,5 @@
 # Local Python venv (used for tools like generate_board_svg.py)
 .venv/
+chess_dataset/
+chinese-chess-robot-main/
+fairy-stockfish-master/

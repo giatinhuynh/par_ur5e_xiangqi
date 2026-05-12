@@ -177,7 +177,7 @@ socket.on('state_update', (state) => {
   // Status table
   document.getElementById('st-game-state').textContent = state.game_status || '--';
   document.getElementById('st-move-count').textContent = state.move_count ?? '--';
-  document.getElementById('st-gripper').textContent = state.gripper_active ? 'ACTIVE (vacuum on)' : 'Idle';
+  document.getElementById('st-gripper').textContent = state.gripper_active ? 'Gripping (RG2 closed)' : 'Idle';
   const estopCell = document.getElementById('st-estop');
   estopCell.textContent = estop ? 'ACTIVE' : 'OK';
   estopCell.style.color = estop ? '#e74c3c' : '#27ae60';

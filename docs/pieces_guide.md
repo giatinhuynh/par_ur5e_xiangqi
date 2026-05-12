@@ -42,17 +42,17 @@ Manually close the RG2 fingers around one piece (use the EyeBox web interface or
 3D printed pieces give full control over diameter, height, and top surface flatness. This is useful if:
 - Standard pieces are unavailable locally
 - You want a specific colour/contrast for easier detection
-- You want to optimise for vacuum suction (perfectly flat top)
+- You want a perfectly flat top for **vision** (the VXLab setup uses side grasps with the RG2, not vacuum)
 
 ### Recommended print specifications
 
 | Parameter | Value | Notes |
 |---|---|---|
 | Diameter | 32 mm | Fits well within A2 board cell spacing (~60 mm) |
-| Height | 10 mm | Provides stable suction contact |
-| Top face | Flat, no chamfer | Critical for vacuum suction |
+| Height | 10–12 mm | Enough barrel height for stable **side** grasp with RG2 |
+| Top face | Flat, no chamfer | Helps YOLO / top-down vision; RG2 still grips the **side** |
 | Bottom face | Flat or slightly concave | Stable on board surface |
-| Wall thickness | ≥ 1.5 mm | Rigid enough to not deform under suction |
+| Wall thickness | ≥ 1.5 mm | Rigid enough to not deform when fingers squeeze |
 | Number of pieces | 16 Red + 16 Black = 32 total | Standard Xiangqi set |
 
 ### Piece type quantities

@@ -50,8 +50,18 @@ class AIEngineNode(Node):
 
     def _get_best_move_cb(self, request, response):
         engine_type = request.engine_type if request.engine_type else self._engine_type
-        depth = request.depth if request.depth > 0 else self._default_depth
-        time_limit = request.time_limit if request.time_limit > 0 else self._default_time
+        # Match GetBestMove.srv: depth>0 => fixed-depth search; depth==0 => use time (movetime / ID).
+        if request.depth > 0:
+            depth = request.depth
+            time_limit = (
+                request.time_limit if request.time_limit > 0 else self._default_time
+            )
+        elif request.time_limit > 0:
+            depth = 0
+            time_limit = request.time_limit
+        else:
+            depth = 0
+            time_limit = self._default_time
 
         try:
             engine = self._get_engine(engine_type)

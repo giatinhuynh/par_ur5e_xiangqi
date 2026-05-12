@@ -1,12 +1,14 @@
 """
 Board detector: ArUco-based corner detection and homography computation.
 
-ArUco marker IDs (must match tools/generate_board_svg.py — markers sit just
-outside the 9×10 grid frame, not the paper edge):
+ArUco marker IDs (printed at **sheet corners** on the mat; tools/generate_board_svg.py):
   ID 0 = top-left     (file 0, rank 9  -- black side)
   ID 1 = top-right    (file 8, rank 9)
   ID 2 = bottom-right (file 8, rank 0  -- red/robot side)
   ID 3 = bottom-left  (file 0, rank 0)
+
+The grid is inset inside the marker quad — use board_geometry_*.yaml grid_spacing_mm and
+good calibration; pixel_to_grid uses separate x/y spacing in the normalised image.
 """
 
 import cv2

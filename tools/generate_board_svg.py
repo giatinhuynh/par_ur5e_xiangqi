@@ -4,9 +4,8 @@ generate_board_svg.py
 Generates a print-ready SVG for a Xiangqi robot board mat.
 
 Layout rules (fixes overlap / corner issues):
-  - ArUco markers sit just **outside the 9×10 grid frame** (same corners as
-    xiangqi_vision BoardDetector homography). A **table-safe page inset** keeps
-    marker squares off the sheet / table edge.
+  - ArUco markers at **sheet corners** (dataset-style); IDs 0–3 match board_detector.py.
+    Use ARUCO_PAGE_INSET_MM so squares stay slightly inside the paper edge on the table.
   - **Square** grid cells: cell = min(file_pitch, rank_pitch), grid centred
     in the interior rectangle (standard look; homography still valid).
   - Spec / calibration line in the **top** margin band.
@@ -17,7 +16,6 @@ Output: docs/board_mat_A2.svg, docs/board_mat_A3.svg
 """
 
 import os
-import math
 import numpy as np
 
 try:
@@ -45,12 +43,12 @@ ARUCO_PAGE_INSET_MM = 8.0
 # Gap between ArUco block and inner content (graveyards + board) — stops text/grid touching markers
 ARUCO_BAND_GAP_MM = 10.0
 
-# Distance from outer grid intersection to ArUco **centre** along the outward diagonal
-# (marker sits outside the line frame; must stay inside page / clear of strips).
-ARUCO_GRID_STANDOFF_MM = 1.5
-
-GRAVEYARD_W_MM = 28.0
+GRAVEYARD_W_MM = 56.0
 GRAVEYARD_GAP_MM = 5.0
+# Extend each graveyard strip above/below the grid (mm per side).
+GRAVEYARD_VERTICAL_EXTEND_MM = 22.0
+# When inner height ≈ grid height, allow strip to grow into cream band toward top/bottom.
+GRAVEYARD_VERTICAL_BLEED_MM = 10.0
 
 # Rank (0–9) / file (a–i) labels: same font; horizontal gap = gx(0) - rank_label_x;
 # file capitals use baseline so (top of glyph) − gy(0) equals that gap.
@@ -165,9 +163,22 @@ def compute_layout(page_w: float, page_h: float):
     def gy(rank_idx: int) -> float:
         return bb_grid - rank_idx * cell
 
-    # Graveyard strips: same vertical span as play grid, clear of corner markers
+    # Graveyard strips: wider than grid; extend vertically (bleed into margin band if needed).
     gy_left = inner_left
     gy_right = br + GRAVEYARD_GAP_MM
+    ext = GRAVEYARD_VERTICAL_EXTEND_MM
+    bleed = GRAVEYARD_VERTICAL_BLEED_MM
+    grave_top = max(inner_top - bleed, v_lo - ext)
+    grave_bottom = min(inner_bottom + bleed, v_lo + grid_h + ext)
+    grave_top = min(grave_top, v_lo)
+    grave_bottom = max(grave_bottom, v_lo + grid_h)
+    edge = 2.0
+    grave_top = max(edge, grave_top)
+    grave_bottom = min(page_h - edge, grave_bottom)
+    grave_h = grave_bottom - grave_top
+    if grave_h < grid_h:
+        grave_top = v_lo
+        grave_h = grid_h
 
     return {
         'aruco': aruco,
@@ -186,8 +197,8 @@ def compute_layout(page_w: float, page_h: float):
         'gy': gy,
         'gy_left': gy_left,
         'gy_right': gy_right,
-        'grave_top': v_lo,
-        'grave_h': grid_h,
+        'grave_top': grave_top,
+        'grave_h': grave_h,
     }
 
 
@@ -210,34 +221,14 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
         rect(0, 0, page_w, page_h, fill='#f5e6c8', stroke='none'),
     ]
 
-    # --- ArUco: corners of grid frame (IDs match board_detector.py) ---
-    # ID 0 TL (file 0, rank 9), 1 TR, 2 BR, 3 BL — centres offset outside intersections
-    # so markers do not cover piece homes; quad is ~parallel to grid for homography.
-    cx = (gx(0) + gx(8)) / 2.0
-    cy = (gy(0) + gy(9)) / 2.0
-    half_diag = aruco / 2.0 + ARUCO_GRID_STANDOFF_MM
-    grid_corners = [
-        (gx(0), gy(9)),  # 0 TL
-        (gx(8), gy(9)),  # 1 TR
-        (gx(8), gy(0)),  # 2 BR
-        (gx(0), gy(0)),  # 3 BL
+    # --- ArUco: paper / sheet corners (dataset-style); IDs match board_detector.py ---
+    aruco_ul_inset = max(float(inset), float(ARUCO_PAGE_INSET_MM))
+    aruco_positions_ul = [
+        (aruco_ul_inset, aruco_ul_inset, 0),
+        (page_w - aruco_ul_inset - aruco, aruco_ul_inset, 1),
+        (page_w - aruco_ul_inset - aruco, page_h - aruco_ul_inset - aruco, 2),
+        (aruco_ul_inset, page_h - aruco_ul_inset - aruco, 3),
     ]
-    min_cx = gy_left + GRAVEYARD_W_MM + GRAVEYARD_GAP_MM + aruco / 2.0 + 0.5
-    aruco_positions_ul = []
-    for mid, (px, py) in enumerate(grid_corners):
-        vx, vy = px - cx, py - cy
-        n = math.hypot(vx, vy) or 1.0
-        mxc = px + (vx / n) * half_diag
-        myc = py + (vy / n) * half_diag
-        if mid in (0, 3):
-            mxc = max(min_cx, mxc)
-        hm = aruco / 2.0
-        # Keep marker **square** fully inside page (table-safe margin on all sides).
-        edge = ARUCO_PAGE_INSET_MM + hm
-        mxc = max(edge, min(page_w - edge, mxc))
-        myc = max(edge, min(page_h - edge, myc))
-        mx_ul, my_ul = mxc - hm, myc - hm
-        aruco_positions_ul.append((mx_ul, my_ul, mid))
 
     for mx, my, mid in aruco_positions_ul:
         svg_parts.append(aruco_to_svg(mx, my, aruco, mid))
@@ -255,25 +246,25 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
             anc = 'start'
         svg_parts.append(text(lx, ly, f'{mid}', size=2.8, anchor=anc, fill='#666'))
 
-    # --- Graveyards (full height of grid band; labels centred inside) ---
+    # --- Graveyards (wider + taller than grid; labels centred) ---
     svg_parts.append(
         rect(gy_left, gt, GRAVEYARD_W_MM, gh, fill='#e8d5a0', stroke='#888', width=0.4)
     )
     svg_parts.append(
-        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 - 2, 'BLACK', size=3.2, fill='#222', baseline='middle')
+        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 - 3.5, 'BLACK', size=4.2, fill='#222', baseline='middle')
     )
     svg_parts.append(
-        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 + 3.5, 'CAPTURED', size=2.6, fill='#444', baseline='middle')
+        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
     )
 
     svg_parts.append(
         rect(gy_right, gt, GRAVEYARD_W_MM, gh, fill='#e8d5a0', stroke='#888', width=0.4)
     )
     svg_parts.append(
-        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 - 2, 'RED', size=3.2, fill='#8b0000', baseline='middle')
+        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 - 3.5, 'RED', size=4.2, fill='#8b0000', baseline='middle')
     )
     svg_parts.append(
-        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 + 3.5, 'CAPTURED', size=2.6, fill='#444', baseline='middle')
+        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
     )
 
     # --- Grid ---

@@ -6,7 +6,7 @@ Usage:
 
 Steps:
   1. Set grid_spacing_mm from docs/board_geometry_A?.yaml (same mat you print). Place the board
-     under the camera. ArUco markers frame the 9×10 grid (not the paper edge). Press SPACE to capture.
+     under the camera. ArUco markers are at the **sheet corners** (all four visible). Press SPACE to capture.
   2. Using the teach pendant, move the robot TCP to 4 reference points
      (the 4 board corners), recording the TCP pose after each.
   3. The tool computes the board_to_base_tf and saves to calibration.yaml.
@@ -134,7 +134,7 @@ class CalibrationTool(Node):
         board_frame origin = (file=0, rank=0), X = file direction, Y = rank direction.
         """
         spacing = self._calibration.grid_spacing_mm / 1000.0
-        print(f'\nUsing grid_spacing_mm={self._calibration.grid_spacing_mm} for board frame corners.')
+        print(f'\nUsing grid_spacing_mm={self._calibration.grid_spacing_mm} for board frame (intersection spacing).')
 
         # Board-frame positions of the 4 calibration corners
         board_pts = np.array([

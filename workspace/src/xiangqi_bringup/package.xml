@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>xiangqi_bringup</name>
+  <version>0.1.0</version>
+  <description>Launch files and configuration for the Xiangqi robot system.</description>
+  <maintainer email="student@rmit.edu.au">Xiangqi Team</maintainer>
+  <license>MIT</license>
+
+  <depend>xiangqi_msgs</depend>
+  <depend>xiangqi_vision</depend>
+  <depend>xiangqi_ai</depend>
+  <depend>xiangqi_manipulation</depend>
+  <depend>xiangqi_planner</depend>
+  <depend>xiangqi_dashboard</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Xiangqi Robot Dashboard</title>
+  <link rel="stylesheet" href="/static/css/dashboard.css" />
+</head>
+<body>
+  <header>
+    <h1>Xiangqi Robot Control Dashboard</h1>
+    <div id="system-status" class="status-ok">System: Starting...</div>
+  </header>
+
+  <main>
+    <!-- Left column: board + controls -->
+    <section class="column">
+      <div class="card">
+        <h2>Board State</h2>
+        <canvas id="board-canvas" width="450" height="500"></canvas>
+        <div id="turn-indicator" class="turn-red">Red to move</div>
+        <div id="confidence">Detection confidence: --</div>
+      </div>
+
+      <div class="card">
+        <h2>Game Controls</h2>
+        <button id="btn-new-game" class="btn btn-primary">New Game</button>
+        <button id="btn-human-ready" class="btn btn-secondary">Confirm My Move (Fallback)</button>
+        <button id="btn-estop" class="btn btn-danger">Emergency Stop</button>
+        <div class="engine-select">
+          <label>Engine:
+            <select id="engine-select">
+              <option value="fairystockfish">Fairy-Stockfish</option>
+              <option value="minimax">Custom Minimax</option>
+            </select>
+          </label>
+          <label>Difficulty:
+            <input type="range" id="difficulty-slider" min="1" max="20" value="15" />
+            <span id="difficulty-value">15</span>
+          </label>
+          <button id="btn-set-engine" class="btn btn-secondary">Apply</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right column: AI analysis + status + history -->
+    <section class="column">
+      <div class="card">
+        <h2>AI Analysis</h2>
+        <div id="ai-engine-label">Engine: --</div>
+        <div class="eval-bar-wrapper">
+          <div id="eval-bar" class="eval-bar"></div>
+        </div>
+        <div id="eval-score">Evaluation: --</div>
+        <div id="search-info">Depth: -- | Nodes: -- | Time: --s</div>
+        <div id="best-move">Best move: --</div>
+        <div id="ponder-move">Ponder: --</div>
+      </div>
+
+      <div class="card">
+        <h2>System Status</h2>
+        <table id="status-table">
+          <tr><td>Game state:</td><td id="st-game-state">--</td></tr>
+          <tr><td>Move count:</td><td id="st-move-count">--</td></tr>
+          <tr><td>Gripper:</td><td id="st-gripper">--</td></tr>
+          <tr><td>E-Stop:</td><td id="st-estop">OK</td></tr>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Move History</h2>
+        <div id="move-history-list"></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

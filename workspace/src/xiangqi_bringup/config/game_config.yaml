@@ -1,0 +1,14 @@
+# game_config.yaml: Game Manager and AI Engine configuration
+game_manager_node:
+  ros__parameters:
+    engine_type: "fairystockfish"    # "fairystockfish" | "minimax"
+    robot_plays_red: true            # Robot is Red (moves first)
+    ai_time_limit: 5.0               # Seconds per AI move
+    ai_depth: 0                      # 0 = use time limit instead
+
+ai_engine_node:
+  ros__parameters:
+    engine_type: "fairystockfish"
+    difficulty: 15                   # Fairy-Stockfish skill level 1-20
+    default_depth: 5
+    default_time_limit: 5.0

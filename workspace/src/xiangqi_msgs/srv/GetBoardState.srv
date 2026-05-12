@@ -1,0 +1,6 @@
+# Request a fresh board scan from the vision node.
+bool force_rescan   # If true, ignore cached state and scan immediately
+---
+xiangqi_msgs/BoardState board_state
+bool success
+string message

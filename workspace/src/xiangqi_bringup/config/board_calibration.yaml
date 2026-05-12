@@ -1,0 +1,10 @@
+# board_calibration.yaml: Calibration template -- populated by calibration_tool
+# Run: ros2 run xiangqi_vision calibration_tool
+# to generate the actual homography and board_to_base_tf values.
+
+homography: null          # Will be a 3x3 matrix [[...],[...],[...]] after calibration
+board_to_base_tf: null    # Will be a 4x4 matrix after calibration
+grid_spacing_mm: 45.0     # Physical spacing between board intersections (mm)
+board_origin_mm: [0.0, 0.0]
+image_width: 640
+image_height: 480

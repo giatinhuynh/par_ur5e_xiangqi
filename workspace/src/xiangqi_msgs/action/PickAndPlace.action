@@ -1,0 +1,12 @@
+# Low-level pick-and-place action handled by the manipulation node.
+geometry_msgs/Pose pick_pose     # World-frame pose to pick from
+geometry_msgs/Pose place_pose    # World-frame pose to place at
+float32 approach_height          # Z offset above target for approach (metres)
+float32 transit_height           # Z height for transit between pick and place
+bool activate_gripper            # Whether to engage vacuum on pick
+---
+bool success
+float32 placement_error_mm       # Estimated error from target in mm
+string message
+---
+string phase   # "approaching_pick" | "grasping" | "lifting" | "moving" | "placing" | "releasing"

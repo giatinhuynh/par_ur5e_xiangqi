@@ -1,0 +1,7 @@
+# Activate or deactivate the vacuum gripper.
+bool activate    # True = suction on, False = suction off
+float32 timeout  # Max seconds to wait for confirmation (0 = no wait)
+---
+bool success
+bool is_active
+string message

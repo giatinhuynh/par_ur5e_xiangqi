@@ -1,0 +1,12 @@
+# Execute a full robot move (pick + optional capture + place + verify).
+string move          # Coordinate notation e.g. "h0g2"
+string fen_before    # Board FEN before this move (for verification)
+bool is_capture      # True if destination has an opponent piece to remove first
+int8 captured_piece  # Piece type code of the captured piece (0 if not a capture)
+---
+bool success
+string final_fen     # Board FEN after execution
+string message
+---
+string phase         # "capturing" | "picking" | "placing" | "verifying" | "done"
+float32 progress     # 0.0-1.0

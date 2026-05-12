@@ -1,0 +1,17 @@
+# manipulation_config.yaml: Manipulation node parameters
+manipulation_node:
+  ros__parameters:
+    simulation_mode: false
+    max_velocity_scaling: 0.25     # 25% speed for safe operation during demos
+    max_acceleration_scaling: 0.2
+    planning_time: 10.0
+
+gripper_controller_node:
+  ros__parameters:
+    simulation_mode: false
+    use_eyebox: false              # Set true to use EyeBox HTTP API
+    eyebox_ip: "10.234.6.47"
+    eyebox_port: 80
+
+safety_monitor_node:
+  ros__parameters: {}

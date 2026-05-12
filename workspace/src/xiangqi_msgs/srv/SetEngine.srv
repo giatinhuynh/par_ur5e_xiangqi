@@ -1,0 +1,6 @@
+# Switch the active AI engine at runtime.
+string engine_type   # "fairystockfish" | "minimax"
+int32 difficulty     # 1-20 for Fairy-Stockfish skill level; depth for minimax
+---
+bool success
+string message

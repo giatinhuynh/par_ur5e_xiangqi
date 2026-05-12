@@ -1,7 +1,8 @@
 """
 Board detector: ArUco-based corner detection and homography computation.
 
-ArUco marker IDs (printed on the board mat corners):
+ArUco marker IDs (must match tools/generate_board_svg.py — markers sit just
+outside the 9×10 grid frame, not the paper edge):
   ID 0 = top-left     (file 0, rank 9  -- black side)
   ID 1 = top-right    (file 8, rank 9)
   ID 2 = bottom-right (file 8, rank 0  -- red/robot side)
@@ -75,7 +76,9 @@ class BoardDetector:
         self._detector_params = cv2.aruco.DetectorParameters()
         self._aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, self._detector_params)
 
-        # Destination points in a normalised board image (800x890 px, 9x10 grid at 89px spacing)
+        # Destination points in a normalised board image (800x890 px). Margins
+        # place the warped 9×10 intersections on a uniform grid; file/rank use
+        # separate spacing so rank steps match norm_h (square cells on the mat).
         self._norm_w = 800
         self._norm_h = 890
         self._margin = 44
@@ -135,9 +138,10 @@ class BoardDetector:
         pt = np.array([[[px, py]]], dtype=np.float32)
         warped = cv2.perspectiveTransform(pt, H)[0][0]
 
-        spacing = (self._norm_w - 2 * self._margin) / (BOARD_FILES - 1)
-        file_f = (warped[0] - self._margin) / spacing
-        rank_f = (warped[1] - self._margin) / spacing
+        spacing_x = (self._norm_w - 2 * self._margin) / (BOARD_FILES - 1)
+        spacing_y = (self._norm_h - 2 * self._margin) / (BOARD_RANKS - 1)
+        file_f = (warped[0] - self._margin) / spacing_x
+        rank_f = (warped[1] - self._margin) / spacing_y
 
         file_idx = int(round(file_f))
         rank_idx = int(round(rank_f))

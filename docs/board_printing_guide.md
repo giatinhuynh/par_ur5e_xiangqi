@@ -34,20 +34,31 @@ This produces two files in `docs/`:
 
 ## Step 2: Board Dimensions
 
-The A2 board (`594 mm × 420 mm` landscape) uses the following geometry:
+The generator (`tools/generate_board_svg.py`) lays out a **standard 9×10 Xiangqi grid** (same topology as any regulation board: [Wikipedia — Xiangqi](https://en.wikipedia.org/wiki/Xiangqi)): nine files, ten ranks, river, palaces, cannon/pawn marks. **Cells are square** (same step along files and ranks); the grid is centred in the printable interior. **ArUco markers** sit in the **paper corners** with a small inset; a **clear band** separates them from the play area so labels do not overlap markers. The spec line is **centred above the bottom markers**, not on top of them.
 
-| Parameter | Value |
+Re-run `python3 tools/generate_board_svg.py` after editing the script; nominal sizes below match the current generator output.
+
+### A2 (recommended)
+
+| Parameter | Value (nominal) |
 |---|---|
-| Page size | A2 landscape: 594 × 420 mm |
-| Board grid area | ~484 × 318 mm (centred) |
-| File spacing (column gap) | ~60.5 mm |
-| Rank spacing (row gap) | ~35.3 mm |
-| Piece intersection diameter (target) | ≤ 30 mm circle fits within cell |
-| ArUco marker size | 22 mm × 22 mm |
+| Page size | 594 × 420 mm (landscape) |
+| Corner ArUco size | ~27 mm (scales with page short side) |
+| Cell size (square) | **~38.0 mm** (file step = rank step) |
 | ArUco dictionary | `DICT_4X4_50` |
-| ArUco IDs | 0 (top-left), 1 (top-right), 2 (bottom-right), 3 (bottom-left) |
+| ArUco IDs | 0 TL, 1 TR, 2 BR, 3 BL |
 
-> **Important:** The grid spacing values above are what get stored in `board_calibration.yaml` as `grid_spacing_mm`. After printing, measure the actual spacing with a ruler and update the YAML if it differs (e.g., due to printer scaling).
+### A3 (smaller print)
+
+| Parameter | Value (nominal) |
+|---|---|
+| Page size | 420 × 297 mm (landscape) |
+| Corner ArUco size | ~26 mm |
+| Cell size (square) | **~24.7 mm** |
+
+A3 cells are smaller — use **smaller pieces** or prefer A2 for ~30 mm discs. Each SVG includes a one-line **footer** (centred, grey) with page size, cell mm, and ArUco info.
+
+> **Calibration:** `board_calibration.yaml` uses a single `grid_spacing_mm` — for this mat, set it to the **measured** distance between adjacent intersections (file or rank; they should match). After printing, measure with a ruler and update if the printer scaled the sheet.
 
 ### Board orientation
 

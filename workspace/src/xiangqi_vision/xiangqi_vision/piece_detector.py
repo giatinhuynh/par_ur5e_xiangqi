@@ -59,9 +59,10 @@ MARGIN = 44
 
 def _pixel_to_grid(px: float, py: float) -> Tuple[int, int]:
     """Convert a pixel in the normalised board image to (file, rank)."""
-    spacing = (NORM_W - 2 * MARGIN) / (BOARD_FILES - 1)
-    file_f = (px - MARGIN) / spacing
-    rank_f = (py - MARGIN) / spacing
+    spacing_x = (NORM_W - 2 * MARGIN) / (BOARD_FILES - 1)
+    spacing_y = (NORM_H - 2 * MARGIN) / (BOARD_RANKS - 1)
+    file_f = (px - MARGIN) / spacing_x
+    rank_f = (py - MARGIN) / spacing_y
     file_idx = int(round(file_f))
     rank_idx = int(round(rank_f))
     if 0 <= file_idx < BOARD_FILES and 0 <= rank_idx < BOARD_RANKS:

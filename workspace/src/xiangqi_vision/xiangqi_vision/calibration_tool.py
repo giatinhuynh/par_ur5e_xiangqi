@@ -5,8 +5,8 @@ Usage:
   ros2 run xiangqi_vision calibration_tool
 
 Steps:
-  1. Place the board under the camera. The tool will show the camera feed.
-     Ensure all 4 ArUco markers are visible. Press SPACE to capture.
+  1. Set grid_spacing_mm from docs/board_geometry_A?.yaml (same mat you print). Place the board
+     under the camera. ArUco markers frame the 9×10 grid (not the paper edge). Press SPACE to capture.
   2. Using the teach pendant, move the robot TCP to 4 reference points
      (the 4 board corners), recording the TCP pose after each.
   3. The tool computes the board_to_base_tf and saves to calibration.yaml.
@@ -56,6 +56,17 @@ class CalibrationTool(Node):
         self._tcp_sub = self.create_subscription(
             PoseStamped, '/tool_pose', self._tcp_cb, 1
         )
+
+        if os.path.isfile(CALIBRATION_OUTPUT):
+            try:
+                loaded = BoardCalibration.load(CALIBRATION_OUTPUT)
+                if loaded.grid_spacing_mm and loaded.grid_spacing_mm > 0:
+                    self._calibration = loaded
+                    self.get_logger().info(
+                        f'Loaded existing calibration (grid_spacing_mm={self._calibration.grid_spacing_mm})'
+                    )
+            except Exception as e:
+                self.get_logger().warn(f'Could not load {CALIBRATION_OUTPUT}: {e}')
 
         self.get_logger().info('Calibration tool started. Press SPACE in the window to capture board.')
 
@@ -123,6 +134,7 @@ class CalibrationTool(Node):
         board_frame origin = (file=0, rank=0), X = file direction, Y = rank direction.
         """
         spacing = self._calibration.grid_spacing_mm / 1000.0
+        print(f'\nUsing grid_spacing_mm={self._calibration.grid_spacing_mm} for board frame corners.')
 
         # Board-frame positions of the 4 calibration corners
         board_pts = np.array([
@@ -152,7 +164,7 @@ class CalibrationTool(Node):
         tf[:3, 3] = t
         self._calibration.board_to_base_tf = tf
         self._calibration.board_origin_mm = (0.0, 0.0)
-        self._calibration.grid_spacing_mm = 45.0
+        # Keep grid_spacing_mm set before calibration (e.g. from board_geometry_*.yaml); do not overwrite.
 
         print(f'\nComputed board_to_base_tf:\n{tf}')
         residuals = np.linalg.norm(

@@ -1,5 +1,13 @@
 # Xiangqi UR5e Dockerfile
 # Extends the VXLab Kibibibit/UR5e_Env base image with all Xiangqi project dependencies.
+#
+# Lab hardware:
+#   Arm:     UR5e (controlled via UR ROS 2 driver)
+#   Gripper: OnRobot RG2 two-finger gripper (110 mm max, 40 N max)
+#            — driver already in base image (onrobot_rg2_driver)
+#            — communicates via Modbus TCP to EyeBox at 10.234.6.47:502
+#   Camera:  Intel RealSense (USB3, driver in base image)
+#
 # Place this file alongside the original UR5e_Env Dockerfile, or reference it via
 # the docker-compose.yml override.
 
@@ -23,7 +31,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Python packages ---
+# pymodbus: required by onrobot_rg2_driver (Modbus TCP to RG2 via EyeBox)
+# ultralytics: YOLOv8n for piece detection
+# flask/flask-socketio/eventlet: web dashboard
+# pyffish: Xiangqi legal move generation (custom minimax engine + game manager)
 RUN pip3 install --no-cache-dir \
+    pymodbus==2.5.3 \
     pyffish \
     ultralytics \
     flask \

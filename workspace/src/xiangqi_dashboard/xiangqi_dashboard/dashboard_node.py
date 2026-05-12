@@ -146,6 +146,7 @@ class DashboardNode(Node):
         self.create_subscription(EngineInfo, '/xiangqi/engine_info', self._engine_info_cb, 10)
         self.create_subscription(Bool, '/xiangqi/gripper_active', self._gripper_cb, 10)
         self.create_subscription(String, '/xiangqi/safety_status', self._safety_cb, 10)
+        self.create_subscription(String, '/xiangqi/illegal_move_alert', self._alert_cb, 10)
 
         # Publishers exposed to Flask
         _ros_publishers['new_game'] = self.create_publisher(Empty, '/xiangqi/new_game', 10)
@@ -215,6 +216,11 @@ class DashboardNode(Node):
     def _safety_cb(self, msg: String) -> None:
         with _state_lock:
             _state['estop_active'] = (msg.data != 'OK')
+        self._push_state()
+
+    def _alert_cb(self, msg: String) -> None:
+        with _state_lock:
+            _state['last_alert'] = msg.data
         self._push_state()
 
     def _push_state(self) -> None:

@@ -1,17 +1,32 @@
-# manipulation_config.yaml: Manipulation node parameters
+# manipulation_config.yaml
+# Parameters for the Xiangqi manipulation stack.
+#
+# Gripper: OnRobot RG2 two-finger parallel gripper
+#   - Max open width: 110 mm
+#   - Max force: 40 N
+#   - Controlled via Modbus TCP at EyeBox IP 10.234.6.47:502
+#   - Xiangqi piece diameter: ~30 mm (plastic or wooden round pieces)
+#
+# Arm motion: lab's /par_moveit/waypoint_move action server (par_moveit_config)
+
 manipulation_node:
   ros__parameters:
     simulation_mode: false
-    max_velocity_scaling: 0.25     # 25% speed for safe operation during demos
-    max_acceleration_scaling: 0.2
-    planning_time: 10.0
+    # Gripper widths in millimetres
+    open_width:    70.0   # Pre-grasp open (fingers clear a ~30 mm piece)
+    grasp_width:   28.0   # Grip on ~30 mm piece (2 mm compression)
+    release_width: 50.0   # Open to release at destination
+    grasp_force:   15.0   # Gripping force in Newtons
 
 gripper_controller_node:
   ros__parameters:
     simulation_mode: false
-    use_eyebox: false              # Set true to use EyeBox HTTP API
-    eyebox_ip: "10.234.6.47"
-    eyebox_port: 80
+    gripper_ip:   "10.234.6.47"  # EyeBox IP (Modbus TCP to RG2)
+    gripper_port: 502
+    open_width:    70.0
+    grasp_width:   28.0
+    release_width: 50.0
+    default_force: 15.0
 
 safety_monitor_node:
   ros__parameters: {}

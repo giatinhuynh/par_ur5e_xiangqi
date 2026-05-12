@@ -38,7 +38,7 @@ class BoardCalibration:
 
 # Height offsets (metres) for different motion phases
 APPROACH_HEIGHT   = 0.12   # Above piece surface for approach
-GRASP_HEIGHT      = 0.005  # Touch piece surface (slight positive for suction)
+GRASP_HEIGHT      = 0.005  # z height at piece centre for RG2 side-grip contact
 TRANSIT_HEIGHT    = 0.20   # Safe clearance height during transit
 GRAVEYARD_OFFSET  = 0.10   # Z-offset above graveyard zone
 

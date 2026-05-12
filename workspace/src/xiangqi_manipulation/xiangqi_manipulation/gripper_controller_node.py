@@ -1,81 +1,132 @@
 """
-gripper_controller_node: Controls the vacuum suction gripper via UR digital I/O.
+gripper_controller_node: ROS 2 bridge for the OnRobot RG2 two-finger gripper.
 
-The VXLab vacuum gripper is wired to the UR5e tool I/O. It is toggled by
-setting digital output 0 (DO0) on the UR controller. The UR ROS 2 driver
-exposes this via the /io_and_status_controller/set_io service.
+The lab's UR5e is fitted with an OnRobot RG2 gripper (max width 110 mm,
+max force 40 N). The existing onrobot_rg2_driver package (from UR5e_Env)
+exposes the gripper via:
 
-For the EyeBox interface (IP 10.234.6.47), an HTTP or TCP command can be
-used as an alternative -- configure with the 'use_eyebox' parameter.
+  Action servers (provided by gripper_control_node from onrobot_rg2_driver):
+    /rg2/set_width   (onrobot_rg2_msgs/action/GripperSetWidth)
+    /rg2/full_open   (onrobot_rg2_msgs/action/GripperFullOpen)
+    /rg2/full_close  (onrobot_rg2_msgs/action/GripperFullClose)
+
+  Topics (published by gripper_state_publisher_node):
+    /rg2/state       (onrobot_rg2_msgs/msg/GripperState)  -- width, depth, busy
+
+This node provides the xiangqi_msgs/srv/GripperControl service as a
+thin synchronous bridge so the rest of the xiangqi stack does not need
+to import onrobot_rg2_msgs directly.
+
+Gripper geometry for round Xiangqi pieces (~30 mm diameter):
+  OPEN_WIDTH    = 70 mm   - finger clearance to lower around a piece
+  GRASP_WIDTH   = 28 mm   - firm grip on ~30 mm piece
+  RELEASE_WIDTH = 50 mm   - enough clearance to lift off a released piece
+  GRASP_FORCE   = 15 N    - firm but gentle (pieces are plastic/wood)
 """
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 
 from std_msgs.msg import Bool
 from xiangqi_msgs.srv import GripperControl
 
 try:
-    from ur_msgs.srv import SetIO
-    UR_MSGS_OK = True
+    from onrobot_rg2_msgs.action import GripperSetWidth, GripperFullOpen
+    from onrobot_rg2_msgs.msg import GripperState
+    RG2_OK = True
 except ImportError:
-    UR_MSGS_OK = False
+    RG2_OK = False
 
 
-GRIPPER_IO_PIN = 0   # Digital output pin on UR5e tool I/O
+# Default gripper widths (mm) — tune after physical testing
+OPEN_WIDTH    = 70.0   # Opening width to clear piece before descent
+GRASP_WIDTH   = 28.0   # Closing width to grip a ~30 mm Xiangqi piece
+RELEASE_WIDTH = 50.0   # Width to open when releasing piece at destination
+DEFAULT_FORCE = 15.0   # Gripping force in Newtons
 
 
 class GripperControllerNode(Node):
     def __init__(self):
         super().__init__('gripper_controller_node')
 
-        self.declare_parameter('use_eyebox', False)
-        self.declare_parameter('eyebox_ip', '10.234.6.47')
-        self.declare_parameter('eyebox_port', 80)
         self.declare_parameter('simulation_mode', False)
+        self.declare_parameter('gripper_ip',   '10.234.6.47')
+        self.declare_parameter('gripper_port', 502)
+        self.declare_parameter('open_width',    OPEN_WIDTH)
+        self.declare_parameter('grasp_width',   GRASP_WIDTH)
+        self.declare_parameter('release_width', RELEASE_WIDTH)
+        self.declare_parameter('default_force', DEFAULT_FORCE)
 
-        self._sim_mode = self.get_parameter('simulation_mode').value
-        self._use_eyebox = self.get_parameter('use_eyebox').value
-        self._is_active = False
+        self._sim_mode     = self.get_parameter('simulation_mode').value
+        self._open_width   = self.get_parameter('open_width').value
+        self._grasp_width  = self.get_parameter('grasp_width').value
+        self._release_width = self.get_parameter('release_width').value
+        self._default_force = self.get_parameter('default_force').value
+
+        self._current_width: float = self._open_width
 
         cb_group = ReentrantCallbackGroup()
 
-        # Service we provide to other nodes
+        # Service we expose to the rest of the xiangqi stack
         self._gripper_srv = self.create_service(
-            GripperControl, 'gripper_control', self._gripper_cb,
+            GripperControl, '/xiangqi/gripper_control', self._gripper_cb,
             callback_group=cb_group
         )
 
-        # State publisher for dashboard
-        self._state_pub = self.create_publisher(Bool, '/xiangqi/gripper_active', 10)
+        # Bool publisher consumed by the dashboard:
+        # True = gripper is closed/gripping (width < open threshold)
+        self._active_pub = self.create_publisher(Bool, '/xiangqi/gripper_active', 10)
 
-        # UR IO service client (if using direct UR driver)
-        self._ur_io_cli = None
-        if not self._sim_mode and not self._use_eyebox and UR_MSGS_OK:
-            self._ur_io_cli = self.create_client(
-                SetIO, '/io_and_status_controller/set_io',
+        # Action client → lab's onrobot_rg2_driver gripper_control_node
+        self._rg2_client = None
+        if not self._sim_mode and RG2_OK:
+            self._rg2_client = ActionClient(
+                self, GripperSetWidth, '/rg2/set_width',
                 callback_group=cb_group
+            )
+
+        # Subscribe to gripper state for current-width tracking
+        if not self._sim_mode and RG2_OK:
+            self.create_subscription(
+                GripperState, '/rg2/state',
+                self._state_cb, 10
             )
 
         self.get_logger().info(
             f'gripper_controller_node started '
-            f'(sim={self._sim_mode}, eyebox={self._use_eyebox})'
+            f'(sim={self._sim_mode}, rg2_ok={RG2_OK})'
         )
 
     # ------------------------------------------------------------------
-    # Service callback
+    # State subscriber
     # ------------------------------------------------------------------
 
-    def _gripper_cb(self, request: GripperControl.Request, response: GripperControl.Response):
+    def _state_cb(self, msg):
+        self._current_width = msg.width
+        # Publish Bool for dashboard: True = gripper is actively gripping
+        active = Bool()
+        active.data = self._current_width < (self._open_width - 5.0)
+        self._active_pub.publish(active)
+
+    # ------------------------------------------------------------------
+    # Service callback (synchronous bridge)
+    # ------------------------------------------------------------------
+
+    def _gripper_cb(self, request: GripperControl.Request,
+                    response: GripperControl.Response):
+        target_width = float(request.target_width)
+        target_force = float(request.target_force) if request.target_force > 0 else self._default_force
+
         try:
-            self._set_gripper(request.activate)
+            self._set_width(target_width, target_force)
             response.success = True
-            response.is_active = self._is_active
-            response.message = 'Gripper activated' if request.activate else 'Gripper released'
+            response.final_width = self._current_width
+            response.message = f'Gripper set to {target_width:.1f} mm'
         except Exception as e:
             response.success = False
-            response.is_active = self._is_active
+            response.final_width = self._current_width
             response.message = str(e)
             self.get_logger().error(f'Gripper control error: {e}')
         return response
@@ -84,57 +135,45 @@ class GripperControllerNode(Node):
     # Gripper actuation
     # ------------------------------------------------------------------
 
-    def _set_gripper(self, activate: bool) -> None:
+    def _set_width(self, target_width: float, target_force: float) -> None:
         if self._sim_mode:
-            self.get_logger().info(f'[SIM] Gripper {"ON" if activate else "OFF"}')
-            self._is_active = activate
-            self._publish_state()
+            self.get_logger().info(
+                f'[SIM] Gripper → {target_width:.1f} mm @ {target_force:.1f} N'
+            )
+            self._current_width = target_width
             return
 
-        if self._use_eyebox:
-            self._set_via_eyebox(activate)
-        else:
-            self._set_via_ur_io(activate)
-
-        self._is_active = activate
-        self._publish_state()
-
-    def _set_via_ur_io(self, activate: bool) -> None:
-        """Toggle vacuum via UR digital output pin."""
-        if self._ur_io_cli is None or not UR_MSGS_OK:
-            self.get_logger().warn('UR IO service not available -- gripper command ignored')
+        if self._rg2_client is None or not RG2_OK:
+            self.get_logger().warn(
+                'RG2 driver not available — gripper command ignored'
+            )
             return
 
-        if not self._ur_io_cli.wait_for_service(timeout_sec=2.0):
-            raise RuntimeError('UR IO service not available')
+        if not self._rg2_client.wait_for_server(timeout_sec=3.0):
+            raise RuntimeError('/rg2/set_width action server not available')
 
-        req = SetIO.Request()
-        req.fun = SetIO.Request.FUN_SET_DIGITAL_OUT
-        req.pin = GRIPPER_IO_PIN
-        req.state = 1.0 if activate else 0.0
+        goal = GripperSetWidth.Goal()
+        goal.target_width = target_width
+        goal.target_force = target_force
 
-        future = self._ur_io_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
-        if future.result() is None:
-            raise RuntimeError('UR IO service call timed out')
+        future = self._rg2_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
 
-    def _set_via_eyebox(self, activate: bool) -> None:
-        """Toggle vacuum via EyeBox HTTP API (adjust endpoint per lab configuration)."""
-        import urllib.request
-        ip = self.get_parameter('eyebox_ip').value
-        port = self.get_parameter('eyebox_port').value
-        cmd = 'on' if activate else 'off'
-        url = f'http://{ip}:{port}/gripper/{cmd}'
-        try:
-            with urllib.request.urlopen(url, timeout=2) as resp:
-                self.get_logger().debug(f'EyeBox response: {resp.read()}')
-        except Exception as e:
-            self.get_logger().warn(f'EyeBox request failed: {e} -- continuing')
+        goal_handle = future.result()
+        if goal_handle is None or not goal_handle.accepted:
+            raise RuntimeError('RG2 set_width goal rejected')
 
-    def _publish_state(self) -> None:
-        msg = Bool()
-        msg.data = self._is_active
-        self._state_pub.publish(msg)
+        result_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, result_future, timeout_sec=10.0)
+
+        result = result_future.result()
+        if result is None:
+            raise RuntimeError('RG2 set_width timed out')
+
+        self._current_width = result.result.final_width
+        self.get_logger().info(
+            f'RG2 gripper at {self._current_width:.1f} mm'
+        )
 
 
 def main(args=None):

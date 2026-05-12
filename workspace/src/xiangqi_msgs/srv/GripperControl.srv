@@ -1,7 +1,9 @@
-# Activate or deactivate the vacuum gripper.
-bool activate    # True = suction on, False = suction off
-float32 timeout  # Max seconds to wait for confirmation (0 = no wait)
+# Open or close the OnRobot RG2 two-finger gripper to a target width.
+# target_width: desired jaw opening in millimetres (0 = fully closed, 110 = fully open)
+# target_force: gripping force in Newtons (0–40 N)
+float32 target_width
+float32 target_force
 ---
 bool success
-bool is_active
+float32 final_width
 string message

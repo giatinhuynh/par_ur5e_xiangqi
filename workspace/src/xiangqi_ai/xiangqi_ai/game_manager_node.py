@@ -75,6 +75,11 @@ class GameManagerNode(Node):
             Empty, '/xiangqi/new_game', self._new_game_cb, 10,
             callback_group=cb_group
         )
+        # Confirmation from task_planner BT that the robot physically finished a move
+        self._robot_done_sub = self.create_subscription(
+            Bool, '/xiangqi/robot_move_complete', self._robot_move_complete_cb, 10,
+            callback_group=cb_group
+        )
 
         # Publishers
         self._game_status_pub = self.create_publisher(GameStatus, '/xiangqi/game_status', 10)
@@ -114,6 +119,17 @@ class GameManagerNode(Node):
         self._game_state = GameState.DETECTING_MOVE
         self._publish_status()
         self._process_human_move()
+
+    def _robot_move_complete_cb(self, msg: Bool) -> None:
+        """BT publishes True here after the robot physically executes its move."""
+        if not msg.data:
+            return
+        if self._game_state != GameState.EXECUTING_MOVE:
+            return
+        self.get_logger().info('Robot move execution confirmed — waiting for human')
+        self._game_state = GameState.WAITING_HUMAN
+        self._tell_vision_to_watch(True)
+        self._publish_status()
 
     def _new_game_cb(self, _: Empty) -> None:
         self.get_logger().info('New game started')

@@ -11,6 +11,7 @@ import py_trees_ros
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
+from std_srvs.srv import Trigger
 
 from xiangqi_msgs.srv import GetBoardState
 from xiangqi_msgs.msg import AiExecutionResult
@@ -133,6 +134,48 @@ class AlertIllegalMove(py_trees.behaviour.Behaviour):
             msg.data = 'Illegal move detected -- please re-make your move'
             self._pub.publish(msg)
             self._sent = True
+        return py_trees.common.Status.FAILURE
+
+
+class GoToScanPose(py_trees.behaviour.Behaviour):
+    """
+    Calls /xiangqi/move_to_scan_pose (std_srvs/Trigger) to move the
+    wrist-mounted camera to the configured top-down bird's-eye position
+    before any board vision scan.
+
+    SUCCESS when the service returns success=True.
+    FAILURE when the service is unavailable or returns success=False.
+    Callers should wrap this in FailureIsSuccess so a transient arm
+    failure does not abort the entire move sequence.
+    """
+
+    def __init__(self, node: Node):
+        super().__init__('GoToScanPose')
+        self._node = node
+        self._cli = node.create_client(Trigger, '/xiangqi/move_to_scan_pose')
+        self._future = None
+
+    def initialise(self) -> None:
+        self._future = None
+        if not self._cli.service_is_ready():
+            self._node.get_logger().warn(
+                'move_to_scan_pose service not ready — skipping scan pose'
+            )
+            return
+        self._future = self._cli.call_async(Trigger.Request())
+
+    def update(self) -> py_trees.common.Status:
+        if self._future is None:
+            # Service not available — degrade gracefully
+            return py_trees.common.Status.FAILURE
+        if not self._future.done():
+            return py_trees.common.Status.RUNNING
+        result = self._future.result()
+        if result is not None and result.success:
+            return py_trees.common.Status.SUCCESS
+        self._node.get_logger().warn(
+            f'GoToScanPose: {getattr(result, "message", "no response")}'
+        )
         return py_trees.common.Status.FAILURE
 
 

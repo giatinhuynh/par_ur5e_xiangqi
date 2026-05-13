@@ -13,6 +13,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import Bool, Empty, Header, String
+from std_srvs.srv import Trigger
 
 from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory
 from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck, AiExecutionResult
@@ -115,6 +116,9 @@ class GameManagerNode(Node):
         )
         self._get_board_state_cli = self.create_client(
             GetBoardState, 'get_board_state', callback_group=cb_group
+        )
+        self._move_to_scan_pose_cli = self.create_client(
+            Trigger, '/xiangqi/move_to_scan_pose', callback_group=cb_group
         )
 
         # Status timer
@@ -694,8 +698,45 @@ class GameManagerNode(Node):
     # ------------------------------------------------------------------
 
     def _tell_vision_to_watch(self, watch: bool) -> None:
+        """Enable/disable vision turn-watching.
+
+        When enabling, first request arm move to scan pose (async) so the
+        wrist-mounted camera is pointing straight down at the board.
+        start_watching is published once the arm confirms it has arrived
+        (or immediately if the service is unavailable, to degrade gracefully).
+        """
+        if not watch:
+            msg = Bool()
+            msg.data = False
+            self._start_watching_pub.publish(msg)
+            return
+
+        if not self._move_to_scan_pose_cli.service_is_ready():
+            self.get_logger().warn(
+                'move_to_scan_pose service not ready — starting watch without repositioning'
+            )
+            self._publish_start_watching()
+            return
+
+        fut = self._move_to_scan_pose_cli.call_async(Trigger.Request())
+        fut.add_done_callback(self._on_scan_pose_ready)
+
+    def _on_scan_pose_ready(self, future) -> None:
+        """Called when the arm has reached (or failed to reach) scan pose."""
+        try:
+            result = future.result()
+            if result is None or not result.success:
+                self.get_logger().warn(
+                    f'Scan pose move failed ({getattr(result, "message", "no result")}) '
+                    '— starting watch anyway'
+                )
+        except Exception as e:
+            self.get_logger().warn(f'Scan pose service error: {e} — starting watch anyway')
+        self._publish_start_watching()
+
+    def _publish_start_watching(self) -> None:
         msg = Bool()
-        msg.data = watch
+        msg.data = True
         self._start_watching_pub.publish(msg)
 
     @staticmethod

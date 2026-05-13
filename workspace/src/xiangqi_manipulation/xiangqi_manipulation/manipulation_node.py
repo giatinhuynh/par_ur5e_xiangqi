@@ -35,6 +35,7 @@ Gripper widths (all in mm):
 """
 
 from __future__ import annotations
+import os
 import time
 
 import rclpy
@@ -43,8 +44,10 @@ from rclpy.action import ActionServer, ActionClient, CancelResponse, GoalRespons
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Pose
+from std_srvs.srv import Trigger
 
 from xiangqi_msgs.action import PickAndPlace
+from xiangqi_manipulation.move_translator import BoardCalibration
 
 try:
     from par_interfaces.action import WaypointMove
@@ -72,17 +75,33 @@ class ManipulationNode(Node):
     def __init__(self):
         super().__init__('manipulation_node')
 
-        self.declare_parameter('simulation_mode',          False)
-        self.declare_parameter('open_width',               OPEN_WIDTH)
-        self.declare_parameter('grasp_width',              GRASP_WIDTH)
-        self.declare_parameter('release_width',            RELEASE_WIDTH)
-        self.declare_parameter('grasp_force',              GRASP_FORCE)
+        self.declare_parameter('simulation_mode',    False)
+        self.declare_parameter('open_width',         OPEN_WIDTH)
+        self.declare_parameter('grasp_width',        GRASP_WIDTH)
+        self.declare_parameter('release_width',      RELEASE_WIDTH)
+        self.declare_parameter('grasp_force',        GRASP_FORCE)
+        # Scan pose fallback (used when calibration file is absent or has no TF).
+        # When calibration IS available, x/y are replaced by the computed board centre.
+        self.declare_parameter('scan_pose_x',        -0.40)
+        self.declare_parameter('scan_pose_y',         0.00)
+        self.declare_parameter('scan_pose_z',         0.55)
+        self.declare_parameter('scan_pose_yaw',       0.0)
+        self.declare_parameter(
+            'calibration_file',
+            '/home/rosuser/workspace/config/board_calibration.yaml',
+        )
 
-        self._sim_mode     = self.get_parameter('simulation_mode').value
-        self._open_width   = self.get_parameter('open_width').value
-        self._grasp_width  = self.get_parameter('grasp_width').value
+        self._sim_mode      = self.get_parameter('simulation_mode').value
+        self._open_width    = self.get_parameter('open_width').value
+        self._grasp_width   = self.get_parameter('grasp_width').value
         self._release_width = self.get_parameter('release_width').value
-        self._grasp_force  = self.get_parameter('grasp_force').value
+        self._grasp_force   = self.get_parameter('grasp_force').value
+        self._scan_pose_yaw = self.get_parameter('scan_pose_yaw').value
+
+        # Compute scan pose x/y from board calibration (board centre in base_link).
+        # Falls back to manual scan_pose_x/y params if calibration is unavailable.
+        self._scan_pose_x, self._scan_pose_y, self._scan_pose_z = \
+            self._resolve_scan_pose()
 
         # Separate callback groups to avoid ROS action deadlocks
         self._server_cbg = MutuallyExclusiveCallbackGroup()
@@ -122,6 +141,14 @@ class ManipulationNode(Node):
             goal_callback=lambda _: GoalResponse.ACCEPT,
             cancel_callback=lambda _: CancelResponse.ACCEPT,
             callback_group=self._server_cbg,
+        )
+
+        # --- Service: move arm to top-down scan pose ---
+        self._scan_pose_srv = self.create_service(
+            Trigger,
+            '/xiangqi/move_to_scan_pose',
+            self._move_to_scan_pose_cb,
+            callback_group=self._arm_cbg,
         )
 
         self.get_logger().info(
@@ -219,6 +246,78 @@ class ManipulationNode(Node):
         result.message = 'Pick and place complete'
         goal_handle.succeed()
         return result
+
+    # ------------------------------------------------------------------
+    # Scan pose helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_scan_pose(self):
+        """Return (x, y, z) for the scan pose.
+
+        If a valid board_to_base_tf exists in the calibration file, x/y are
+        derived from the board centre (file=4, midpoint of ranks 4 and 5 on a
+        9-file × 10-rank board).  z is always taken from the scan_pose_z param.
+        Falls back to (scan_pose_x, scan_pose_y, scan_pose_z) from params when
+        calibration is absent or incomplete.
+        """
+        z = float(self.get_parameter('scan_pose_z').value)
+        fallback_x = float(self.get_parameter('scan_pose_x').value)
+        fallback_y = float(self.get_parameter('scan_pose_y').value)
+
+        cal_file = self.get_parameter('calibration_file').value
+        if not os.path.exists(cal_file):
+            self.get_logger().info(
+                f'No calibration file at {cal_file} — using manual scan_pose_x/y params'
+            )
+            return fallback_x, fallback_y, z
+
+        try:
+            cal = BoardCalibration.load(cal_file)
+            if cal.board_to_base_tf is None:
+                self.get_logger().warn(
+                    'Calibration loaded but board_to_base_tf missing — using manual scan_pose params'
+                )
+                return fallback_x, fallback_y, z
+
+            # Board centre: file 4 (middle of 0-8), rank 4.5 (middle of 0-9).
+            # Average of rank-4 and rank-5 world positions at centre file.
+            centre_lo = cal.grid_to_world(4, 4)
+            centre_hi = cal.grid_to_world(4, 5)
+            cx = float((centre_lo[0] + centre_hi[0]) / 2.0)
+            cy = float((centre_lo[1] + centre_hi[1]) / 2.0)
+            # z from cal is the board surface; add the configured height offset above it
+            board_z = float((centre_lo[2] + centre_hi[2]) / 2.0)
+            self.get_logger().info(
+                f'Scan pose derived from calibration: '
+                f'({cx:.3f}, {cy:.3f}, {board_z + z:.3f})'
+            )
+            return cx, cy, board_z + z
+
+        except Exception as e:
+            self.get_logger().warn(
+                f'Failed to derive scan pose from calibration ({e}) — using manual params'
+            )
+            return fallback_x, fallback_y, z
+
+    # ------------------------------------------------------------------
+    # Scan pose service  →  /xiangqi/move_to_scan_pose
+    # ------------------------------------------------------------------
+
+    def _move_to_scan_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
+        """Move arm to configured top-down scan position for board vision."""
+        self.get_logger().info(
+            f'Moving to scan pose '
+            f'({self._scan_pose_x:.3f}, {self._scan_pose_y:.3f}, {self._scan_pose_z:.3f})'
+        )
+        ok = self._move(
+            self._scan_pose_x,
+            self._scan_pose_y,
+            self._scan_pose_z,
+            self._scan_pose_yaw,
+        )
+        response.success = ok
+        response.message = 'at scan pose' if ok else 'scan pose move failed'
+        return response
 
     # ------------------------------------------------------------------
     # Arm motion primitive  →  /par_moveit/waypoint_move

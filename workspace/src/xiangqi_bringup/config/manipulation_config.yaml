@@ -17,6 +17,17 @@ manipulation_node:
     grasp_width:   28.0   # Grip on ~30 mm piece (2 mm compression)
     release_width: 50.0   # Open to release at destination
     grasp_force:   15.0   # Gripping force in Newtons
+    # Calibration file — used to derive scan pose from board centre automatically.
+    # If absent or board_to_base_tf is missing, scan_pose_x/y below are used instead.
+    calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
+    # Scan pose: top-down bird's-eye position for board vision scans.
+    # scan_pose_z is the height ABOVE the board surface (metres) — always used.
+    # scan_pose_x/y are fallback values used only when calibration is unavailable.
+    # scan_pose_yaw: end-effector yaw (radians); 0.0 = straight down.
+    scan_pose_x:   -0.40
+    scan_pose_y:    0.00
+    scan_pose_z:    0.55
+    scan_pose_yaw:  0.0
 
 gripper_controller_node:
   ros__parameters:

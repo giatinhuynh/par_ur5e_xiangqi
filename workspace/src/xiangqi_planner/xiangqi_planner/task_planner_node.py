@@ -12,6 +12,7 @@ Tree structure:
           │     ├── SetupMoveCoordinates
           │     ├── CaptureSubtree (Selector)
           │     ├── PickPiece (PickAndPlace)
+          │     ├── GoToScanPose (FailureIsSuccess — arm to bird's-eye scan position)
           │     ├── VerifyBestEffort (Retry verify; swallow failure → always finalize)
           │     └── FinalizeRobotMove (``/xiangqi/ai_execution_result``)
           └── AiMotionFailureFinalizer → ``/xiangqi/ai_execution_result`` if inner Sequence fails
@@ -36,6 +37,7 @@ from xiangqi_manipulation.move_translator import BoardCalibration, MoveTranslato
 from .behaviours.game_behaviours import (
     AiMotionFailureFinalizer,
     FinalizeRobotMoveAfterVerify,
+    GoToScanPose,
     IsCapture,
     IsEstopActive,
     SetupMoveCoordinates,
@@ -206,6 +208,12 @@ class TaskPlannerNode(Node):
             PickPieceBehaviour(name='PickAIPiece'),
         ])
 
+        # Move arm to top-down scan pose before verification; wrapped in
+        # FailureIsSuccess so a transient arm failure does not abort the sequence.
+        go_to_scan = py_trees.decorators.FailureIsSuccess(
+            GoToScanPose(self), name='ScanPoseBestEffort'
+        )
+
         verify = VerifyBoardState(name='VerifyBoard')
         retry_verify = py_trees.decorators.Retry(
             verify, num_failures=3, name='RetryVerify'
@@ -223,6 +231,7 @@ class TaskPlannerNode(Node):
             SetupMoveCoordinates(),
             capture_subtree,
             execute_sequence,
+            go_to_scan,
             verify_best_effort,
             FinalizeRobotMoveAfterVerify(self),
         ])

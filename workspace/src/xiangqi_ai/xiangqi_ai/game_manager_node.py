@@ -141,6 +141,8 @@ class GameManagerNode(Node):
         self._ai_request_token: int = 0
         self._active_ai_request_token: int | None = None
         self._ai_fen_at_request: str | None = None
+        self._game_result: str = "ongoing"
+        self._game_result_reason: str = ""
 
         self.get_logger().info('game_manager_node started -- waiting for /xiangqi/new_game')
 
@@ -336,6 +338,8 @@ class GameManagerNode(Node):
         self._clear_planner_ack_timer()
         self._ai_dispatch_id = 0
         self._ai_service_retry_count = 0
+        self._game_result = "ongoing"
+        self._game_result_reason = ""
 
         # Robot plays Red and moves first -- start with AI move
         if self._robot_is_red:
@@ -617,13 +621,57 @@ class GameManagerNode(Node):
             self.get_logger().error(f'Failed to apply move {move}: {e}')
 
     def _check_game_over(self) -> None:
+        """Classify terminal positions using pyffish game_result."""
+        fen = self._current_fen
+        if not (PYFFISH_OK and fen):
+            return
         try:
-            legal = sf.legal_moves(VARIANT, self._current_fen, [])
-            if not legal:
-                self._game_state = GameState.GAME_OVER
-                self.get_logger().info('Game over -- no legal moves')
-        except Exception:
-            pass
+            legal = sf.legal_moves(VARIANT, fen, [])
+            res = sf.game_result(VARIANT, fen, [])
+        except Exception as e:
+            self.get_logger().error(f'game_result/legal_moves error: {e}')
+            # Fallback: preserve legacy behaviour
+            try:
+                legal = sf.legal_moves(VARIANT, fen, [])
+                if not legal:
+                    self._game_state = GameState.GAME_OVER
+                    self._game_result = "unknown"
+                    self._game_result_reason = "no_legal_moves"
+                    self.get_logger().info('Game over -- no legal moves (fallback)')
+            except Exception:
+                pass
+            return
+
+        no_legal = len(legal) == 0
+        result = "ongoing"
+        reason = ""
+
+        if res in ("1-0", "0-1", "1/2-1/2"):
+            # Winner / draw from pyffish score
+            if res == "1-0":
+                result = "red_wins"
+            elif res == "0-1":
+                result = "black_wins"
+            else:
+                result = "draw"
+
+            if result in ("red_wins", "black_wins"):
+                reason = "checkmate" if no_legal else "win_by_rule_or_resign"
+            else:
+                reason = "stalemate" if no_legal else "draw_by_rule"
+        else:
+            # Non-terminal or unknown code from pyffish
+            if no_legal:
+                result = "unknown"
+                reason = "no_legal_moves"
+
+        if result != "ongoing":
+            self._game_state = GameState.GAME_OVER
+            self._game_result = result
+            self._game_result_reason = reason
+            self.get_logger().info(
+                f'Game over: result={result}, reason={reason}, res_code={res}, no_legal={no_legal}'
+            )
 
     def _infer_move_from_board(self, fen: str, new_grid: list) -> str | None:
         """
@@ -682,6 +730,8 @@ class GameManagerNode(Node):
         msg.current_fen = self._current_fen
         msg.engine_type = self._engine_type
         msg.system_state = self._game_state.name
+        msg.game_result = self._game_result
+        msg.game_result_reason = self._game_result_reason
         self._game_status_pub.publish(msg)
 
     @staticmethod

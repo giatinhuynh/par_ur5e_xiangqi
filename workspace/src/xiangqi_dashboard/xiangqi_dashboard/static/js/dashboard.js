@@ -161,7 +161,19 @@ socket.on('state_update', (state) => {
   // System header
   const sysEl = document.getElementById('system-status');
   const estop = state.estop_active;
-  sysEl.textContent = estop ? 'E-STOP ACTIVE' : `System: ${state.system_state || 'OK'}`;
+  if (estop) {
+    sysEl.textContent = 'E-STOP ACTIVE';
+  } else if (state.game_result && state.game_result !== 'ongoing') {
+    const reason = state.game_result_reason || '';
+    let label = '';
+    if (state.game_result === 'red_wins') label = 'Red wins';
+    else if (state.game_result === 'black_wins') label = 'Black wins';
+    else if (state.game_result === 'draw') label = 'Draw';
+    else label = 'Game over';
+    sysEl.textContent = reason ? `${label} (${reason})` : label;
+  } else {
+    sysEl.textContent = `System: ${state.system_state || 'OK'}`;
+  }
   sysEl.className = estop ? 'status-err' : 'status-ok';
 
   // AI panel

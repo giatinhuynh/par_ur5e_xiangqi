@@ -50,6 +50,8 @@ _state = {
     'estop_active': False,
     'detection_confidence': 0.0,
     'system_state': 'starting',
+    'game_result': 'ongoing',
+    'game_result_reason': '',
 }
 _state_lock = threading.Lock()
 
@@ -190,6 +192,8 @@ class DashboardNode(Node):
             _state['fen'] = msg.current_fen
             _state['engine_type'] = msg.engine_type
             _state['system_state'] = msg.system_state
+            _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
+            _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
         self._push_state()
 
     def _move_history_cb(self, msg: MoveHistory) -> None:

@@ -15,6 +15,12 @@ Full-stack setup (Docker, calibration, weights, launch) is in the repository roo
 |---|---|
 | [vision_training_guide.md](vision_training_guide.md) | Complete step-by-step YOLOv8n training pipeline: dataset sourcing, lab image capture, labelling, training, validation, and deployment |
 
+## Assessment (course project)
+
+| Document | Description |
+|---|---|
+| [assignment_rubric_checklist.md](assignment_rubric_checklist.md) | §4.8 requirement mapping, report expectations (§6), shared themes (§2), readiness checklist vs rubric — companion to root [`assignment.md`](../assignment.md) |
+
 ## Tools
 
 Scripts in `../tools/`:

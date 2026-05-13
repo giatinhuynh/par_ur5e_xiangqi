@@ -1,45 +1,185 @@
 # Autonomous Xiangqi-Playing UR5e Cobot
 
-A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a human opponent using a Universal Robots UR5e collaborative arm, overhead RealSense camera, **OnRobot RG2 two-finger parallel gripper** (Modbus TCP via the lab EyeBox), and a Three-Tier hierarchical software architecture in ROS 2 Humble.
+A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a human opponent using a Universal Robots UR5e collaborative arm, an overhead Intel RealSense camera, an **OnRobot RG2 two-finger parallel gripper** (Modbus TCP via the lab EyeBox), and a **three-tier** hierarchical software stack in **ROS 2 Humble**. Development and deployment target the **VXLab (Virtual Experiences Laboratory)** Docker workflow based on [Kibibibit/UR5e_Env](https://github.com/Kibibibit/UR5e_Env).
 
-## System Architecture
+---
 
+## What is in this repository
+
+| Path | Purpose |
+|------|---------|
+| [`workspace/src/`](workspace/src/) | Six ROS 2 packages: `xiangqi_msgs`, `xiangqi_bringup`, `xiangqi_vision`, `xiangqi_ai`, `xiangqi_planner`, `xiangqi_manipulation`, `xiangqi_dashboard` |
+| [`workspace/config/`](workspace/config/) | **Runtime** calibration output (`board_calibration.yaml` after `calibration_tool`); created on first save; bind-mounted with the workspace in Docker |
+| [`workspace/models/`](workspace/models/) | YOLO weights (`.pt`); not tracked in git (see [`.gitignore`](.gitignore)) |
+| [`tools/`](tools/) | Host-side Python helpers for board SVG generation, dataset merge, Kaggle/local YOLO training, and prediction previews (see [docs/README.md](docs/README.md)) |
+| [`docs/`](docs/) | Printing and vision guides, generated board SVGs (`board_mat_*.svg`), and geometry YAML used with `generate_board_svg.py` |
+| [`Dockerfile`](Dockerfile) | Extends the UR5e_Env image with Fairy-Stockfish, Ultralytics, pyffish, Flask dashboard stack, py_trees, OpenCV, etc. |
+| [`UR5e_Env-main/`](UR5e_Env-main/) | **Reference only** (not for running Docker or the arm): frozen snapshot of the VXLab base stack so you can inspect `par_pkg`, `onrobot_rg2_driver`, `par_moveit_config`, `par_interfaces`, and helper scripts without cloning upstream. For real use, follow **Quick start** with a proper [`UR5e_Env`](https://github.com/Kibibibit/UR5e_Env) checkout. |
+| [`ur5evxlabdoc.md`](ur5evxlabdoc.md) | Lab onboarding: dev box / arm / gripper / camera IPs, Docker steps, pendant setup |
+| [`.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md`](.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md) | Full system design (three tiers, vision/AI/manipulation, rubric “original work” items, experiment ideas). Implementation follows this plan; end-to-end integration experiments are still listed as open there. |
+| [`assignment.md`](assignment.md) | Course brief: §4.8 project definition, report rules (§6), shared/UG/PG requirements, rubric themes (§8) |
+| [`docs/assignment_rubric_checklist.md`](docs/assignment_rubric_checklist.md) | §4.8 mapping, report checklist, rubric-oriented readiness (detail kept out of this README) |
+
+---
+
+## VXLab environment (hardware and base software)
+
+From [`ur5evxlabdoc.md`](ur5evxlabdoc.md) and the upstream [UR5e_Env README](https://github.com/Kibibibit/UR5e_Env/blob/main/README.md) (same text is mirrored under [`UR5e_Env-main/README.md`](UR5e_Env-main/README.md) for offline reference only):
+
+- **Dev box** (typical IP `10.234.7.84`) — Ubuntu, Docker, ROS 2 Humble inside the container
+- **UR5e** — controller (typical IP `10.234.6.49`, **External Control** port `50002`)
+- **OnRobot RG2** — EyeBox (typical IP `10.234.6.47`), Modbus TCP; the running lab image includes `onrobot_rg2_driver` from UR5e_Env (layout visible in the reference tree under `UR5e_Env-main/workspace/src/onrobot_rg2_driver/`)
+- **RealSense** — USB3 to the dev box
+
+Inside the **actual** UR5e_Env container, common **aliases** are defined in the upstream workspace (e.g. `workspace/.helper_scripts/helper-aliases.sh`) and include:
+
+- `arm_drivers` — UR arm, gripper, and camera drivers (RViz optional; `--no-rviz`, `--no-gripper` supported)
+- `moveit_config_driver` — MoveIt 2 and the lab’s custom MoveIt action server
+- `realsense_driver` / `find_object_2d` — camera-only or Find-Object workflow (Connect 4 demo)
+
+**Note:** Some older lab notes may say `ur_driver`; the current `UR5e_Env` README uses **`arm_drivers`** for the combined driver launch.
+
+---
+
+## System architecture
+
+Three-tier layout (deliberative / sequencing / reactive) with an explicit ROS 2 graph. *Move translation* (grid → `base_link` poses) lives in [`move_translator.py`](workspace/src/xiangqi_manipulation/xiangqi_manipulation/move_translator.py) and is invoked from the behaviour tree, not as its own node.
+
+```mermaid
+graph TB
+  subgraph deliberative [Tier 3 Deliberative]
+    GameManager["game_manager_node"]
+    AIEngine["ai_engine_node<br/>Fairy-Stockfish or minimax"]
+  end
+
+  subgraph sequencing [Tier 2 Sequencing]
+    TaskPlanner["task_planner_node<br/>py_trees_ros BT"]
+  end
+
+  subgraph reactive [Tier 1 Reactive]
+    VisionNode["vision_node"]
+    ManipNode["manipulation_node"]
+    GripperNode["gripper_controller_node"]
+    SafetyNode["safety_monitor_node"]
+  end
+
+  subgraph crosscutting [Cross-cutting]
+    Dashboard["dashboard_node<br/>Flask + WebSocket"]
+  end
+
+  GameManager -->|"execute_move, game state"| TaskPlanner
+  AIEngine -->|"GetBestMove"| GameManager
+  GameManager -->|"FEN / engine params"| AIEngine
+  VisionNode -->|"BoardState, human_move_detected"| GameManager
+  TaskPlanner -->|"PickAndPlace action"| ManipNode
+  TaskPlanner -->|"GripperControl / width goals"| GripperNode
+  TaskPlanner -->|"GetBoardState / scans"| VisionNode
+  SafetyNode -.->|"/xiangqi/estop"| ManipNode
+  GameManager -.->|"GameStatus, MoveHistory"| Dashboard
+  VisionNode -.->|"debug_image, board_state"| Dashboard
 ```
-Tier 3 – Deliberative:  Game Manager Node  +  AI Engine Node (Fairy-Stockfish / Custom Minimax)
-Tier 2 – Sequencing:    Task Planner Node  (Behavior Tree via py_trees_ros)
-Tier 1 – Reactive:      Vision Node  +  Manipulation Node  +  Gripper Controller  +  Safety Monitor
-Cross-cutting:          Web Dashboard (Flask + SocketIO at http://localhost:5000)
-```
 
-## Quick Start (VXLab Docker Environment)
+**Launched nodes** (`xiangqi_system.launch.py`): `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`.
+
+Hardware drivers are **not** started by the Xiangqi launch file: start `arm_drivers` and `moveit_config_driver` first (VXLab convention).
+
+---
+
+## Project summary (methodology and report angle)
+
+The work targets **course §4.8** (UR5e pick-and-place with planning) as a **2D game**: the arm must perceive the board, infer when the human has finished moving, compute legal robot moves, and execute pick-and-place including captures—without hand-authored move entry as the primary loop.
+
+**Methodology (high level).** The software is organised as a **three-tier robot architecture** implemented in ROS 2 Humble: a *deliberative* layer holds game state and AI (`game_manager_node`, `ai_engine_node`); a *sequencing* layer runs a **py_trees** behaviour tree for multi-step moves, retries, and capture handling (`task_planner_node`); a *reactive* layer performs perception and motion (`xiangqi_vision`, `xiangqi_manipulation`). That split keeps slow search and rule validation off the hot path for sensing and control, while the middle tier encodes task structure that would be awkward in a single monolithic node or a purely reactive stack. The written report should state this design choice explicitly and contrast it briefly with alternatives (e.g. flat FSM, subsumption-only), using the mermaid figure above.
+
+**Technical approach.** Perception combines **ArUco**-based board rectification with **YOLOv8** piece detection; moves are inferred by **board-state differencing** checked with **pyffish**. Manipulation uses the VXLab **MoveIt** waypoint action and **RG2** width goals. Two move generators satisfy the **multiple-algorithm** expectation for undergraduates: **Fairy-Stockfish** (UCI) and a **custom minimax** engine with alpha–beta pruning.
+
+**Original scope (for the report — vs off-the-shelf components).** The rubric asks you to **delineate** team work from dependencies. The following matches the “original implementation” items in the [system plan](.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md) (§12–13):
+
+- **Designed and integrated here (cite files / nodes in the report):**
+  - **Custom Xiangqi engine** — Iterative-deepening minimax with alpha–beta pruning, move ordering, and a hand-crafted evaluation (material, piece–square tables, king safety, mobility) in `minimax_engine.py` / `evaluation.py`; legal moves via **pyffish**, not a reimplementation of Xiangqi rules.
+  - **Human move inference** — Board-state differencing from vision, validated against legal moves with **pyffish** (no generic ROS package provides this for Xiangqi).
+  - **Board calibration pipeline** — ArUco + homography, grid/teach-in workflow, and persisted `board_calibration.yaml` (`calibration_tool`, `board_detector`).
+  - **Vision integration** — `vision_node` wiring warp → YOLO → grid, turn / stability logic, debug output, and `GetBoardState`.
+  - **Game orchestration** — Explicit FSM in `game_manager_node` (wait human → validate → AI → execute), topics/services for the planner and dashboard.
+  - **Task planning** — Behaviour-tree structure for the full loop, captures, and verification/retry behaviour (`task_planner_node`, `xiangqi_planner/behaviours/`).
+  - **Manipulation bridge** — `PickAndPlace` action server that sequences lab **WaypointMove** and **GripperSetWidth** goals with simulation vs hardware paths (`manipulation_node`); grid-to-pose **move_translator**; gripper and safety wrappers.
+  - **ROS 2 infrastructure** — `xiangqi_msgs`, `xiangqi_bringup` launch/parameters, Dockerfile layer on UR5e_Env, Flask/SocketIO dashboard bridging ROS state.
+  - **Three-tier enforcement** — Deliberative / sequencing / reactive responsibilities split across packages and the main launch file, with explicit interfaces (aligned with plan §12.5).
+  - **Dataset / deployment workflow** — Host `tools/` scripts (SVG board generation, merge/capture/train/preview pipelines) and lab documentation for adapting YOLO weights to your mat and pieces.
+
+- **Imported or stock (acknowledge and reference; do not claim as original algorithms):**
+  - **Ultralytics YOLOv8** — Detector backbone and training API; you contribute data, labels, class mapping, and integration.
+  - **Fairy-Stockfish** — Pre-existing engine; contribution is **UCI subprocess wrapper**, ROS service interface, and variant/skill configuration.
+  - **pyffish** — Rule and FEN handling for validation and minimax legality.
+  - **OpenCV** — ArUco/homography primitives; contribution is the **calibration and board pipeline** built on top.
+  - **py_trees / py_trees_ros** — BT framework; contribution is the **tree design** and ROS behaviours.
+  - **Lab stack** — `ur_robot_driver`, `realsense2_camera`, MoveIt 2, `par_moveit` action server, `onrobot_rg2_driver`: configured and **called from** `manipulation_node` / launch, not reimplemented.
+
+Tables that map every §4.8 bullet to files, full §2/§6 report requirements, and a candid rubric readiness checklist are in **[`docs/assignment_rubric_checklist.md`](docs/assignment_rubric_checklist.md)**. The authoritative course text remains **[`assignment.md`](assignment.md)**.
+
+---
+
+## ROS 2 packages and executables
+
+| Package | Tier | Executables / role |
+|---------|------|---------------------|
+| `xiangqi_msgs` | — | Messages, services, actions (see below) |
+| `xiangqi_vision` | Reactive | `vision_node`, `calibration_tool` |
+| `xiangqi_ai` | Deliberative | `game_manager_node`, `ai_engine_node` |
+| `xiangqi_manipulation` | Reactive | `manipulation_node`, `gripper_controller_node`, `safety_monitor_node` |
+| `xiangqi_planner` | Sequencing | `task_planner_node` |
+| `xiangqi_dashboard` | Cross-cutting | `dashboard_node` |
+| `xiangqi_bringup` | — | `launch/xiangqi_system.launch.py`, `launch/xiangqi_sim.launch.py`; config YAML under `config/` |
+
+Each package under `workspace/src/` includes its own **`README.md`** with a logic-focused walkthrough of nodes and modules.
+
+### `xiangqi_msgs` (actual definitions)
+
+- **msg:** `BoardState`, `GameStatus`, `PieceDetection`, `MoveHistory`, `EngineInfo`
+- **srv:** `GetBoardState`, `GetBestMove`, `GripperControl`, `SetEngine`
+- **action:** `ExecuteMove`, `PickAndPlace`
+
+---
+
+## Quick start (VXLab Docker)
+
+Use a real checkout of [UR5e_Env](https://github.com/Kibibibit/UR5e_Env) on the lab machine (e.g. `~/UR5e_Env` per [`ur5evxlabdoc.md`](ur5evxlabdoc.md)). The folder [`UR5e_Env-main/`](UR5e_Env-main/) in **this** repo is **reference-only**; do not use it as the Docker root for deployment.
 
 ### 1. Build the Docker image
 
 ```bash
 cd ~/UR5e_Env
-./docker-build.sh      # builds base image
-# Then rebuild with Xiangqi additions:
-docker build -f ~/par_ur5e_xiangqi/Dockerfile -t ur5e_xiangqi .
+./docker-build.sh
 ```
 
-Start the container, then attach (VXLab convention; see [UR5e_Env](https://github.com/Kibibibit/UR5e_Env) for script details):
+Then extend the image with this repo’s Dockerfile (build context = UR5e_Env root):
 
 ```bash
-./docker-start.sh      # if the container is not already running
+docker build -f /path/to/par_ur5e_xiangqi/Dockerfile -t ur5e_xiangqi ~/UR5e_Env
+```
+
+Use the resulting `ur5e_xiangqi` image per your lab’s start/attach scripts (same pattern as upstream UR5e_Env).
+
+Start the container, then attach (see upstream README for script details):
+
+```bash
+./docker-start.sh
 ./docker-attach.sh
 ```
 
 ### 2. Copy packages into the workspace
 
 ```bash
-cp -r ~/par_ur5e_xiangqi/workspace/src/* ~/UR5e_Env/workspace/src/
+cp -r /path/to/par_ur5e_xiangqi/workspace/src/* ~/workspace/src/
 ```
 
-Optional: copy `tools/` from this repo if you want to run `generate_board_svg.py` or Kaggle helper scripts from the same tree as `~/UR5e_Env` (they are not required inside the container for normal play).
+(`~/workspace` is the usual mount inside the container.)
+
+Optional: copy [`tools/`](tools/) if you want training and SVG scripts beside the workspace on the host.
 
 ### 3. Build the ROS 2 workspace
 
-From a shell **inside** the container (`./docker-attach.sh` if needed):
+From a shell **inside** the container:
 
 ```bash
 cd ~/workspace
@@ -48,7 +188,7 @@ build_workspace
 
 ### 4. Calibrate the board (one-time)
 
-With the RealSense driver publishing **`/camera/color/image_raw`** (same topic as in `vision_config.yaml`):
+With the RealSense publishing **`/camera/color/image_raw`** (same topic as in `vision_config.yaml`):
 
 ```bash
 ros2 run xiangqi_vision calibration_tool
@@ -56,34 +196,34 @@ ros2 run xiangqi_vision calibration_tool
 
 Follow the on-screen steps: set **`grid_spacing_mm`** to match your printed mat (from `docs/board_geometry_A2.yaml` or `docs/board_geometry_A3.yaml` after running `tools/generate_board_svg.py`), capture ArUco with **SPACE**, then teach in the four board corners on the pendant.
 
-Calibration is written to **`/home/rosuser/workspace/config/board_calibration.yaml`** (i.e. `workspace/config/board_calibration.yaml` on the host). That path must match **`calibration_file`** in `vision_config.yaml`. The directory is created automatically on first save.
+Calibration is written to **`/home/rosuser/workspace/config/board_calibration.yaml`**. That path must match **`calibration_file`** in `vision_config.yaml`. The directory is created automatically on first save.
 
 ### 5. Train / place the YOLOv8 model
 
-Place the trained `.pt` file (e.g. `xiangqi_kaggle_v1_best.pt` from Kaggle) at:
+Place the trained `.pt` file (e.g. `xiangqi_kaggle_v1_best.pt`) at:
 
 ```
 /home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt
 ```
 
-Copy it into `workspace/models/` on the host so the bind-mounted workspace exposes it inside the container. The path is set in `workspace/src/xiangqi_bringup/config/vision_config.yaml` (`model_path`). For a different filename, either update that YAML or override at launch:
+Copy it into `workspace/models/` on the host so the bind-mounted workspace exposes it inside the container. The path is set in `workspace/src/xiangqi_bringup/config/vision_config.yaml` (`model_path`). For a different filename, update that YAML or override at launch:
 
 ```bash
 ros2 run xiangqi_vision vision_node --ros-args -p model_path:=/path/to/your.pt
 ```
 
-Training options: full lab pipeline in [docs/vision_training_guide.md](docs/vision_training_guide.md); Kaggle / scripted flow via [tools/kaggle_train_xiangqi_yolo.py](tools/kaggle_train_xiangqi_yolo.py) (see [docs/README.md](docs/README.md) for the tools index).
+Training: [docs/vision_training_guide.md](docs/vision_training_guide.md); scripted Kaggle flow: [tools/kaggle_train_xiangqi_yolo.py](tools/kaggle_train_xiangqi_yolo.py); tools index: [docs/README.md](docs/README.md).
 
-### 5b. Verify vision on hardware (after model + calibration)
+### 6. Verify vision on hardware (after model + calibration)
 
-With the system or vision stack running and the RealSense publishing:
+With the vision stack running and the RealSense publishing:
 
-- Inspect overlaid detections: topic **`/xiangqi/debug_image`** (e.g. `rqt_image_view` / RViz image).
-- If boxes flicker or confidence is wrong, tune **`confidence_threshold`** in `vision_config.yaml` (same file as `model_path`).
+- Overlaid detections: **`/xiangqi/debug_image`**
+- Tune **`confidence_threshold`** in `vision_config.yaml` if boxes flicker or scores are wrong.
 
-The node runs YOLO on the **ArUco-warped** board image; if quality is poor on the real mat but good on the training dataset, capture additional **lab** images and fine-tune (see the vision training guide).
+The node runs YOLO on the **ArUco-warped** board image. If quality on the real mat lags the dataset, capture more lab images and fine-tune (vision training guide).
 
-### 6. Start the robot drivers (as usual)
+### 7. Start the robot drivers (as usual)
 
 ```bash
 arm_drivers
@@ -91,75 +231,81 @@ arm_drivers
 moveit_config_driver
 ```
 
-### 7. Launch the Xiangqi system
+### 8. Launch the Xiangqi system
 
 ```bash
-# In a new docker terminal:
 ros2 launch xiangqi_bringup xiangqi_system.launch.py
+```
 
-# Or for simulation (no hardware; default minimax engine in sim launch):
+**Simulation** (no hardware; `xiangqi_sim.launch.py` wraps the system launch with `simulation_mode:=true` and defaults to **minimax** so a Fairy-Stockfish binary is not required):
+
+```bash
 ros2 launch xiangqi_bringup xiangqi_sim.launch.py
 ```
 
-Optional launch overrides (full system):
+Optional overrides (full system):
 
 ```bash
 ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true engine_type:=minimax difficulty:=10
 ```
 
-See `xiangqi_system.launch.py` for declared arguments (`simulation_mode`, `engine_type`, `difficulty`).
+Declared launch arguments: `simulation_mode`, `engine_type`, `difficulty` (see `xiangqi_system.launch.py`).
 
-### 8. Open the dashboard
+### 9. Open the dashboard
 
-The dashboard node listens on **port 5000** inside the container (`0.0.0.0:5000`). From another machine on the lab network, open **`http://<host-ip>:5000`** (the lab PC is often `10.234.7.84`; use `localhost` only when browsing from the same machine with port forwarding).
+The dashboard listens on **port 5000** inside the container (`0.0.0.0:5000`). From another machine on the lab network, open **`http://<host-ip>:5000`** (the lab PC is often `10.234.7.84`; use `localhost` only when browsing from the same machine with port forwarding).
 
 Click **New Game** to start. The robot (Red) moves first.
 
 ---
 
-## Documentation
+## Documentation and tools
 
 | Resource | Contents |
 |----------|----------|
-| [docs/README.md](docs/README.md) | Index of physical setup, vision/AI guides, and `tools/` scripts |
+| [docs/README.md](docs/README.md) | Index of physical setup, vision guides, and all `tools/` scripts |
 | [docs/vision_training_guide.md](docs/vision_training_guide.md) | YOLOv8 dataset layout, training, validation, ONNX export, class map |
 | [docs/board_printing_guide.md](docs/board_printing_guide.md) | Board mat SVG, printing, ArUco layout |
 | [docs/pieces_guide.md](docs/pieces_guide.md) | Piece procurement / 3D print notes |
+| [docs/assignment_rubric_checklist.md](docs/assignment_rubric_checklist.md) | Course §4.8 mapping, report checklist, rubric readiness (detail) |
+| [ur5evxlabdoc.md](ur5evxlabdoc.md) | VXLab IPs, Docker, pendant, driver commands |
+
+**`tools/`** (run on the host or any Python env with the listed dependencies; not required inside the container for normal play):
+
+| Script | Purpose |
+|--------|---------|
+| `generate_board_svg.py` | Generates `docs/board_mat_A2.svg` and `docs/board_mat_A3.svg` |
+| `kaggle_train_xiangqi_yolo.py` | One-shot YOLOv8 train (Kaggle/local), label remap, plots |
+| `kaggle_preview_detections.py` | Grid preview of detections on sample boards |
+| `capture_training_images.py` | Guided capture from the lab camera with per-setup counters |
+| `merge_datasets.py` | Merge Roboflow (or similar) base data with lab captures |
+| `inspect_predictions.py` | Visual inspection of model predictions on validation images |
 
 ---
 
-## Package Overview
+## AI engines
 
-| Package | Tier | Description |
-|---------|------|-------------|
-| `xiangqi_msgs` | – | Custom ROS 2 messages, services, actions |
-| `xiangqi_vision` | Reactive | ArUco board detection, YOLOv8n piece recognition, turn detection |
-| `xiangqi_ai` | Deliberative | Fairy-Stockfish wrapper + custom minimax engine + game manager |
-| `xiangqi_manipulation` | Reactive | MoveIt2 pick-and-place, gripper control, safety monitor |
-| `xiangqi_planner` | Sequencing | py_trees_ros Behavior Tree for move orchestration |
-| `xiangqi_dashboard` | Cross-cutting | Flask web dashboard with live board, AI analysis, controls |
-| `xiangqi_bringup` | – | Launch files and YAML configuration |
+- **Fairy-Stockfish** — UCI subprocess; variant Xiangqi; skill / depth via `game_config.yaml` and launch args.
+- **Custom minimax** — Iterative-deepening alpha-beta, pyffish for legal moves, evaluation in `evaluation.py` (material, piece-square tables, etc.).
 
-## AI Engines
+Switch with the dashboard, `SetEngine` service, or the `engine_type` launch parameter (`fairystockfish` | `minimax`).
 
-Two engines are available, switchable via the dashboard or ROS parameter:
+---
 
-- **Fairy-Stockfish** (primary): UCI-protocol professional engine with optional Xiangqi NNUE evaluation. Skill level 1-20.
-- **Custom Minimax** (second algorithm): Original implementation with iterative-deepening alpha-beta pruning, hand-crafted piece-square tables, and pyffish for legal move generation.
+## Key implementation files
 
-## Key Files
+- [`Dockerfile`](Dockerfile) — Image extension and Fairy-Stockfish build
+- [`workspace/src/xiangqi_bringup/config/`](workspace/src/xiangqi_bringup/config/) — `vision_config.yaml`, `game_config.yaml`, `manipulation_config.yaml`; template `board_calibration.yaml` (runtime file under `workspace/config/`)
+- [`workspace/src/xiangqi_vision/xiangqi_vision/board_detector.py`](workspace/src/xiangqi_vision/xiangqi_vision/board_detector.py) — ArUco + homography
+- [`workspace/src/xiangqi_vision/xiangqi_vision/piece_detector.py`](workspace/src/xiangqi_vision/xiangqi_vision/piece_detector.py) — YOLO class order (must match training labels)
+- [`workspace/src/xiangqi_ai/xiangqi_ai/minimax_engine.py`](workspace/src/xiangqi_ai/xiangqi_ai/minimax_engine.py) — Custom engine
+- [`workspace/src/xiangqi_planner/xiangqi_planner/task_planner_node.py`](workspace/src/xiangqi_planner/xiangqi_planner/task_planner_node.py) — Behavior tree runner
+- [`workspace/src/xiangqi_manipulation/xiangqi_manipulation/move_translator.py`](workspace/src/xiangqi_manipulation/xiangqi_manipulation/move_translator.py) — Grid → world poses
 
-- `Dockerfile` – Docker image extension with all dependencies
-- `workspace/src/xiangqi_bringup/config/` – Launch parameters; **`vision_config.yaml`**, **`game_config.yaml`**, **`manipulation_config.yaml`**, **`board_calibration.yaml`** (template only — runtime file is under `workspace/config/` after calibration)
-- `workspace/models/` – YOLO weights (`.pt`); not tracked in git (see `.gitignore`)
-- `workspace/src/xiangqi_vision/xiangqi_vision/board_detector.py` – ArUco + homography
-- `workspace/src/xiangqi_vision/xiangqi_vision/piece_detector.py` – YOLO class order (must match training labels)
-- `workspace/src/xiangqi_ai/xiangqi_ai/minimax_engine.py` – Custom AI engine
-- `workspace/src/xiangqi_ai/xiangqi_ai/evaluation.py` – Piece-square tables
-- `workspace/src/xiangqi_planner/xiangqi_planner/task_planner_node.py` – BT runner
+---
 
 ## References
 
-- [Star-Robot/chinese-chess-robot](https://github.com/Star-Robot/chinese-chess-robot) – YOLOv7 dataset and detection approach
-- [fairy-stockfish/Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish) – UCI engine
-- [Kibibibit/UR5e_Env](https://github.com/Kibibibit/UR5e_Env) – VXLab base Docker environment
+- [Star-Robot/chinese-chess-robot](https://github.com/Star-Robot/chinese-chess-robot) — YOLO-style dataset and detection approach
+- [fairy-stockfish/Fairy-Stockfish](https://github.com/fairy-stockfish/Fairy-Stockfish) — UCI engine
+- [Kibibibit/UR5e_Env](https://github.com/Kibibibit/UR5e_Env) — VXLab base Docker environment ([`UR5e_Env-main/`](UR5e_Env-main/) is a non-executable reference snapshot of that stack)

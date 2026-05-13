@@ -557,29 +557,38 @@ yolo detect predict \
 
 Verify that ONNX predictions match PyTorch predictions.
 
-### 7.3 Copy model into the ROS package
+### 7.3 Copy model into the workspace (bind-mounted volume)
+
+Weights are loaded from a path on the **mounted workspace** (not necessarily inside the package install tree). Typical layout:
 
 ```bash
 MODEL_SRC=runs/detect/xiangqi_v1/weights/best.pt
-MODEL_DEST=/home/rosuser/workspace/src/xiangqi_vision/models/
+MODEL_DEST=/home/rosuser/workspace/models/
 
 mkdir -p $MODEL_DEST
-cp $MODEL_SRC $MODEL_DEST/xiangqi_pieces.pt
+cp $MODEL_SRC $MODEL_DEST/xiangqi_kaggle_v1_best.pt
 
-# Also copy ONNX version
+# Optional: ONNX for CPU-only inference elsewhere
 cp runs/detect/xiangqi_v1/weights/best.onnx $MODEL_DEST/xiangqi_pieces.onnx
 ```
+
+On the host this is `UR5e_Env/workspace/models/` (or your compose bind mount). The default `vision_node` / `vision_config.yaml` entry is `xiangqi_kaggle_v1_best.pt` in that folder.
 
 ### 7.4 Update vision_config.yaml
 
 ```yaml
 # workspace/src/xiangqi_bringup/config/vision_config.yaml
-piece_detector:
-  model_path: "/home/rosuser/workspace/src/xiangqi_vision/models/xiangqi_pieces.pt"
-  confidence_threshold: 0.45
-  nms_iou_threshold: 0.45
-  device: "cpu"        # or "cuda:0" if GPU available in Docker
+vision_node:
+  ros__parameters:
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt"
+    calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
+    confidence_threshold: 0.45
+    stability_frames: 8
+    poll_rate_hz: 4.0
+    camera_topic: "/camera/color/image_raw"
 ```
+
+Rebuild or reinstall the `xiangqi_bringup` package after editing YAML so the install space picks up changes, or override parameters at launch (see root `README.md`).
 
 ---
 
@@ -608,7 +617,7 @@ Retrain if:
 Save model versions with descriptive names:
 
 ```
-models/
+workspace/models/
   xiangqi_pieces_v1_roboflow_only.pt     # Baseline: Roboflow data only
   xiangqi_pieces_v2_plus_lab.pt          # After adding lab captures
   xiangqi_pieces_v3_hard_negatives.pt    # After hard negative mining
@@ -642,7 +651,7 @@ Use `vision_config.yaml` to switch which model is loaded without code changes.
 - [ ] Datasets merged and `data.yaml` written
 - [ ] Training run completed (`epochs=100`, `mAP50 > 0.90`)
 - [ ] Validation predictions manually inspected (no systematic errors)
-- [ ] ONNX model exported
-- [ ] Model copied to `workspace/src/xiangqi_vision/models/`
-- [ ] `vision_config.yaml` updated with correct model path
+- [ ] ONNX model exported (optional)
+- [ ] Model copied to `workspace/models/` (or path referenced by `vision_config.yaml`)
+- [ ] `vision_config.yaml` updated with correct `model_path` (and rebuild / `ros2 launch` uses new install)
 - [ ] Live camera test passed (all 32 pieces detected at game start)

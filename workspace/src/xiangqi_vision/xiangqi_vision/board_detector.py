@@ -48,6 +48,9 @@ class BoardCalibration:
             'image_width': self.image_width,
             'image_height': self.image_height,
         }
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         with open(path, 'w') as f:
             yaml.dump(data, f)
 

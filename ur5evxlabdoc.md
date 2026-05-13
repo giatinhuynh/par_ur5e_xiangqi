@@ -2,6 +2,15 @@ UR5e Onboarding Guide - VXLab
 
 Virtual Experiences Laboratory, May 2024 
 
+**Errata / alignment with current UR5e_Env (verify on your clone)**  
+
+- **Driver command:** This document uses **`ur_driver`** below. The upstream [UR5e_Env README](https://github.com/Kibibibit/UR5e_Env) uses **`arm_drivers`** for UR + gripper + camera in one launch. Prefer **`arm_drivers`** unless your install still ships `ur_driver`.  
+- **Docker image tag:** `docker-compose` in UR5e_Env tags the **lab-built** image as **`ros:humble`** locally (see `docker-compose.yml`). The Xiangqi project Dockerfile extends that tag by default.  
+- **Helper aliases:** Aliases such as `build_workspace`, `arm_drivers`, and `moveit_config_driver` live under **`workspace/.helper_scripts/`** in recent trees (some older notes said `testing_scripts/`).  
+- **Xiangqi stack:** After building the extended **`ur5e_xiangqi`** image, **`docker-compose.yml` must reference that image** if you need Fairy-Stockfish / Ultralytics inside the container — see the root **`README.md`** Quick start in the `par_ur5e_xiangqi` repository.
+
+---
+
 Key configuration components: 
 
 Hardware (MAC) and IP addresses 

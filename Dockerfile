@@ -11,7 +11,9 @@
 # Place this file alongside the original UR5e_Env Dockerfile, or reference it via
 # the docker-compose.yml override.
 
-ARG BASE_IMAGE=ur5e_env:latest
+# Must match the image tag produced by ./docker-build.sh in Kibibibit/UR5e_Env.
+# Reference tree uses docker-compose.yml `image: ros:humble` (local lab image overwrites the hub name).
+ARG BASE_IMAGE=ros:humble
 FROM ${BASE_IMAGE}
 
 USER root

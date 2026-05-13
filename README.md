@@ -14,7 +14,7 @@ A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a h
 | [`tools/`](tools/) | Host-side Python helpers for board SVG generation, dataset merge, Kaggle/local YOLO training, and prediction previews (see [docs/README.md](docs/README.md)) |
 | [`docs/`](docs/) | Printing and vision guides, generated board SVGs (`board_mat_*.svg`), and geometry YAML used with `generate_board_svg.py` |
 | [`Dockerfile`](Dockerfile) | Extends the UR5e_Env image with Fairy-Stockfish, Ultralytics, pyffish, Flask dashboard stack, py_trees, OpenCV, etc. |
-| [`UR5e_Env-main/`](UR5e_Env-main/) | **Reference only** (not for running Docker or the arm): frozen snapshot of the VXLab base stack so you can inspect `par_pkg`, `onrobot_rg2_driver`, `par_moveit_config`, `par_interfaces`, and helper scripts without cloning upstream. For real use, follow **Quick start** with a proper [`UR5e_Env`](https://github.com/Kibibibit/UR5e_Env) checkout. |
+| [`UR5e_Env-main/`](UR5e_Env-main/) | **Reference only** (not for running Docker or the arm): frozen snapshot of the VXLab base stack — see [`UR5e_Env-main/REFERENCE_NOTE.md`](UR5e_Env-main/REFERENCE_NOTE.md). Inspect `par_pkg`, drivers, MoveIt, RG2; integration checklist in [`docs/ur5e_env_alignment.md`](docs/ur5e_env_alignment.md). For deployment use a proper [`UR5e_Env`](https://github.com/Kibibibit/UR5e_Env) checkout. |
 | [`ur5evxlabdoc.md`](ur5evxlabdoc.md) | Lab onboarding: dev box / arm / gripper / camera IPs, Docker steps, pendant setup |
 | [`.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md`](.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md) | Full system design (three tiers, vision/AI/manipulation, rubric “original work” items, experiment ideas). Implementation follows this plan; end-to-end integration experiments are still listed as open there. |
 | [`assignment.md`](assignment.md) | Course brief: §4.8 project definition, report rules (§6), shared/UG/PG requirements, rubric themes (§8) |
@@ -31,7 +31,7 @@ From [`ur5evxlabdoc.md`](ur5evxlabdoc.md) and the upstream [UR5e_Env README](htt
 - **OnRobot RG2** — EyeBox (typical IP `10.234.6.47`), Modbus TCP; the running lab image includes `onrobot_rg2_driver` from UR5e_Env (layout visible in the reference tree under `UR5e_Env-main/workspace/src/onrobot_rg2_driver/`)
 - **RealSense** — USB3 to the dev box
 
-Inside the **actual** UR5e_Env container, common **aliases** are defined in the upstream workspace (e.g. `workspace/.helper_scripts/helper-aliases.sh`) and include:
+Inside the **actual** UR5e_Env container, common **aliases** are defined in the upstream workspace (see **`workspace/.helper_scripts/helper-aliases.sh`** in a UR5e_Env clone; some older docs mention `testing_scripts/`) and include:
 
 - `arm_drivers` — UR arm, gripper, and camera drivers (RViz optional; `--no-rviz`, `--no-gripper` supported)
 - `moveit_config_driver` — MoveIt 2 and the lab’s custom MoveIt action server
@@ -145,24 +145,41 @@ Each package under `workspace/src/` includes its own **`README.md`** with a logi
 
 Use a real checkout of [UR5e_Env](https://github.com/Kibibibit/UR5e_Env) on the lab machine (e.g. `~/UR5e_Env` per [`ur5evxlabdoc.md`](ur5evxlabdoc.md)). The folder [`UR5e_Env-main/`](UR5e_Env-main/) in **this** repo is **reference-only**; do not use it as the Docker root for deployment.
 
-### 1. Build the Docker image
+### 1. Build the Docker images
+
+**Base (VXLab UR5e_Env)** — from [`ur5evxlabdoc.md`](ur5evxlabdoc.md):
 
 ```bash
 cd ~/UR5e_Env
 ./docker-build.sh
 ```
 
-Then extend the image with this repo’s Dockerfile (build context = UR5e_Env root):
+In the reference [`UR5e_Env-main/docker-compose.yml`](UR5e_Env-main/docker-compose.yml), the built image is tagged **`ros:humble`** (local tag; not `ur5e_env:latest`). Scripts such as [`docker-delete.sh`](UR5e_Env-main/docker-delete.sh) assume that name.
+
+**Xiangqi layer** — extend that image with this repository’s Dockerfile. The Dockerfile defaults to **`FROM ros:humble`** so it picks up your **lab-built** image (context can be any directory; there is no `COPY` from context):
 
 ```bash
-docker build -f /path/to/par_ur5e_xiangqi/Dockerfile -t ur5e_xiangqi ~/UR5e_Env
+docker build \
+  -f /path/to/par_ur5e_xiangqi/Dockerfile \
+  -t ur5e_xiangqi:latest \
+  .
 ```
 
-Use the resulting `ur5e_xiangqi` image per your lab’s start/attach scripts (same pattern as upstream UR5e_Env).
-
-Start the container, then attach (see upstream README for script details):
+If your lab renames the base image, pass an explicit base:
 
 ```bash
+docker build -f /path/to/par_ur5e_xiangqi/Dockerfile --build-arg BASE_IMAGE=your_base:tag -t ur5e_xiangqi:latest .
+```
+
+**Run the extended image** — `docker-start.sh` uses `docker-compose.yml`, which by default still points at **`image: ros:humble`**. To actually run Fairy-Stockfish, YOLO, etc., either:
+
+- Edit **`~/UR5e_Env/docker-compose.yml`**: under the `ros2` service, set **`image: ur5e_xiangqi:latest`** and **remove** (or comment out) the `build:` block so Compose does not rebuild the wrong image; then `./docker-start.sh`, **or**
+- Use whatever override your lab uses to substitute the Xiangqi image name.
+
+Then attach (from `~/UR5e_Env`, same as upstream):
+
+```bash
+cd ~/UR5e_Env
 ./docker-start.sh
 ./docker-attach.sh
 ```
@@ -263,6 +280,7 @@ Click **New Game** to start. The robot (Red) moves first.
 
 | Resource | Contents |
 |----------|----------|
+| [docs/ur5e_env_alignment.md](docs/ur5e_env_alignment.md) | UR5e_Env vs Xiangqi (bundled `UR5e_Env-main`): Compose/workspace, aliases, verified `/par_moveit` + `/rg2` interfaces |
 | [docs/README.md](docs/README.md) | Index of physical setup, vision guides, and all `tools/` scripts |
 | [docs/vision_training_guide.md](docs/vision_training_guide.md) | YOLOv8 dataset layout, training, validation, ONNX export, class map |
 | [docs/board_printing_guide.md](docs/board_printing_guide.md) | Board mat SVG, printing, ArUco layout |

@@ -15,6 +15,12 @@ Full-stack setup (Docker, calibration, weights, launch) is in the repository roo
 |---|---|
 | [vision_training_guide.md](vision_training_guide.md) | Complete step-by-step YOLOv8n training pipeline: dataset sourcing, lab image capture, labelling, training, validation, and deployment |
 
+## Lab stack integration
+
+| Document | Description |
+|---|---|
+| [ur5e_env_alignment.md](ur5e_env_alignment.md) | Verified ROS interfaces (`/par_moveit/waypoint_move`, `/rg2/*`), Compose/workspace layout, aliases, packages split vs UR5e_Env |
+
 ## Assessment (course project)
 
 | Document | Description |

@@ -67,7 +67,9 @@ graph TB
     Dashboard["dashboard_node<br/>Flask + WebSocket"]
   end
 
-  GameManager -->|"ai_move_command (JSON), game state"| TaskPlanner
+  GameManager -->|"AiMoveCommand (dispatch_id, move, is_capture, expected_fen)"| TaskPlanner
+  TaskPlanner -->|"AiCommandAck (dispatch_id, accepted)"| GameManager
+  TaskPlanner -->|"AiExecutionResult (dispatch_id, status)"| GameManager
   AIEngine -->|"GetBestMove"| GameManager
   GameManager -->|"FEN / engine params"| AIEngine
   VisionNode -->|"BoardState, human_move_detected"| GameManager

@@ -22,6 +22,7 @@ setup(
         'console_scripts': [
             'game_manager_node = xiangqi_ai.game_manager_node:main',
             'ai_engine_node = xiangqi_ai.ai_engine_node:main',
+            'simple_ai_cycle_test = xiangqi_ai.simple_ai_cycle_test:main',
         ],
     },
 )

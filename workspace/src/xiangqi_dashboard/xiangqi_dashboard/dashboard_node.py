@@ -107,6 +107,13 @@ def api_human_ready():
         pub.publish(Empty())
     return jsonify({'ok': True})
 
+@_flask_app.route('/api/resync_from_vision', methods=['POST'])
+def api_resync_from_vision():
+    pub = _ros_publishers.get('resync')
+    if pub:
+        pub.publish(Empty())
+    return jsonify({'ok': True})
+
 
 @_flask_app.route('/api/set_engine', methods=['POST'])
 def api_set_engine():
@@ -152,6 +159,7 @@ class DashboardNode(Node):
         _ros_publishers['new_game'] = self.create_publisher(Empty, '/xiangqi/new_game', 10)
         _ros_publishers['estop'] = self.create_publisher(Bool, '/xiangqi/emergency_stop', 10)
         _ros_publishers['human_ready'] = self.create_publisher(Empty, '/xiangqi/human_ready', 10)
+        _ros_publishers['resync'] = self.create_publisher(Empty, '/xiangqi/resync_from_vision', 10)
         _ros_publishers['set_engine_cli'] = self.create_client(SetEngine, 'set_engine')
 
         # Start Flask in a background thread

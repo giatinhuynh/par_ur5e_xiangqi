@@ -7,7 +7,6 @@ Publishes GameStatus and MoveHistory for the dashboard and planner.
 """
 
 from __future__ import annotations
-import time
 from enum import Enum, auto
 
 import rclpy
@@ -16,6 +15,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import Bool, Empty, Header, String
 
 from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory
+from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck, AiExecutionResult
 from xiangqi_msgs.srv import GetBestMove, GetBoardState, SetEngine
 
 try:
@@ -75,17 +75,38 @@ class GameManagerNode(Node):
             Empty, '/xiangqi/new_game', self._new_game_cb, 10,
             callback_group=cb_group
         )
-        # Confirmation from task_planner BT that the robot physically finished a move
-        self._robot_done_sub = self.create_subscription(
-            Bool, '/xiangqi/robot_move_complete', self._robot_move_complete_cb, 10,
-            callback_group=cb_group
+        self._resync_sub = self.create_subscription(
+            Empty,
+            '/xiangqi/resync_from_vision',
+            self._resync_from_vision_cb,
+            10,
+            callback_group=cb_group,
+        )
+        # Planner execution feedback (ID-scoped JSON: status + dispatch_id)
+        self._ai_exec_result_sub = self.create_subscription(
+            AiExecutionResult,
+            '/xiangqi/ai_execution_result',
+            self._ai_execution_result_cb,
+            10,
+            callback_group=cb_group,
+        )
+        self._ai_cmd_ack_sub = self.create_subscription(
+            AiCommandAck,
+            '/xiangqi/ai_command_ack',
+            self._ai_command_ack_cb,
+            10,
+            callback_group=cb_group,
+        )
+        self._estop_sub = self.create_subscription(
+            Bool, '/xiangqi/estop', self._estop_cb, 10, callback_group=cb_group
         )
 
         # Publishers
         self._game_status_pub = self.create_publisher(GameStatus, '/xiangqi/game_status', 10)
         self._move_history_pub = self.create_publisher(MoveHistory, '/xiangqi/move_history', 10)
         self._start_watching_pub = self.create_publisher(Bool, '/xiangqi/start_watching', 10)
-        self._execute_move_pub = self.create_publisher(String, '/xiangqi/execute_move', 10)
+        # Single atomic dispatch (move + capture + expected FEN + id) for the planner
+        self._ai_move_command_pub = self.create_publisher(AiMoveCommand, '/xiangqi/ai_move_command', 10)
         self._illegal_move_pub = self.create_publisher(String, '/xiangqi/illegal_move_alert', 10)
 
         # Service clients
@@ -101,6 +122,25 @@ class GameManagerNode(Node):
 
         self._latest_board_state: BoardState | None = None
         self._pending_human_move: str | None = None
+
+        # AI move bookkeeping — apply to FEN only after ai_execution_result=robot_move_complete
+        self._pending_ai_move: str | None = None
+        self._pending_ai_eval_cp: int = 0
+        self._pending_ai_depth: int = 0
+        self._pending_ai_elapsed: float = 0.0
+        self._ai_dispatch_id: int = 0
+        self._active_dispatch_id: int | None = None
+        self._planner_ack_timer = None
+
+        # Non-blocking GetBestMove (executor stays responsive for e-stop, etc.)
+        self._ai_move_future = None
+        self._ai_rpc_timeout_timer = None
+        self._ai_service_retry_timer = None
+        self._ai_service_retry_count: int = 0
+        self._abort_ai_computation: bool = False
+        self._ai_request_token: int = 0
+        self._active_ai_request_token: int | None = None
+        self._ai_fen_at_request: str | None = None
 
         self.get_logger().info('game_manager_node started -- waiting for /xiangqi/new_game')
 
@@ -120,23 +160,182 @@ class GameManagerNode(Node):
         self._publish_status()
         self._process_human_move()
 
-    def _robot_move_complete_cb(self, msg: Bool) -> None:
-        """BT publishes True here after the robot physically executes its move."""
-        if not msg.data:
-            return
+    def _ai_execution_result_cb(self, msg: AiExecutionResult) -> None:
+        """Handle planner feedback with dispatch_id guard against stale callbacks."""
+        dispatch_id = int(msg.dispatch_id)
+        status = int(msg.status)
+
         if self._game_state != GameState.EXECUTING_MOVE:
             return
-        self.get_logger().info('Robot move execution confirmed — waiting for human')
+        if self._active_dispatch_id is None:
+            self.get_logger().warn(
+                f'Ignoring ai_execution_result id={dispatch_id}: no active dispatch'
+            )
+            return
+        if dispatch_id != self._active_dispatch_id:
+            self.get_logger().warn(
+                f'Ignoring stale ai_execution_result id={dispatch_id} '
+                f'(active={self._active_dispatch_id})'
+            )
+            return
+
+        if status == AiExecutionResult.ROBOT_MOVE_COMPLETE:
+            if self._pending_ai_move:
+                self._apply_move(
+                    self._pending_ai_move,
+                    is_ai=True,
+                    eval_cp=self._pending_ai_eval_cp,
+                    depth=self._pending_ai_depth,
+                    elapsed=self._pending_ai_elapsed,
+                )
+                self._pending_ai_move = None
+                self._active_dispatch_id = None
+                self._check_game_over()
+            else:
+                self.get_logger().error(
+                    'robot_move_complete but no pending AI move — ignoring spurious signal'
+                )
+                return
+
+            if self._game_state == GameState.GAME_OVER:
+                self.get_logger().info('Game over — robot finished last move')
+                self._publish_status()
+                return
+
+            self.get_logger().info('Robot move execution confirmed — waiting for human')
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            self._publish_status()
+            return
+
+        if status == AiExecutionResult.BOARD_VERIFY_FAILED:
+            self._discard_pending_ai_after_planner_abort(
+                'Board verification failed after robot move (FEN unchanged)',
+                'Robot move did not match vision — align pieces with the UI or use New Game',
+            )
+            return
+
+        if status == AiExecutionResult.AI_MOTION_FAILED:
+            self._discard_pending_ai_after_planner_abort(
+                'AI motion subtree failed — pending AI move discarded (FEN unchanged)',
+                'Robot could not complete the planned move — check arm/gripper/board; '
+                'UI position unchanged; use New Game if the physical board moved',
+            )
+            return
+
+        self._discard_pending_ai_after_planner_abort(
+            f'Unknown ai_execution_result status={status} — pending move discarded (FEN unchanged)',
+            f'Unexpected planner status ({status}) — pending move discarded; check logs',
+        )
+        return
+
+    def _clear_planner_ack_timer(self) -> None:
+        if self._planner_ack_timer is not None:
+            self._planner_ack_timer.cancel()
+            self._planner_ack_timer = None
+
+    def _on_planner_ack_timeout(self) -> None:
+        self._clear_planner_ack_timer()
+        if self._game_state != GameState.EXECUTING_MOVE:
+            return
+        if self._active_dispatch_id is None:
+            return
+        # Planner never acked the command - abandon this pending move
+        self._discard_pending_ai_after_planner_abort(
+            f'Planner did not ack ai_move_command id={self._active_dispatch_id} (timeout)',
+            'Planner did not accept AI command — move aborted; check planner logs',
+        )
+
+    def _ai_command_ack_cb(self, msg: AiCommandAck) -> None:
+        dispatch_id = int(msg.dispatch_id)
+        accepted = bool(msg.accepted)
+        reason = msg.reason
+        if self._active_dispatch_id is None or dispatch_id != self._active_dispatch_id:
+            return
+        if accepted:
+            self._clear_planner_ack_timer()
+        else:
+            self._discard_pending_ai_after_planner_abort(
+                f'Planner NACKed ai_move_command id={dispatch_id}: {reason}',
+                f'Planner rejected AI command ({reason}) — move aborted; check planner logs',
+            )
+
+    def _discard_pending_ai_after_planner_abort(self, log_msg: str, alert_text: str) -> None:
+        """Drop pending AI move without applying FEN; return to human watching."""
+        if self._game_state != GameState.EXECUTING_MOVE:
+            return
+        if not self._pending_ai_move:
+            self.get_logger().warn(f'{log_msg} — no pending AI move (ignored)')
+            return
+        self.get_logger().error(log_msg)
+        self._pending_ai_move = None
+        self._active_dispatch_id = None
+        self._clear_planner_ack_timer()
+        alert = String()
+        alert.data = alert_text
+        self._illegal_move_pub.publish(alert)
         self._game_state = GameState.WAITING_HUMAN
         self._tell_vision_to_watch(True)
         self._publish_status()
 
+    def _estop_cb(self, msg: Bool) -> None:
+        """E-stop during motion or while waiting on the AI engine."""
+        if not msg.data:
+            return
+        if self._game_state == GameState.EXECUTING_MOVE:
+            self._discard_pending_ai_after_planner_abort(
+                'E-stop asserted during robot AI move — pending move discarded (FEN unchanged)',
+                'E-stop: robot move cancelled in software — confirm physical board matches UI',
+            )
+            return
+        if self._game_state == GameState.COMPUTING_AI:
+            self._abort_ai_computation = True
+            self._cancel_ai_rpc_in_flight()
+            self._active_ai_request_token = None
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            alert = String()
+            alert.data = (
+                'E-stop during AI thinking — cancelled engine request; make a move or New Game'
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
+
+    def _recover_ai_computation_failed(self, detail: str) -> None:
+        """AI service or FEN computation failed while in COMPUTING_AI — unblock the game."""
+        self._clear_ai_rpc_timeout_timer()
+        self._clear_ai_service_retry_timer()
+        self._ai_move_future = None
+        self._active_ai_request_token = None
+        self._ai_fen_at_request = None
+        self.get_logger().error(detail)
+        alert = String()
+        alert.data = (
+            f'{detail} — make a move on the board or press New Game.'
+        )
+        self._illegal_move_pub.publish(alert)
+        if self._game_state == GameState.COMPUTING_AI:
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+        self._publish_status()
+
     def _new_game_cb(self, _: Empty) -> None:
         self.get_logger().info('New game started')
+        self._abort_ai_computation = False
+        self._cancel_ai_rpc_in_flight()
+        self._active_ai_request_token = None
+        self._ai_fen_at_request = None
+        self._ai_request_token += 1
         self._current_fen = STARTING_FEN
         self._move_history = []
         self._move_count = 0
         self._pending_human_move = None
+        self._pending_ai_move = None
+        self._active_dispatch_id = None
+        self._clear_planner_ack_timer()
+        self._ai_dispatch_id = 0
+        self._ai_service_retry_count = 0
 
         # Robot plays Red and moves first -- start with AI move
         if self._robot_is_red:
@@ -147,6 +346,62 @@ class GameManagerNode(Node):
             self._game_state = GameState.WAITING_HUMAN
             self._tell_vision_to_watch(True)
             self._publish_status()
+
+    def _resync_from_vision_cb(self, _: Empty) -> None:
+        """Force a GetBoardState scan and adopt the returned FEN as authoritative."""
+        self.get_logger().warn('Resync requested — adopting vision FEN as authoritative state')
+        self._abort_ai_computation = True
+        self._cancel_ai_rpc_in_flight()
+        self._active_dispatch_id = None
+        self._pending_ai_move = None
+        self._pending_human_move = None
+        self._clear_planner_ack_timer()
+
+        if not self._get_board_state_cli.service_is_ready():
+            alert = String()
+            alert.data = 'Resync failed: get_board_state service not available'
+            self._illegal_move_pub.publish(alert)
+            return
+
+        req = GetBoardState.Request()
+        req.force_rescan = True
+        future = self._get_board_state_cli.call_async(req)
+
+        def _done(fut):
+            try:
+                resp = fut.result()
+            except Exception as e:
+                self.get_logger().error(f'Resync GetBoardState error: {e}')
+                alert = String()
+                alert.data = f'Resync failed: {e}'
+                self._illegal_move_pub.publish(alert)
+                return
+            if resp is None or not resp.success:
+                message = getattr(resp, "message", "no response")
+                self.get_logger().error(f'Resync failed: {message}')
+                alert = String()
+                alert.data = f'Resync failed: {message}'
+                self._illegal_move_pub.publish(alert)
+                return
+            fen = resp.board_state.fen
+            if not fen:
+                self.get_logger().error('Resync failed: empty FEN from vision')
+                alert = String()
+                alert.data = 'Resync failed: empty FEN from vision'
+                self._illegal_move_pub.publish(alert)
+                return
+
+            self._current_fen = fen
+            self._move_history = []
+            self._move_count = 0
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            self._publish_status()
+            ok = String()
+            ok.data = 'Resync OK: adopted vision FEN as authoritative'
+            self._illegal_move_pub.publish(ok)
+
+        future.add_done_callback(_done)
 
     # ------------------------------------------------------------------
     # Game flow
@@ -181,45 +436,169 @@ class GameManagerNode(Node):
             self._publish_status()
             self._compute_and_emit_ai_move()
 
-    def _compute_and_emit_ai_move(self) -> None:
-        """Call AI engine service and emit the move for the planner."""
-        if not self._get_best_move_cli.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error('AI engine service unavailable')
+    def _clear_ai_rpc_timeout_timer(self) -> None:
+        if self._ai_rpc_timeout_timer is not None:
+            self._ai_rpc_timeout_timer.cancel()
+            self._ai_rpc_timeout_timer = None
+
+    def _clear_ai_service_retry_timer(self) -> None:
+        if self._ai_service_retry_timer is not None:
+            self._ai_service_retry_timer.cancel()
+            self._ai_service_retry_timer = None
+
+    def _cancel_ai_rpc_in_flight(self) -> None:
+        self._clear_ai_rpc_timeout_timer()
+        self._clear_ai_service_retry_timer()
+        if self._ai_move_future is not None and not self._ai_move_future.done():
+            try:
+                self._get_best_move_cli.remove_pending_request(self._ai_move_future)
+            except (AttributeError, RuntimeError) as e:
+                self.get_logger().warn(f'Could not cancel AI request: {e}')
+        self._ai_move_future = None
+        self._active_ai_request_token = None
+        self._ai_fen_at_request = None
+
+    def _ai_service_retry_tick(self) -> None:
+        self._clear_ai_service_retry_timer()
+        if self._game_state != GameState.COMPUTING_AI:
+            self._ai_service_retry_count = 0
+            return
+        self._compute_and_emit_ai_move()
+
+    def _schedule_ai_service_retry(self) -> None:
+        if self._ai_service_retry_timer is not None:
+            return
+        self._ai_service_retry_count += 1
+        if self._ai_service_retry_count > 60:
+            self._ai_service_retry_count = 0
+            self._recover_ai_computation_failed(
+                'AI engine service unavailable (timeout waiting for server)'
+            )
+            return
+        self._ai_service_retry_timer = self.create_timer(0.5, self._ai_service_retry_tick)
+
+    def _on_ai_rpc_timeout(self) -> None:
+        self._clear_ai_rpc_timeout_timer()
+        self._active_ai_request_token = None
+        fut = self._ai_move_future
+        self._ai_move_future = None
+        if fut is not None and not fut.done():
+            try:
+                self._get_best_move_cli.remove_pending_request(fut)
+            except (AttributeError, RuntimeError) as e:
+                self.get_logger().warn(f'AI RPC timeout remove_pending_request: {e}')
+        if (
+            self._game_state == GameState.COMPUTING_AI
+            and not self._abort_ai_computation
+        ):
+            self._recover_ai_computation_failed('AI engine call timed out')
+
+    def _on_get_best_move_done(self, future, token: int) -> None:
+        self._clear_ai_rpc_timeout_timer()
+        if self._ai_move_future is future:
+            self._ai_move_future = None
+
+        if self._active_ai_request_token is None or token != self._active_ai_request_token:
             return
 
+        if self._abort_ai_computation:
+            self._abort_ai_computation = False
+            return
+        if self._game_state != GameState.COMPUTING_AI:
+            return
+
+        try:
+            resp = future.result()
+        except Exception as e:
+            self._recover_ai_computation_failed(f'AI service error: {e}')
+            return
+
+        if resp is None or not resp.success:
+            self._recover_ai_computation_failed('AI engine returned no move')
+            return
+
+        ai_move = resp.best_move
+        self.get_logger().info(
+            f'AI move: {ai_move} (depth={resp.depth_reached}, eval={resp.evaluation_cp}cp)'
+        )
+
+        fen_before_ai = self._ai_fen_at_request or self._current_fen
+        is_capture = self._is_capture_move(fen_before_ai, ai_move)
+
+        try:
+            expected_fen = sf.get_fen(VARIANT, fen_before_ai, [ai_move])
+        except Exception as e:
+            self._recover_ai_computation_failed(
+                f'Could not compute post-move FEN for {ai_move}: {e}'
+            )
+            return
+
+        self._ai_dispatch_id += 1
+        dispatch_id = self._ai_dispatch_id
+
+        self._pending_ai_move = ai_move
+        self._pending_ai_eval_cp = resp.evaluation_cp
+        self._pending_ai_depth = resp.depth_reached
+        self._pending_ai_elapsed = resp.thinking_time_sec
+        self._active_dispatch_id = dispatch_id
+
+        cmd = AiMoveCommand()
+        cmd.dispatch_id = dispatch_id
+        cmd.move = ai_move
+        cmd.is_capture = bool(is_capture)
+        cmd.expected_fen = expected_fen
+        self._ai_move_command_pub.publish(cmd)
+
+        self._game_state = GameState.EXECUTING_MOVE
+        self._publish_status()
+
+        self._active_dispatch_id = dispatch_id
+        self._clear_planner_ack_timer()
+        # Planner must ack the command quickly, or we abandon to avoid deadlock
+        self._planner_ack_timer = self.create_timer(2.0, self._on_planner_ack_timeout)
+
+    def _compute_and_emit_ai_move(self) -> None:
+        """Start async GetBestMove so the executor can still process e-stop and other I/O."""
+        if self._game_state != GameState.COMPUTING_AI:
+            return
+        if self._ai_move_future is not None and not self._ai_move_future.done():
+            self.get_logger().warn('GetBestMove request already in flight')
+            return
+
+        self._clear_ai_service_retry_timer()
+
+        if not self._get_best_move_cli.service_is_ready():
+            self._schedule_ai_service_retry()
+            return
+
+        self._ai_service_retry_count = 0
+
         req = GetBestMove.Request()
-        req.fen = self._current_fen
+        self._ai_fen_at_request = self._current_fen
+        req.fen = self._ai_fen_at_request
         req.depth = self._ai_depth
         req.time_limit = self._ai_time_limit
         req.engine_type = self._engine_type
 
-        future = self._get_best_move_cli.call_async(req)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=self._ai_time_limit + 5.0)
+        self._ai_request_token += 1
+        token = self._ai_request_token
+        self._active_ai_request_token = token
+        self._ai_move_future = self._get_best_move_cli.call_async(req)
+        self._ai_move_future.add_done_callback(lambda fut: self._on_get_best_move_done(fut, token))
 
-        if future.result() is None or not future.result().success:
-            self.get_logger().error('AI engine returned no move')
-            return
-
-        resp = future.result()
-        ai_move = resp.best_move
-        self.get_logger().info(f'AI move: {ai_move} (depth={resp.depth_reached}, eval={resp.evaluation_cp}cp)')
-
-        self._apply_move(ai_move, is_ai=True, eval_cp=resp.evaluation_cp,
-                         depth=resp.depth_reached, elapsed=resp.thinking_time_sec)
-        self._check_game_over()
-
-        if self._game_state != GameState.GAME_OVER:
-            # Tell planner to execute this move
-            self._game_state = GameState.EXECUTING_MOVE
-            self._publish_status()
-            msg = String()
-            msg.data = ai_move
-            self._execute_move_pub.publish(msg)
+        timeout_sec = float(self._ai_time_limit) + 15.0
+        self._ai_rpc_timeout_timer = self.create_timer(timeout_sec, self._on_ai_rpc_timeout)
 
     def _apply_move(self, move: str, is_ai: bool,
                     eval_cp: int = 0, depth: int = 0, elapsed: float = 0.0) -> None:
         """Apply a validated move to the game state."""
         try:
+            if not PYFFISH_OK:
+                raise RuntimeError('pyffish unavailable')
+            fen_before = self._current_fen
+            side_before = fen_before.split()[1] if fen_before else 'w'
+            is_red_move = 'w' in side_before
+
             self._current_fen = sf.get_fen(VARIANT, self._current_fen, [move])
             self._move_history.append(move)
             self._move_count += 1
@@ -228,7 +607,7 @@ class GameManagerNode(Node):
             hist_msg.header = Header()
             hist_msg.header.stamp = self.get_clock().now().to_msg()
             hist_msg.move = move
-            hist_msg.is_red_move = 'w' not in self._current_fen.split()[1]  # Already applied
+            hist_msg.is_red_move = is_red_move
             hist_msg.thinking_time_sec = elapsed
             hist_msg.search_depth = depth
             hist_msg.evaluation_cp = eval_cp
@@ -270,6 +649,28 @@ class GameManagerNode(Node):
         msg = Bool()
         msg.data = watch
         self._start_watching_pub.publish(msg)
+
+    @staticmethod
+    def _is_capture_move(fen: str, move: str) -> bool:
+        """True if destination square holds an opponent piece before this move (coordinate notation)."""
+        if not PYFFISH_OK or not move or len(move) < 4:
+            return False
+        try:
+            to_file = ord(move[2].lower()) - ord('a')
+            to_rank = int(move[3])
+            if not (0 <= to_file < 9 and 0 <= to_rank < 10):
+                return False
+            idx = to_rank * 9 + to_file
+            grid = GameManagerNode._fen_to_grid(fen)
+            occupant = grid[idx]
+            if occupant == 0:
+                return False
+            is_red_turn = 'w' in fen.split()[1]
+            if is_red_turn:
+                return occupant < 0
+            return occupant > 0
+        except (IndexError, ValueError, AttributeError):
+            return False
 
     def _publish_status(self) -> None:
         msg = GameStatus()

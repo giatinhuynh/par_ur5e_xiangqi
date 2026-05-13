@@ -201,6 +201,12 @@ document.getElementById('btn-human-ready').addEventListener('click', () => {
   fetch('/api/human_ready', { method: 'POST' });
 });
 
+document.getElementById('btn-resync').addEventListener('click', () => {
+  if (confirm('Resync UI/game state from vision? This overwrites the game manager FEN.')) {
+    fetch('/api/resync_from_vision', { method: 'POST' });
+  }
+});
+
 let estopActive = false;
 document.getElementById('btn-estop').addEventListener('click', () => {
   estopActive = !estopActive;

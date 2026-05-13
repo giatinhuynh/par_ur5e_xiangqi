@@ -9,23 +9,39 @@ Xiangqi coordinate notation (coordinate-style):
 """
 
 from __future__ import annotations
+from typing import Optional, Tuple
+
 import numpy as np
 from geometry_msgs.msg import Pose, Point, Quaternion
-from typing import Tuple, Optional
+from dataclasses import dataclass
+import yaml
 
 
+@dataclass
 class BoardCalibration:
-    """Lightweight local reference to calibration data needed by MoveTranslator.
-    The full implementation lives in xiangqi_vision.board_detector.BoardCalibration;
-    this mirrors only what the manipulation layer needs."""
-    def __init__(self):
-        self.homography = None
-        self.board_to_base_tf = None
-        self.grid_spacing_mm: float = 45.0
-        self.board_origin_mm = (0.0, 0.0)
+    """Calibration data for mapping grid indices to base_link (same YAML as vision)."""
 
-    def grid_to_world(self, file_idx: int, rank_idx: int):
-        import numpy as np
+    homography: Optional[object] = None
+    board_to_base_tf: Optional[np.ndarray] = None
+    grid_spacing_mm: float = 45.0
+    board_origin_mm: Tuple[float, float] = (0.0, 0.0)
+
+    @classmethod
+    def load(cls, path: str) -> 'BoardCalibration':
+        """Load from the same `board_calibration.yaml` written by calibration_tool / vision."""
+        with open(path, 'r') as f:
+            data = yaml.safe_load(f)
+        cal = cls()
+        if data.get('homography'):
+            cal.homography = np.array(data['homography'])
+        if data.get('board_to_base_tf'):
+            cal.board_to_base_tf = np.array(data['board_to_base_tf'])
+        cal.grid_spacing_mm = float(data.get('grid_spacing_mm', 45.0))
+        bo = data.get('board_origin_mm', [0.0, 0.0])
+        cal.board_origin_mm = (float(bo[0]), float(bo[1]))
+        return cal
+
+    def grid_to_world(self, file_idx: int, rank_idx: int) -> np.ndarray:
         if self.board_to_base_tf is None:
             raise RuntimeError('board_to_base_tf not set -- run calibration first')
         spacing_m = self.grid_spacing_mm / 1000.0

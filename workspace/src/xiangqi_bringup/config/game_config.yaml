@@ -2,7 +2,7 @@
 game_manager_node:
   ros__parameters:
     engine_type: "fairystockfish"    # "fairystockfish" | "minimax"
-    robot_plays_red: true            # Robot is Red (moves first)
+    # robot_plays_red: see robot_side.yaml (single source with task_planner_node)
     ai_time_limit: 5.0               # Seconds per AI move
     ai_depth: 0                      # 0 = use time limit instead
 

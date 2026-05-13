@@ -90,6 +90,10 @@ def generate_launch_description():
             package='xiangqi_planner',
             executable='task_planner_node',
             name='task_planner_node',
+            parameters=[
+                get_config('planner_config.yaml'),
+                get_config('robot_side.yaml'),
+            ],
             output='screen',
         ),
 
@@ -110,6 +114,7 @@ def generate_launch_description():
             name='game_manager_node',
             parameters=[
                 get_config('game_config.yaml'),
+                get_config('robot_side.yaml'),
                 {'engine_type': engine},
             ],
             output='screen',

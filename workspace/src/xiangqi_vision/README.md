@@ -2,6 +2,8 @@
 
 **Tier 1 (reactive) perception**: board geometry, piece classification, human turn detection, and calibration tooling.
 
+Important integration note: vision does not command arm motion by itself. In the current system, scan timing is coordinated by planner/game-manager so the wrist camera is moved to a top-down **scan pose** before key scans/watch phases. The scan-pose service in manipulation derives board-centred x/y from `board_calibration.yaml` when available, with parameter fallback if calibration is missing.
+
 ---
 
 ## How does vision “know” the board?
@@ -52,6 +54,8 @@ If YOLO is missing, the node can still publish a grid of zeros after a successfu
 
 Separate from “where is the board”: **`TurnDetector`** compares successive **grids** after the game manager sets **`/xiangqi/start_watching`**. It waits for a change from the reference grid, then requires the new grid to stay **stable** for **`stability_frames`** ticks (~stability_frames / poll_rate seconds) so a hand hovering over the board does not trigger a false “move done”. **`/xiangqi/human_ready`** bypasses that for demos.
 
+With a wrist camera, the manager requests `/xiangqi/move_to_scan_pose` before publishing `/xiangqi/start_watching` so turn detection runs from a consistent top-down viewpoint. If scan-pose motion fails or is unavailable, watching still starts (best-effort fallback), but detection robustness may degrade.
+
 ---
 
 ## Game board vs robot: is the structure “correct”?
@@ -94,6 +98,8 @@ If any of these drift, you can still have **legal moves in software** while the 
    - Publish **`BoardState`** on `/xiangqi/board_state` and debug BGR on `/xiangqi/debug_image`.
 4. **Turn detection** — `TurnDetector.update` after each new grid (see above).
 5. **`GetBoardState`** (`get_board_state`) — returns latest cached state or forces a fresh `_process_image` when `force_rescan` is true.
+
+In the full stack, move verification is also scan-pose gated: the planner runs `GoToScanPose` (best-effort) before calling board verification, so `GetBoardState(force_rescan=true)` is requested after arm reposition whenever possible.
 
 If calibration or model files are missing, the node logs warnings; without ArUco or YOLO, perception degrades accordingly.
 

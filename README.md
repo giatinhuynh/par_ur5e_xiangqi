@@ -45,6 +45,8 @@ Inside the **actual** UR5e_Env container, common **aliases** are defined in the 
 
 Three-tier layout (deliberative / sequencing / reactive) with an explicit ROS 2 graph. *Move translation* (grid → `base_link` poses) lives in [`move_translator.py`](workspace/src/xiangqi_manipulation/xiangqi_manipulation/move_translator.py) and is invoked from the behaviour tree, not as its own node.
 
+For wrist-camera setups (RealSense on the end-effector), board scans are now **scan-pose gated**: the planner runs `GoToScanPose` before board verification, and the game manager requests `/xiangqi/move_to_scan_pose` before enabling human-turn watching. The scan pose is derived from `board_calibration.yaml` board centre when calibration is available, with parameter fallback if not.
+
 ```mermaid
 graph TB
   subgraph deliberative [Tier 3 Deliberative]
@@ -70,6 +72,8 @@ graph TB
   GameManager -->|"AiMoveCommand (dispatch_id, move, is_capture, expected_fen)"| TaskPlanner
   TaskPlanner -->|"AiCommandAck (dispatch_id, accepted)"| GameManager
   TaskPlanner -->|"AiExecutionResult (dispatch_id, status)"| GameManager
+  GameManager -->|"Trigger /xiangqi/move_to_scan_pose before start_watching"| ManipNode
+  TaskPlanner -->|"GoToScanPose (best-effort) before VerifyBoardState"| ManipNode
   AIEngine -->|"GetBestMove"| GameManager
   GameManager -->|"FEN / engine params"| AIEngine
   VisionNode -->|"BoardState, human_move_detected"| GameManager

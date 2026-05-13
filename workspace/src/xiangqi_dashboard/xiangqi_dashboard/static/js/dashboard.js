@@ -151,8 +151,19 @@ socket.on('state_update', (state) => {
 
   // Turn indicator
   const turnEl = document.getElementById('turn-indicator');
-  turnEl.textContent = state.is_red_turn ? 'Red to move' : 'Black to move';
-  turnEl.className = 'turn-indicator ' + (state.is_red_turn ? 'turn-red' : 'turn-black');
+  if (state.game_result && state.game_result !== 'ongoing') {
+    const reason = state.game_result_reason || '';
+    let label = '';
+    if (state.game_result === 'red_wins') label = 'Red wins';
+    else if (state.game_result === 'black_wins') label = 'Black wins';
+    else if (state.game_result === 'draw') label = 'Draw';
+    else label = 'Game over';
+    turnEl.textContent = reason ? `${label} (${reason})` : label;
+    turnEl.className = 'turn-indicator turn-over';
+  } else {
+    turnEl.textContent = state.is_red_turn ? 'Red to move' : 'Black to move';
+    turnEl.className = 'turn-indicator ' + (state.is_red_turn ? 'turn-red' : 'turn-black');
+  }
 
   // Confidence
   document.getElementById('confidence').textContent =
@@ -188,6 +199,18 @@ socket.on('state_update', (state) => {
 
   // Status table
   document.getElementById('st-game-state').textContent = state.game_status || '--';
+  if (state.game_result && state.game_result !== 'ongoing') {
+    const reason = state.game_result_reason || '';
+    let label = '';
+    if (state.game_result === 'red_wins') label = 'Red wins';
+    else if (state.game_result === 'black_wins') label = 'Black wins';
+    else if (state.game_result === 'draw') label = 'Draw';
+    else label = 'Game over';
+    document.getElementById('st-game-result').textContent =
+      reason ? `${label} (${reason})` : label;
+  } else {
+    document.getElementById('st-game-result').textContent = '--';
+  }
   document.getElementById('st-move-count').textContent = state.move_count ?? '--';
   document.getElementById('st-gripper').textContent = state.gripper_active ? 'Gripping (RG2 closed)' : 'Idle';
   const estopCell = document.getElementById('st-estop');

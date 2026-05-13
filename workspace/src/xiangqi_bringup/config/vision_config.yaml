@@ -1,7 +1,7 @@
 # vision_config.yaml: Vision node and board calibration parameters
 vision_node:
   ros__parameters:
-    model_path: "/home/rosuser/workspace/models/xiangqi_yolov8n.pt"
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt"
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     confidence_threshold: 0.5
     stability_frames: 8           # Frames to confirm a stable board state (~2s at 4Hz)

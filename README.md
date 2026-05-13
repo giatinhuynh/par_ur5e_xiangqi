@@ -47,10 +47,11 @@ Follow the on-screen instructions to capture the ArUco markers and record TCP po
 
 ### 5. Train/place the YOLOv8 model
 
-Download and fine-tune the model (see `workspace/src/xiangqi_vision/README_training.md`), then place the `.pt` file at:
+Place the trained `.pt` file (e.g. `xiangqi_kaggle_v1_best.pt` from Kaggle) at:
 ```
-/home/rosuser/workspace/models/xiangqi_yolov8n.pt
+/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt
 ```
+(`vision_config.yaml` points `model_path` here; copy into `workspace/models/` on the host so the bind-mounted workspace exposes it.)
 
 ### 6. Start the robot drivers (as usual)
 

@@ -36,7 +36,7 @@ class VisionNode(Node):
         super().__init__('vision_node')
 
         # --- Parameters ---
-        self.declare_parameter('model_path', '/home/rosuser/workspace/models/xiangqi_yolov8n.pt')
+        self.declare_parameter('model_path', '/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt')
         self.declare_parameter('calibration_file', '/home/rosuser/workspace/config/board_calibration.yaml')
         self.declare_parameter('confidence_threshold', 0.5)
         self.declare_parameter('stability_frames', 8)

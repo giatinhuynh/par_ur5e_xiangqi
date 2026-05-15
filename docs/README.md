@@ -2,6 +2,8 @@
 
 Full-stack setup (Docker, calibration, weights, launch) is in the repository root **[README.md](../README.md)**.
 
+**Simulation (no robot):** step-by-step setup and dashboard instructions in **[README.md §8b](../README.md#8b-simulation-mode-setup-and-instructions)**; background and troubleshooting in **[sim_mode.md](sim_mode.md)**.
+
 ## Physical Setup
 
 | Document | Description |
@@ -13,6 +15,7 @@ Full-stack setup (Docker, calibration, weights, launch) is in the repository roo
 
 | Document | Description |
 |---|---|
+| [sim_mode.md](sim_mode.md) | Simulation vs hardware, ROS behaviour, config, verification scripts, troubleshooting |
 | [vision_training_guide.md](vision_training_guide.md) | Complete step-by-step YOLOv8n training pipeline: dataset sourcing, lab image capture, labelling, training, validation, and deployment |
 
 ## Lab stack integration

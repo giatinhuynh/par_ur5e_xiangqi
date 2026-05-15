@@ -262,79 +262,141 @@ moveit_config_driver
 ros2 launch xiangqi_bringup xiangqi_system.launch.py
 ```
 
-### 8b. Simulation mode (no robot — recommended for AI / dashboard testing)
+### 8b. Simulation mode (setup and instructions)
 
-Use this when you want to test **game rules**, **AI vs AI**, **Stockfish vs Minimax**, and the **web dashboard** without the UR5e, RealSense, MoveIt, or gripper.
+Use simulation to test **Xiangqi rules**, **Minimax / Fairy-Stockfish**, **AI vs AI**, and the **web dashboard** with **no UR5e, camera, MoveIt, or gripper**. Background (architecture, config tables, extended troubleshooting): **[docs/sim_mode.md](docs/sim_mode.md)**.
 
-#### What simulation does differently
+**Do not run** `arm_drivers` or `moveit_config_driver` for simulation.
 
-| Aspect | Simulation (`simulation_mode:=true`) | Hardware (lab) |
-|--------|--------------------------------------|----------------|
-| **Board state** | Maintained in `game_manager` from **pyffish** (logical FEN + grid) | From **vision** (camera + YOLO + calibration) |
-| **Human moves** | Click pieces on the **dashboard** board (AI vs Human), or both sides AI | Physical moves on the mat; vision infers when you finish |
-| **Robot moves** | Applied **instantly** in software (no planner / arm) | `task_planner` → `PickAndPlace` → MoveIt + RG2 |
-| **Drivers** | Do **not** run `arm_drivers` or `moveit_config_driver` | Required before `xiangqi_system.launch.py` |
-| **Vision node** | Still launched; uses `vision_config_sim.yaml` (YOLO optional) | `vision_config.yaml` + calibration + weights required |
-| **AI vs AI** | Supported from dashboard | Ignored (hardware is human vs robot only) |
-| **Think time** | Capped by `sim_ai_time_limit` (default **3 s** in `game_config.yaml`) | Full `ai_time_limit` (default 5 s) |
+#### Sim vs hardware (summary)
 
-The same ROS nodes start in both modes so topics and the dashboard stay compatible; only behaviour inside `game_manager`, the planner path, and dashboard options change.
+| | Simulation | Hardware (§7–8 above) |
+|---|------------|------------------------|
+| Board | Logical FEN (pyffish) + dashboard grid | Camera + YOLO + calibration |
+| Your moves | Click on dashboard (AI vs Human) | Move pieces on the mat |
+| Robot moves | Instant in software | Arm picks and places pieces |
+| AI vs AI | Yes | No (human vs robot only) |
+| Think time | Up to **3 s** per move (`sim_ai_time_limit`) | Up to **5 s** (`ai_time_limit`) |
 
-#### Quick start with Docker (WSL / home PC)
+---
 
-Build the extended image once (includes **Fairy-Stockfish** and **pyffish** built from the same source — required for Stockfish moves to match legal-move checks):
+#### Prerequisites
+
+- **Docker** (Docker Desktop + WSL2 on Windows, or Linux).
+- A ROS 2 Humble base image for the first build. Default: **`ros:humble`** (from your lab UR5e_Env build) or the image named in your lab `docker-compose.yml`.
+- This repository cloned on the host.
+- Host port **5000** available (default for the helper script below).
+- YOLO weights are in the repo: `workspace/src/xiangqi_vision/models/xiangqi_kaggle_v1_best.pt` (no extra download for dashboard sim).
+
+---
+
+#### Setup — Docker (recommended for home / WSL)
+
+**Step 1 — Build the Xiangqi image (once, or after Dockerfile changes)**
+
+From the **repository root**:
 
 ```bash
 docker build -f Dockerfile --build-arg BASE_IMAGE=ros:humble -t ur5e_xiangqi:latest .
 ```
 
-Start sim + dashboard (host port **5000** → container 5000):
+This installs Fairy-Stockfish, builds **pyffish from the same source** (engine moves must match legal-move checks), Ultralytics, and the Flask dashboard. First build takes several minutes.
+
+**Step 2 — Start simulation + dashboard**
 
 ```bash
-# From repo root (Git Bash / WSL)
+# Git Bash or WSL, from repo root
 tools/wsl_docker_sim_run.sh
-# Or: tools/wsl_docker_rebuild.sh   # rebuild image then start
 ```
 
-Open **`http://127.0.0.1:5000/`**, hard-refresh (Ctrl+F5). Wait ~30–60 s for the first `colcon build` inside the container.
-
-On the dashboard:
-
-1. **Engine Setup** — choose Red/Black engine (`Minimax` / `Stockfish`), Stockfish strength **1–20**, mode **AI vs AI** or **AI vs Human**.
-2. **Start Game** — in AI vs AI, both sides play automatically; in AI vs Human, click a piece then a destination (legal squares come from pyffish).
-3. **Stop / Reset** — halts AI loops; Reset returns to the starting position.
-
-Useful checks after code changes:
+Optional custom port (4th argument):
 
 ```bash
-wsl docker logs -f xiangqi_sim_ui
-# Stockfish moves should NOT spam "not in pyffish legal set"
-python3 tools/verify_api_pyffish.py http://127.0.0.1:5000/
+tools/wsl_docker_sim_run.sh /mnt/c/Users/<you>/.../par_ur5e_xiangqi/workspace ur5e_xiangqi:latest xiangqi_sim_ui 5000
 ```
 
-#### Launch inside an existing container (lab or dev)
+Rebuild image and start:
 
 ```bash
+tools/wsl_docker_rebuild.sh
+```
+
+The script starts container `xiangqi_sim_ui`, copies `workspace/`, runs `colcon build`, and launches `xiangqi_sim.launch.py`. Allow **~30–90 s** on first start.
+
+**Step 3 — Open the dashboard**
+
+Browser: **`http://127.0.0.1:5000/`**. Hard refresh (Ctrl+F5) after code updates.
+
+**Step 4 — Stop / logs**
+
+```bash
+docker rm -f xiangqi_sim_ui
+docker logs -f xiangqi_sim_ui
+```
+
+---
+
+#### Instructions — using the dashboard
+
+1. Wait until the page loads (first-start build may take up to ~90 s).
+2. **Engine Setup**:
+   - **Red** / **Black**: `Minimax` or `Stockfish`.
+   - **Stockfish strength**: **1–20** (Level 20 = strongest).
+   - **Mode**: **AI vs AI** or **AI vs Human** (you play Red by clicking the board).
+3. Click **Start Game**.
+   - **AI vs AI**: engines alternate; use **Stop** to halt.
+   - **AI vs Human**: click your piece, then a highlighted square (legal moves from pyffish). Black is AI by default.
+4. **Reset** — starting position. **Stop** — abort AI loop.
+5. Check **Move History**, eval bar, and **Result** when the game ends.
+
+---
+
+#### Setup — inside an existing ROS container (lab)
+
+```bash
+cd ~/workspace && source install/setup.bash
 ros2 launch xiangqi_bringup xiangqi_sim.launch.py
-# Stockfish L20 + AI vs AI friendly defaults:
+```
+
+Stockfish skill 20:
+
+```bash
 ros2 launch xiangqi_bringup xiangqi_sim.launch.py engine_type:=fairystockfish difficulty:=20
 ```
 
-Equivalent:
+Equivalent: `ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true`
+
+Open **`http://<dev-box-ip>:5000`**.
+
+---
+
+#### Verify after changes
 
 ```bash
-ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true
+docker logs xiangqi_sim_ui 2>&1 | grep "not in pyffish"
+python3 tools/verify_api_pyffish.py http://127.0.0.1:5000/
 ```
 
-Launch arguments: `simulation_mode`, `engine_type`, `difficulty`, `self_play`, `robot_plays_red` (see `xiangqi_system.launch.py` / `xiangqi_sim.launch.py`).
+#### Quick troubleshooting
 
-### 9. Open the dashboard
+| Symptom | What to do |
+|---------|------------|
+| Stockfish odd; log: `not in pyffish legal set` | Rebuild `ur5e_xiangqi:latest`; restart container |
+| `AI engine error` after a winning move | Latest `game_manager` (checkmate detection); **Reset** |
+| Dashboard frozen | Ctrl+F5; check `docker logs` |
+| Port 5000 in use | `docker rm -f xiangqi_sim_ui` or change port in script |
 
-The dashboard listens on **port 5000** inside the container (`0.0.0.0:5000`). From another machine on the lab network, open **`http://<host-ip>:5000`** (the lab PC is often `10.234.7.84`; use `localhost` when browsing on the same machine or with port forwarding).
+More: **[docs/sim_mode.md](docs/sim_mode.md)**.
 
-**Hardware:** click **New Game** — the robot (Red) moves first after vision and the behaviour tree run.
+---
 
-**Simulation:** use **Start Game** on the Engine Setup panel (see §8b).
+### 9. Open the dashboard (hardware)
+
+The dashboard listens on **port 5000** (`0.0.0.0:5000`). On the lab network: **`http://<host-ip>:5000`** (lab PC often `10.234.7.84`).
+
+Click **New Game** — robot (Red) moves first after vision and the behaviour tree.
+
+For simulation, use **§8b** (**Start Game** on Engine Setup).
 
 ---
 
@@ -342,6 +404,7 @@ The dashboard listens on **port 5000** inside the container (`0.0.0.0:5000`). Fr
 
 | Resource | Contents |
 |----------|----------|
+| [docs/sim_mode.md](docs/sim_mode.md) | Simulation mode: architecture, config, launch args, troubleshooting (setup in README §8b) |
 | [docs/ur5e_env_alignment.md](docs/ur5e_env_alignment.md) | UR5e_Env vs Xiangqi (bundled `UR5e_Env-main`): Compose/workspace, aliases, verified `/par_moveit` + `/rg2` interfaces |
 | [docs/README.md](docs/README.md) | Index of physical setup, vision guides, and all `tools/` scripts |
 | [docs/vision_training_guide.md](docs/vision_training_guide.md) | YOLOv8 dataset layout, training, validation, ONNX export, class map |

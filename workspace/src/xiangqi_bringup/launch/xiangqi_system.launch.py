@@ -8,12 +8,14 @@ already be running via the VXLab aliases before this launch file is invoked.
 Usage:
   ros2 launch xiangqi_bringup xiangqi_system.launch.py
   ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true
+  ros2 launch xiangqi_bringup xiangqi_sim.launch.py self_play:=true engine_type:=fairystockfish
 """
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -37,16 +39,40 @@ def generate_launch_description():
     )
     difficulty_arg = DeclareLaunchArgument(
         'difficulty',
-        default_value='15',
-        description='Engine difficulty 1-20',
+        default_value='20',
+        description='Engine difficulty 1-20 (20 = max strength)',
+    )
+    self_play_arg = DeclareLaunchArgument(
+        'self_play',
+        default_value='false',
+        description='Both sides played by AI (bot vs bot)',
+    )
+    robot_plays_red_arg = DeclareLaunchArgument(
+        'robot_plays_red',
+        default_value='true',
+        description='Robot/AI plays Red side',
+    )
+    vision_config_arg = DeclareLaunchArgument(
+        'vision_config_file',
+        default_value='vision_config.yaml',
+        description='Vision params YAML under xiangqi_bringup/config (e.g. vision_config_sim.yaml)',
     )
 
     sim = LaunchConfiguration('simulation_mode')
     engine = LaunchConfiguration('engine_type')
     difficulty = LaunchConfiguration('difficulty')
+    self_play = LaunchConfiguration('self_play')
+    robot_plays_red = LaunchConfiguration('robot_plays_red')
+    vision_config_file = LaunchConfiguration('vision_config_file')
+
+    vision_cfg = PathJoinSubstitution([
+        FindPackageShare('xiangqi_bringup'),
+        'config',
+        vision_config_file,
+    ])
 
     return LaunchDescription([
-        sim_arg, engine_arg, difficulty_arg,
+        sim_arg, engine_arg, difficulty_arg, self_play_arg, robot_plays_red_arg, vision_config_arg,
 
         LogInfo(msg='Starting Xiangqi Robot System...'),
 
@@ -55,7 +81,7 @@ def generate_launch_description():
             package='xiangqi_vision',
             executable='vision_node',
             name='vision_node',
-            parameters=[get_config('vision_config.yaml')],
+            parameters=[vision_cfg],
             output='screen',
         ),
         Node(
@@ -93,6 +119,7 @@ def generate_launch_description():
             parameters=[
                 get_config('planner_config.yaml'),
                 get_config('robot_side.yaml'),
+                {'robot_plays_red': robot_plays_red},
             ],
             output='screen',
         ),
@@ -115,7 +142,12 @@ def generate_launch_description():
             parameters=[
                 get_config('game_config.yaml'),
                 get_config('robot_side.yaml'),
-                {'engine_type': engine},
+                {
+                    'engine_type': engine,
+                    'self_play': self_play,
+                    'robot_plays_red': robot_plays_red,
+                    'simulation_mode': sim,
+                },
             ],
             output='screen',
         ),
@@ -125,7 +157,7 @@ def generate_launch_description():
             package='xiangqi_dashboard',
             executable='dashboard_node',
             name='dashboard_node',
-            parameters=[{'port': 5000}],
+            parameters=[{'port': 5000, 'simulation_mode': sim}],
             output='screen',
         ),
     ])

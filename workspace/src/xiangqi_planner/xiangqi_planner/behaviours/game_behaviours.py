@@ -23,6 +23,15 @@ PIECE_CODES = {
 }
 
 
+def _bb_get(bb, key: str, default=None):
+    """Compatibility wrapper: py_trees Blackboard.get() may not accept a default argument."""
+    try:
+        val = bb.get(key)
+        return val if val is not None else default
+    except Exception:
+        return default
+
+
 def fen_to_grid(fen: str) -> list[int]:
     """Parse Xiangqi FEN board part to int8[90] grid (same indexing as vision / game_manager)."""
     grid = [0] * 90
@@ -58,7 +67,7 @@ class IsHumanMovePending(py_trees.behaviour.Behaviour):
         self._bb = py_trees.blackboard.Blackboard()
 
     def update(self) -> py_trees.common.Status:
-        move = self._bb.get('human_move', None)
+        move = _bb_get(self._bb, 'human_move')
         if move:
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
@@ -74,7 +83,7 @@ class IsCapture(py_trees.behaviour.Behaviour):
         self._bb = py_trees.blackboard.Blackboard()
 
     def update(self) -> py_trees.common.Status:
-        if self._bb.get('is_capture', False):
+        if _bb_get(self._bb, 'is_capture', False):
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -86,7 +95,7 @@ class IsEstopActive(py_trees.behaviour.Behaviour):
         self._bb = py_trees.blackboard.Blackboard()
 
     def update(self) -> py_trees.common.Status:
-        if self._bb.get('estop_active', False):
+        if _bb_get(self._bb, 'estop_active', False):
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.FAILURE
 
@@ -108,7 +117,7 @@ class WaitForHumanMove(py_trees.behaviour.Behaviour):
         self._bb.set('human_move_detected', False)
 
     def update(self) -> py_trees.common.Status:
-        if self._bb.get('human_move_detected', False):
+        if _bb_get(self._bb, 'human_move_detected', False):
             return py_trees.common.Status.SUCCESS
         return py_trees.common.Status.RUNNING
 
@@ -189,8 +198,8 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
         self._bb = py_trees.blackboard.Blackboard()
 
     def update(self) -> py_trees.common.Status:
-        move = self._bb.get('ai_move', None)
-        translator = self._bb.get('move_translator', None)
+        move = _bb_get(self._bb, 'ai_move')
+        translator = _bb_get(self._bb, 'move_translator')
         if not move or translator is None:
             return py_trees.common.Status.FAILURE
 
@@ -202,10 +211,12 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             self._bb.set('transit_height', 0.20)
 
             # Check if capture and set capture pick pose
-            is_capture = self._bb.get('is_capture', False)
+            is_capture = _bb_get(self._bb, 'is_capture', False)
             if is_capture:
                 self._bb.set('capture_pick_pose', place)  # The destination has the capturable piece
-                graveyard = translator.graveyard_pose(is_red_piece=not self._bb.get('robot_is_red', True))
+                graveyard = translator.graveyard_pose(
+                    is_red_piece=not _bb_get(self._bb, 'robot_is_red', True)
+                )
                 self._bb.set('graveyard_pose', graveyard)
 
             return py_trees.common.Status.SUCCESS
@@ -234,12 +245,12 @@ class FinalizeRobotMoveAfterVerify(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.SUCCESS
 
         bb = py_trees.blackboard.Blackboard()
-        dispatch_id = bb.get('current_dispatch_id', None)
+        dispatch_id = _bb_get(bb, 'current_dispatch_id')
         if dispatch_id is None:
             self._node.get_logger().error(
                 'FinalizeRobotMoveAfterVerify missing current_dispatch_id; skipping result publish'
             )
-        elif bb.get('verification_passed', False):
+        elif _bb_get(bb, 'verification_passed', False):
             msg = AiExecutionResult()
             msg.dispatch_id = int(dispatch_id)
             msg.status = AiExecutionResult.ROBOT_MOVE_COMPLETE
@@ -286,7 +297,7 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.SUCCESS
 
         bb = py_trees.blackboard.Blackboard()
-        dispatch_id = bb.get('current_dispatch_id', None)
+        dispatch_id = _bb_get(bb, 'current_dispatch_id')
         if dispatch_id is None:
             self._node.get_logger().error(
                 'AiMotionFailureFinalizer missing current_dispatch_id; skipping result publish'
@@ -349,21 +360,21 @@ class VerifyBoardState(py_trees_ros.service_clients.FromBlackboard):
             self.feedback_message = 'GetBoardState client failure or service not ready'
             return status
 
-        resp = self._bb.get('verify_response')
+        resp = _bb_get(self._bb, 'verify_response')
         if resp is None:
             resp = getattr(self, 'response', None)
         if resp is None or not resp.success:
             self.feedback_message = 'vision scan failed or no board'
             return py_trees.common.Status.FAILURE
 
-        expected_fen = self._bb.get('expected_board_fen')
+        expected_fen = _bb_get(self._bb, 'expected_board_fen')
         if not expected_fen:
             self.feedback_message = 'missing expected_board_fen on blackboard'
             return py_trees.common.Status.FAILURE
 
         observed = list(resp.board_state.grid)
         expected = fen_to_grid(expected_fen)
-        tol = int(self._bb.get('verify_grid_tolerance', 0))
+        tol = int(_bb_get(self._bb, 'verify_grid_tolerance', 0))
         mismatches = sum(1 for a, b in zip(observed, expected) if a != b)
         if mismatches <= tol:
             self._bb.set('verification_passed', True)

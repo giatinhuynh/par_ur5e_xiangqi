@@ -33,6 +33,7 @@ from xiangqi_msgs.msg import GameStatus
 from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck
 
 from xiangqi_manipulation.move_translator import BoardCalibration, MoveTranslator
+from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
 
 from .behaviours.game_behaviours import (
     AiMotionFailureFinalizer,
@@ -54,7 +55,7 @@ class TaskPlannerNode(Node):
 
         self.declare_parameter(
             'calibration_file',
-            '/home/rosuser/workspace/config/board_calibration.yaml',
+            '/home/workspace/config/board_calibration.yaml',
         )
         self.declare_parameter('robot_plays_red', True)
 
@@ -70,7 +71,10 @@ class TaskPlannerNode(Node):
         robot_red = self.get_parameter('robot_plays_red').value
         self._bb.set('robot_is_red', robot_red)
 
-        cal_path = self.get_parameter('calibration_file').value
+        cal_path = resolve_manipulation_calibration_path(
+            self.get_parameter('calibration_file').value,
+            self.get_logger(),
+        )
         self._load_move_translator(cal_path)
 
         cb_group = ReentrantCallbackGroup()
@@ -101,6 +105,14 @@ class TaskPlannerNode(Node):
         self._tick_timer = self.create_timer(0.1, self._tick_tree)
 
         self.get_logger().info('task_planner_node started (BT running at 10 Hz)')
+
+    def _bb_get(self, key: str, default=None):
+        """Compatibility wrapper: py_trees Blackboard.get() may not accept a default argument."""
+        try:
+            val = self._bb.get(key)
+            return val if val is not None else default
+        except Exception:
+            return default
 
     def _load_move_translator(self, cal_path: str) -> None:
         """Load board calibration and construct MoveTranslator for pose generation."""
@@ -133,8 +145,8 @@ class TaskPlannerNode(Node):
         is_capture = bool(msg.is_capture)
         expected_fen = msg.expected_fen
 
-        busy_move = self._bb.get('ai_move', None)
-        current_id = self._bb.get('current_dispatch_id', None)
+        busy_move = self._bb_get('ai_move')
+        current_id = self._bb_get('current_dispatch_id')
         if busy_move is not None:
             if current_id is not None and dispatch_id == current_id:
                 return
@@ -166,7 +178,7 @@ class TaskPlannerNode(Node):
 
     def _estop_cb(self, msg: Bool) -> None:
         self._bb.set('estop_active', msg.data)
-        if msg.data and self._bb.get('ai_move', None) is not None:
+        if msg.data and self._bb_get('ai_move') is not None:
             self.get_logger().warn('E-stop: clearing planner move blackboard')
             self._bb.set('ai_move', None)
             self._bb.set('is_capture', False)
@@ -180,7 +192,7 @@ class TaskPlannerNode(Node):
 
     def _build_tree(self) -> py_trees_ros.trees.BehaviourTree:
         estop_check = py_trees.decorators.Inverter(
-            IsEstopActive(), name='NotEstopped'
+            name='NotEstopped', child=IsEstopActive()
         )
 
         capture_sequence = py_trees.composites.Sequence(
@@ -195,8 +207,8 @@ class TaskPlannerNode(Node):
         )
         capture_subtree.add_children([
             py_trees.decorators.FailureIsSuccess(
-                py_trees.decorators.Inverter(IsCapture(), name='NotACapture'),
-                name='SkipCaptureIfNone'
+                name='SkipCaptureIfNone',
+                child=py_trees.decorators.Inverter(name='NotACapture', child=IsCapture()),
             ),
             capture_sequence,
         ])
@@ -211,17 +223,17 @@ class TaskPlannerNode(Node):
         # Move arm to top-down scan pose before verification; wrapped in
         # FailureIsSuccess so a transient arm failure does not abort the sequence.
         go_to_scan = py_trees.decorators.FailureIsSuccess(
-            GoToScanPose(self), name='ScanPoseBestEffort'
+            name='ScanPoseBestEffort', child=GoToScanPose(self)
         )
 
         verify = VerifyBoardState(name='VerifyBoard')
         retry_verify = py_trees.decorators.Retry(
-            verify, num_failures=3, name='RetryVerify'
+            name='RetryVerify', child=verify, num_failures=3
         )
         # Always reach finalize: on mismatch, FinalizeRobotMoveAfterVerify publishes
         # ``board_verify_failed`` instead of ``robot_move_complete``.
         verify_best_effort = py_trees.decorators.FailureIsSuccess(
-            retry_verify, name='VerifyBestEffort'
+            name='VerifyBestEffort', child=retry_verify
         )
 
         move_sequence = py_trees.composites.Sequence(
@@ -251,7 +263,7 @@ class TaskPlannerNode(Node):
         return tree
 
     def _tick_tree(self) -> None:
-        if self._bb.get('ai_move', None) is None:
+        if self._bb_get('ai_move') is None:
             return
         try:
             self._tree.tick()

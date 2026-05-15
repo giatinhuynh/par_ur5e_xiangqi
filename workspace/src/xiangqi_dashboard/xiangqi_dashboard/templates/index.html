@@ -4,79 +4,219 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Xiangqi Robot Dashboard</title>
-  <link rel="stylesheet" href="/static/css/dashboard.css" />
+  <meta name="description" content="Real-time Xiangqi robot simulation control dashboard with AI engine analysis and board visualization." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body>
-  <header>
-    <h1>Xiangqi Robot Control Dashboard</h1>
-    <div id="system-status" class="status-ok">System: Starting...</div>
+  <header id="app-header">
+    <div class="header-left">
+      <span class="logo-icon">♟</span>
+      <span class="logo-text">Xiangqi Robot</span>
+      <div id="sim-badge" class="sim-badge hidden">⚙ SIMULATION MODE</div>
+    </div>
+    <div class="header-right">
+      <div id="connection-dot" class="conn-dot disconnected" title="WebSocket connection"></div>
+      <span id="system-status-label" class="sys-label">Connecting…</span>
+    </div>
   </header>
 
-  <main>
-    <!-- Left column: board + controls -->
-    <section class="column">
-      <div class="card">
-        <h2>Board State</h2>
-        <canvas id="board-canvas" width="450" height="500"></canvas>
-        <div id="turn-indicator" class="turn-red">Red to move</div>
-        <div id="confidence">Detection confidence: --</div>
+  <div id="mode-bar">
+    <div id="mode-bar-sim" class="mode-bar-sim">
+      <span class="flow-step-num">1</span>
+      <span class="mode-label">Choose mode</span>
+      <div class="mode-toggle" id="mode-toggle">
+        <button type="button" id="btn-ai-vs-ai" class="mode-btn active" onclick="setMode('ai_vs_ai')">AI vs AI</button>
+        <button type="button" id="btn-ai-vs-human" class="mode-btn" onclick="setMode('ai_vs_human')">AI vs Human</button>
       </div>
+      <span id="mode-lock-hint" class="mode-lock-hint hidden">Locked while playing</span>
+    </div>
+    <div id="hardware-play-banner" class="hardware-play-banner hidden">
+      Human vs AI — play on the physical board; camera detects your moves
+    </div>
 
-      <div class="card">
-        <h2>Game Controls</h2>
-        <button id="btn-new-game" class="btn btn-primary">New Game</button>
-        <button id="btn-human-ready" class="btn btn-secondary">Confirm My Move (Fallback)</button>
-        <button id="btn-estop" class="btn btn-danger">Emergency Stop</button>
-        <button id="btn-resync" class="btn btn-secondary">Resync from Vision</button>
-        <div class="engine-select">
-          <label>Engine:
-            <select id="engine-select">
-              <option value="fairystockfish">Fairy-Stockfish</option>
-              <option value="minimax">Custom Minimax</option>
+    <div id="flow-banner" class="flow-banner" role="status" aria-live="polite">
+      <span class="flow-step-num">2</span>
+      <span id="flow-banner-text">Choose mode, engines (right panel), then Start Game</span>
+    </div>
+
+    <div class="header-controls">
+      <div class="ctrl-group">
+        <span class="ctrl-hint">Start (setup only)</span>
+        <button type="button" class="ctrl-btn new-game-btn" id="btn-new-game" onclick="newGame()">▶ Start Game</button>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-hint">End game → setup (no auto-start)</span>
+        <button type="button" class="ctrl-btn stop-game-btn" id="btn-stop-game" onclick="stopGame()">■ Stop</button>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-hint">Restart same mode immediately</span>
+        <button type="button" class="ctrl-btn reset-game-btn" id="btn-reset-game" onclick="resetGame()">↺ Restart</button>
+      </div>
+      <div class="ctrl-group">
+        <span class="ctrl-hint" id="estop-hint">Halt robot / AI</span>
+        <button type="button" class="ctrl-btn estop-btn" id="btn-estop" onclick="toggleEstop()">⛔ E-Stop</button>
+      </div>
+    </div>
+  </div>
+
+  <main id="main-layout">
+    <section id="board-section">
+      <div id="game-result-banner" class="game-result-banner hidden" role="alert">
+        <span id="game-result-title" class="game-result-title"></span>
+        <span id="game-result-detail" class="game-result-detail"></span>
+      </div>
+      <div id="estop-banner" class="estop-banner hidden" role="alert">
+        E-STOP active — click Release E-Stop, then New Game to continue
+      </div>
+      <div id="board-wrapper">
+        <div id="board-loading" class="board-loading hidden" aria-live="polite">
+          <div class="board-loading-inner">
+            <div class="loading-spinner" aria-hidden="true"></div>
+            <span id="board-loading-text">Starting game…</span>
+          </div>
+        </div>
+        <canvas id="board-canvas" width="480" height="533"></canvas>
+        <div id="coord-files">
+          <span>a</span><span>b</span><span>c</span><span>d</span><span>e</span>
+          <span>f</span><span>g</span><span>h</span><span>i</span>
+        </div>
+        <div id="coord-ranks-left">
+          <span>10</span><span>9</span><span>8</span><span>7</span><span>6</span>
+          <span>5</span><span>4</span><span>3</span><span>2</span><span>1</span>
+        </div>
+      </div>
+      <div id="phase-chip" class="phase-chip">Setup</div>
+      <div id="turn-indicator">
+        <div id="turn-dot" class="turn-dot red"></div>
+        <span id="turn-label">Choose mode, then New Game</span>
+        <span id="move-count-label">Move 0</span>
+      </div>
+      <div id="last-move-label" class="last-move"></div>
+    </section>
+
+    <aside id="right-panel">
+      <div class="panel" id="panel-engines">
+        <div class="panel-header">
+          <span class="panel-icon">🤖</span> Engine Setup
+          <span id="engine-setup-lock" class="engine-setup-lock hidden">Locked</span>
+        </div>
+        <p id="engine-setup-hint" class="engine-setup-hint">
+          Choose AI for each side before Start Game.
+        </p>
+        <div id="engine-config" class="engine-config-panel">
+          <div class="engine-side-row">
+            <label class="engine-pick" for="sel-red-engine">Red</label>
+            <select id="sel-red-engine" class="engine-select" onchange="onEngineChange()">
+              <option value="minimax">Minimax</option>
+              <option value="fairystockfish">Stockfish</option>
             </select>
-          </label>
-          <label>Difficulty:
-            <input type="range" id="difficulty-slider" min="1" max="20" value="15" />
-            <span id="difficulty-value">15</span>
-          </label>
-          <button id="btn-set-engine" class="btn btn-secondary">Apply</button>
+          </div>
+          <span class="engine-vs">vs</span>
+          <div class="engine-side-row">
+            <label class="engine-pick" for="sel-black-engine">Black</label>
+            <select id="sel-black-engine" class="engine-select" onchange="onEngineChange()">
+              <option value="minimax">Minimax</option>
+              <option value="fairystockfish">Stockfish</option>
+            </select>
+          </div>
         </div>
+        <div id="stockfish-difficulty-row" class="engine-difficulty-row hidden">
+          <label class="engine-difficulty-label" for="sel-stockfish-difficulty">Stockfish strength</label>
+          <div class="engine-difficulty-controls">
+            <input type="range" id="sel-stockfish-difficulty" class="engine-difficulty-slider"
+                   min="1" max="20" value="20" step="1"
+                   oninput="onDifficultyInput()" onchange="onDifficultyChange()" />
+            <span id="stockfish-difficulty-value" class="engine-difficulty-value" title="UCI Skill Level 1–20">20</span>
+          </div>
+          <p class="engine-difficulty-hint">Level 20 = strongest. Applies when either side uses Stockfish.</p>
+        </div>
+        <p id="engine-matchup-label" class="engine-matchup-label">Minimax vs Minimax</p>
       </div>
-    </section>
 
-    <!-- Right column: AI analysis + status + history -->
-    <section class="column">
-      <div class="card">
-        <h2>AI Analysis</h2>
-        <div id="ai-engine-label">Engine: --</div>
+      <div class="panel" id="panel-ai">
+        <div class="panel-header">
+          <span class="panel-icon">🧠</span> AI Analysis
+          <span id="engine-badge" class="engine-badge">--</span>
+        </div>
         <div class="eval-bar-wrapper">
-          <div id="eval-bar" class="eval-bar"></div>
+          <div id="eval-bar-red" class="eval-fill red-fill" style="width:50%"></div>
+          <div id="eval-bar-black" class="eval-fill black-fill" style="width:50%"></div>
+          <span id="eval-label" class="eval-label">0.00</span>
         </div>
-        <div id="eval-score">Evaluation: --</div>
-        <div id="search-info">Depth: -- | Nodes: -- | Time: --s</div>
-        <div id="best-move">Best move: --</div>
-        <div id="ponder-move">Ponder: --</div>
+        <p id="eval-score-hint" class="eval-score-hint">Centipawns from Red&apos;s view</p>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Evaluation</label>
+            <span id="ai-eval">-- cp</span>
+          </div>
+          <div class="info-item">
+            <label>Depth</label>
+            <span id="ai-depth">--</span>
+          </div>
+          <div class="info-item">
+            <label>Think time</label>
+            <span id="ai-time">-- s</span>
+          </div>
+          <div class="info-item">
+            <label>Best move</label>
+            <span id="ai-bestmove" class="mono">--</span>
+          </div>
+          <div class="info-item">
+            <label>Ponder</label>
+            <span id="ai-ponder" class="mono">--</span>
+          </div>
+        </div>
       </div>
 
-      <div class="card">
-        <h2>System Status</h2>
-        <table id="status-table">
-          <tr><td>Game state:</td><td id="st-game-state">--</td></tr>
-          <tr><td>Game result:</td><td id="st-game-result">--</td></tr>
-          <tr><td>Move count:</td><td id="st-move-count">--</td></tr>
-          <tr><td>Gripper:</td><td id="st-gripper">--</td></tr>
-          <tr><td>E-Stop:</td><td id="st-estop">OK</td></tr>
-        </table>
+      <div class="panel" id="panel-system">
+        <div class="panel-header"><span class="panel-icon">⚙</span> System Status</div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>Phase</label>
+            <span id="sys-phase">Setup</span>
+          </div>
+          <div class="info-item">
+            <label>Activity</label>
+            <span id="sys-game-state">--</span>
+          </div>
+          <div class="info-item info-item-wide">
+            <label>Result</label>
+            <span id="sys-game-result">Not started</span>
+          </div>
+          <div class="info-item">
+            <label>Mode</label>
+            <span id="sys-game-mode">AI vs Human</span>
+          </div>
+          <div class="info-item">
+            <label>Moves played</label>
+            <span id="sys-move-count">0</span>
+          </div>
+          <div class="info-item">
+            <label>Gripper</label>
+            <span id="sys-gripper">idle</span>
+          </div>
+          <div class="info-item">
+            <label>E-Stop</label>
+            <span id="sys-estop" class="status-ok">OK</span>
+          </div>
+        </div>
       </div>
 
-      <div class="card">
-        <h2>Move History</h2>
-        <div id="move-history-list"></div>
+      <div class="panel panel-history" id="panel-history">
+        <div class="panel-header">
+          <span class="panel-icon">📋</span> Move History
+          <span id="history-count-note" class="history-count-note"></span>
+        </div>
+        <div id="history-list" class="history-list"></div>
       </div>
-    </section>
+    </aside>
   </main>
 
-  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <div id="alert-toast" class="alert-toast hidden"></div>
+
+  <script src="/static/vendor/socket.io.min.js"></script>
   <script src="/static/js/dashboard.js"></script>
 </body>
 </html>

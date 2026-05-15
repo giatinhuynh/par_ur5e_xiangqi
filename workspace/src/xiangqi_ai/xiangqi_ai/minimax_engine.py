@@ -66,11 +66,16 @@ class MinimaxEngine:
         is_red_turn = 'w' in fen.split()[1] if len(fen.split()) > 1 else True
         moves_so_far: List[str] = []
 
+        legal = sf.legal_moves(VARIANT, fen, moves_so_far)
+        if not legal:
+            return '', '', 0, 0, 0.0
+
         best_move = ''
         best_eval = -INF
         depth_reached = 0
+        self._best_move_so_far = legal[0]
 
-        max_depth = depth if depth > 0 else 8
+        max_depth = depth if depth > 0 else 6
 
         for d in range(1, max_depth + 1):
             if self._time_up():
@@ -85,13 +90,16 @@ class MinimaxEngine:
             except TimeoutError:
                 break
 
+        if not best_move:
+            best_move = self._best_move_so_far or legal[0]
+
         elapsed = time.monotonic() - self._start_time
-        # Ponder: search what opponent might reply
         ponder = ''
-        if best_move:
+        # Ponder is optional; skip under time pressure so we always return promptly.
+        if best_move and depth > 0 and self._time_limit >= 2.0:
             try:
                 next_fen = sf.get_fen(VARIANT, fen, [best_move])
-                ponder, _ = self._root_search(next_fen, [], 2, not is_red_turn)
+                ponder, _ = self._root_search(next_fen, [], 1, not is_red_turn)
             except Exception:
                 pass
 
@@ -121,11 +129,10 @@ class MinimaxEngine:
                 raise TimeoutError
             child_fen = sf.get_fen(VARIANT, fen, moves_so_far + [move])
             val = -self._negamax(child_fen, [], depth - 1, -INF, INF, not is_red)
-            if not is_red:
-                val = -val
             if val > best_val:
                 best_val = val
                 best_move = move
+                self._best_move_so_far = move
 
         return best_move, best_val if is_red else -best_val
 
@@ -146,13 +153,14 @@ class MinimaxEngine:
         legal_moves = sf.legal_moves(VARIANT, fen, moves_so_far)
 
         # Terminal conditions
+        # Terminal conditions
         if not legal_moves:
-            if sf.is_check(VARIANT, fen, moves_so_far):
-                return -CHECKMATE_SCORE + len(moves_so_far)  # Sooner checkmate is better
+            # If no legal moves, it's either checkmate or stalemate.
+            # We check the game result to see if someone won.
+            res = sf.game_result(VARIANT, fen, moves_so_far)
+            if res in ("1-0", "0-1"):
+                return -CHECKMATE_SCORE + len(moves_so_far)
             return DRAW_SCORE  # Stalemate
-
-        if sf.is_checkmate(VARIANT, fen, moves_so_far):
-            return -CHECKMATE_SCORE
 
         if depth == 0:
             return self._quiescence(fen, moves_so_far, alpha, beta, is_red)
@@ -163,8 +171,8 @@ class MinimaxEngine:
         for move in ordered:
             if self._time_up():
                 raise TimeoutError
-            child_moves = moves_so_far + [move]
-            val = -self._negamax(fen, child_moves, depth - 1, -beta, -alpha, not is_red)
+            child_fen = sf.get_fen(VARIANT, fen, moves_so_far + [move])
+            val = -self._negamax(child_fen, [], depth - 1, -beta, -alpha, not is_red)
             best_val = max(best_val, val)
             alpha = max(alpha, val)
             if alpha >= beta:
@@ -198,8 +206,8 @@ class MinimaxEngine:
         for move in captures:
             if self._time_up():
                 raise TimeoutError
-            child_moves = moves_so_far + [move]
-            val = -self._quiescence(fen, child_moves, -beta, -alpha, not is_red)
+            child_fen = sf.get_fen(VARIANT, fen, moves_so_far + [move])
+            val = -self._quiescence(child_fen, [], -beta, -alpha, not is_red)
             if val >= beta:
                 return beta
             alpha = max(alpha, val)

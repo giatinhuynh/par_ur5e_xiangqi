@@ -1,0 +1,13 @@
+# board_calibration_sim.yaml — safe defaults when no lab/workspace calibration exists.
+# Same semantics as xiangqi_vision/config/board_calibration_sim.yaml (kept in sync for planner/manipulation).
+
+homography: null
+board_to_base_tf:
+  - [1.0, 0.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0, 0.0]
+  - [0.0, 0.0, 1.0, 0.0]
+  - [0.0, 0.0, 0.0, 1.0]
+grid_spacing_mm: 45.0
+board_origin_mm: [0.0, 0.0]
+image_width: 640
+image_height: 480

@@ -3,3 +3,24 @@
 chess_dataset/
 chinese-chess-robot-main/
 fairy-stockfish-master/
+Fairy-Stockfish-master/
+
+# ROS 2 colcon
+workspace/build/
+workspace/install/
+workspace/log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Accidental / local temp
+=1.23,
+*.tmp
+Dockerfile.wsl.tmp
+docker-compose.yml.tmp
+setup.cfg.tmp
+
+# YOLO weights (fetch via tools/fetch_yolo_weights.py)
+workspace/src/xiangqi_vision/models/*.pt

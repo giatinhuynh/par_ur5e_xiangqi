@@ -16,6 +16,7 @@
   <depend>par_interfaces</depend>       <!-- WaypointMove action + WaypointPose msg -->
   <depend>onrobot_rg2_msgs</depend>     <!-- GripperSetWidth action + GripperState msg -->
   <depend>ur_dashboard_msgs</depend>    <!-- SafetyMode msg (safety_monitor_node) -->
+  <depend>ament_index_python</depend>
 
   <export>
     <build_type>ament_python</build_type>

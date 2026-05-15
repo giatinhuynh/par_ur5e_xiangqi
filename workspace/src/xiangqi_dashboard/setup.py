@@ -14,6 +14,7 @@ setup(
         (os.path.join('share', package_name, 'templates'), glob('xiangqi_dashboard/templates/*.html')),
         (os.path.join('share', package_name, 'static/css'), glob('xiangqi_dashboard/static/css/*.css')),
         (os.path.join('share', package_name, 'static/js'), glob('xiangqi_dashboard/static/js/*.js')),
+        (os.path.join('share', package_name, 'static/vendor'), glob('xiangqi_dashboard/static/vendor/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

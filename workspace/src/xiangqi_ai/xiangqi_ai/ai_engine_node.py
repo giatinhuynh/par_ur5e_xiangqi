@@ -14,6 +14,7 @@ from std_msgs.msg import Header
 
 from .fairy_stockfish_engine import FairyStockfishEngine
 from .minimax_engine import MinimaxEngine
+from .move_resolver import eval_to_red_perspective
 
 
 class AIEngineNode(Node):
@@ -21,14 +22,22 @@ class AIEngineNode(Node):
         super().__init__('ai_engine_node')
 
         self.declare_parameter('engine_type', 'fairystockfish')  # or 'minimax'
-        self.declare_parameter('difficulty', 15)   # Fairy-Stockfish skill level 1-20
+        self.declare_parameter('difficulty', 20)   # Fairy-Stockfish skill level 1-20 (max)
         self.declare_parameter('default_depth', 5)
         self.declare_parameter('default_time_limit', 5.0)
+        self.declare_parameter('minimax_nnue_display_eval', True)
+        self.declare_parameter('nnue_eval_movetime_ms', 120)
 
         self._engine_type = self.get_parameter('engine_type').value
         self._difficulty = self.get_parameter('difficulty').value
         self._default_depth = self.get_parameter('default_depth').value
         self._default_time = self.get_parameter('default_time_limit').value
+        self._minimax_nnue_display_eval = bool(
+            self.get_parameter('minimax_nnue_display_eval').value
+        )
+        self._nnue_eval_movetime_ms = int(
+            self.get_parameter('nnue_eval_movetime_ms').value
+        )
 
         self._fairy_engine: FairyStockfishEngine | None = None
         self._minimax_engine: MinimaxEngine | None = None
@@ -69,15 +78,49 @@ class AIEngineNode(Node):
                 request.fen, depth=depth, time_limit=time_limit
             )
 
+            display_cp = int(eval_cp)
+            display_depth = depth_reached
+
+            # Minimax searches with a fast hand-crafted eval; use NNUE for displayed cp
+            if (
+                engine_type == 'minimax'
+                and self._minimax_nnue_display_eval
+            ):
+                try:
+                    if self._fairy_engine is None:
+                        self._load_engine('fairystockfish')
+                    nnue_cp, nnue_depth = self._fairy_engine.evaluate_position(
+                        request.fen,
+                        movetime_ms=self._nnue_eval_movetime_ms,
+                    )
+                    display_cp = nnue_cp
+                    display_depth = max(display_depth, nnue_depth)
+                except Exception as e:
+                    self.get_logger().warn(
+                        f'NNUE display eval unavailable, using minimax heuristic: {e}'
+                    )
+
             response.best_move = best_move
             response.ponder_move = ponder
-            response.depth_reached = depth_reached
-            response.evaluation_cp = eval_cp
+            response.depth_reached = display_depth
+            if abs(int(display_cp)) > 50_000:
+                response.evaluation_cp = 0
+            else:
+                response.evaluation_cp = eval_to_red_perspective(
+                    request.fen, display_cp
+                )
             response.thinking_time_sec = elapsed
             response.success = bool(best_move)
             response.message = 'OK' if best_move else 'No move found'
 
-            self._publish_engine_info(engine_type, depth_reached, eval_cp, elapsed, best_move, ponder)
+            self._publish_engine_info(
+                engine_type,
+                display_depth,
+                response.evaluation_cp,
+                elapsed,
+                best_move,
+                ponder,
+            )
         except Exception as e:
             response.success = False
             response.message = str(e)
@@ -89,8 +132,10 @@ class AIEngineNode(Node):
         try:
             self._load_engine(request.engine_type)
             self._engine_type = request.engine_type
-            if request.engine_type == 'fairystockfish' and self._fairy_engine:
-                self._fairy_engine.set_skill_level(request.difficulty)
+            if request.engine_type == 'fairystockfish':
+                self._difficulty = int(request.difficulty)
+                if self._fairy_engine:
+                    self._fairy_engine.set_skill_level(self._difficulty)
             response.success = True
             response.message = f'Switched to {request.engine_type}'
             self.get_logger().info(f'Engine switched to: {request.engine_type}')

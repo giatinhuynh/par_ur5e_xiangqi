@@ -29,6 +29,7 @@ from xiangqi_msgs.srv import GetBoardState
 from .board_detector import BoardDetector, BoardCalibration
 from .piece_detector import PieceDetector
 from .turn_detector import TurnDetector, TurnDetectorState
+from .weights_util import resolve_calibration_path, resolve_yolo_model_path
 
 
 class VisionNode(Node):
@@ -38,16 +39,20 @@ class VisionNode(Node):
         # --- Parameters ---
         self.declare_parameter('model_path', '/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt')
         self.declare_parameter('calibration_file', '/home/rosuser/workspace/config/board_calibration.yaml')
+        self.declare_parameter('require_yolo_weights', True)
+        self.declare_parameter('yolo_download_url', '')
         self.declare_parameter('confidence_threshold', 0.5)
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('poll_rate_hz', 3.0)
         self.declare_parameter('camera_topic', '/camera/color/image_raw')
 
-        model_path = self.get_parameter('model_path').value
-        cal_file = self.get_parameter('calibration_file').value
+        model_path_param = self.get_parameter('model_path').value
+        cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
         conf_thresh = self.get_parameter('confidence_threshold').value
         stability = self.get_parameter('stability_frames').value
         self._poll_rate = self.get_parameter('poll_rate_hz').value
+        require_yolo = bool(self.get_parameter('require_yolo_weights').value)
+        yolo_url = str(self.get_parameter('yolo_download_url').value or '')
 
         # --- Calibration ---
         self._calibration = BoardCalibration()
@@ -60,14 +65,33 @@ class VisionNode(Node):
         # --- Components ---
         self._board_detector = BoardDetector(self._calibration)
         self._piece_detector: PieceDetector | None = None
-        if os.path.exists(model_path):
+        resolved_model = resolve_yolo_model_path(
+            model_path_param,
+            param_download_url=yolo_url,
+            logger=self.get_logger(),
+        )
+        if resolved_model:
             try:
-                self._piece_detector = PieceDetector(model_path, conf_thresh)
-                self.get_logger().info(f'YOLOv8 model loaded from {model_path}')
+                self._piece_detector = PieceDetector(resolved_model, conf_thresh)
+                self.get_logger().info(f'YOLOv8 model loaded from {resolved_model}')
             except Exception as e:
                 self.get_logger().error(f'Failed to load YOLO model: {e}')
+                if require_yolo:
+                    raise RuntimeError(
+                        'require_yolo_weights is true but YOLO failed to load. '
+                        'Place a compatible .pt under xiangqi_vision/share/.../models/, '
+                        'set model_path, or set yolo_download_url / XIANGQI_YOLO_DOWNLOAD_URL.'
+                    ) from e
+        elif require_yolo:
+            raise RuntimeError(
+                'require_yolo_weights is true but no weights file was found. '
+                'Install xiangqi_kaggle_v1_best.pt into share/xiangqi_vision/models/, '
+                'point model_path at your .pt, or set yolo_download_url / XIANGQI_YOLO_DOWNLOAD_URL.'
+            )
         else:
-            self.get_logger().warn(f'Model not found at {model_path} -- detection disabled')
+            self.get_logger().warn(
+                'YOLO weights not found — piece detection disabled (require_yolo_weights:=false)'
+            )
 
         self._turn_detector = TurnDetector(stability_frames=stability)
         self._bridge = CvBridge()

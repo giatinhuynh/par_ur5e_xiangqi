@@ -48,6 +48,7 @@ from std_srvs.srv import Trigger
 
 from xiangqi_msgs.action import PickAndPlace
 from xiangqi_manipulation.move_translator import BoardCalibration
+from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
 
 try:
     from par_interfaces.action import WaypointMove
@@ -264,7 +265,10 @@ class ManipulationNode(Node):
         fallback_x = float(self.get_parameter('scan_pose_x').value)
         fallback_y = float(self.get_parameter('scan_pose_y').value)
 
-        cal_file = self.get_parameter('calibration_file').value
+        cal_file = resolve_manipulation_calibration_path(
+            self.get_parameter('calibration_file').value,
+            self.get_logger(),
+        )
         if not os.path.exists(cal_file):
             self.get_logger().info(
                 f'No calibration file at {cal_file} — using manual scan_pose_x/y params'

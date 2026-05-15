@@ -6,11 +6,12 @@ Supports xiangqi variant with optional NNUE weights.
 """
 
 from __future__ import annotations
+import os
+import queue
+import re
 import subprocess
 import threading
 import time
-import re
-import os
 from typing import Optional, Tuple
 
 FAIRY_STOCKFISH_BIN = os.environ.get('FAIRY_STOCKFISH_BIN', 'fairy-stockfish')
@@ -27,6 +28,8 @@ class FairyStockfishEngine:
         self._lock = threading.Lock()
         self._skill_level = min(max(skill_level, 1), 20)
         self._ready = False
+        self._line_queue: queue.Queue[str | None] = queue.Queue()
+        self._reader_thread: Optional[threading.Thread] = None
         self._start_engine()
 
     # ------------------------------------------------------------------
@@ -43,6 +46,10 @@ class FairyStockfishEngine:
                 text=True,
                 bufsize=1,
             )
+            self._reader_thread = threading.Thread(
+                target=self._stdout_reader_loop, daemon=True
+            )
+            self._reader_thread.start()
             self._send('uci')
             self._wait_for('uciok', timeout=10)
             self._send('setoption name UCI_Variant value xiangqi')
@@ -62,6 +69,7 @@ class FairyStockfishEngine:
                 self._proc.wait(timeout=3)
             except Exception:
                 self._proc.kill()
+        self._line_queue.put(None)
 
     def set_skill_level(self, level: int) -> None:
         self._skill_level = min(max(level, 1), 20)
@@ -72,6 +80,91 @@ class FairyStockfishEngine:
     # ------------------------------------------------------------------
     # Main interface
     # ------------------------------------------------------------------
+
+    def _parse_info_score(self, line: str, eval_cp: int) -> int:
+        m = re.search(r'score cp (-?\d+)', line)
+        if m:
+            return int(m.group(1))
+        m = re.search(r'score mate (-?\d+)', line)
+        if m:
+            mate_in = int(m.group(1))
+            return 30000 if mate_in > 0 else -30000
+        return eval_cp
+
+    def _run_search(
+        self,
+        fen: str,
+        depth: int,
+        time_limit: float,
+    ) -> Tuple[str, str, int, int, float]:
+        """Run UCI search; returns (best_move, ponder, depth, eval_cp, elapsed)."""
+        if depth > 0:
+            go_cmd = f'go depth {depth}'
+            search_sec = max(time_limit, 5.0)
+        else:
+            movetime_ms = max(int(time_limit * 1000), 1)
+            go_cmd = f'go movetime {movetime_ms}'
+            search_sec = time_limit
+
+        # Wait long enough for movetime/depth plus UCI info lines.
+        timeout = search_sec + 15.0
+
+        self._drain_queue()
+        self._send(f'position fen {fen}')
+        self._send(go_cmd)
+        t_start = time.monotonic()
+
+        best_move = ''
+        ponder_move = ''
+        depth_reached = 0
+        eval_cp = 0
+        deadline = t_start + timeout
+
+        while time.monotonic() < deadline:
+            try:
+                line = self._line_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if line is None:
+                break
+
+            if line.startswith('info'):
+                # Ignore "depth" on mate lines (e.g. depth 245 = mate distance, not search depth)
+                if ' score mate ' not in line:
+                    m = re.search(r'\bdepth (\d+)', line)
+                    if m:
+                        d = int(m.group(1))
+                        if d <= 64:
+                            depth_reached = max(depth_reached, d)
+                eval_cp = self._parse_info_score(line, eval_cp)
+
+            if line.startswith('bestmove'):
+                parts = line.split()
+                if len(parts) >= 2:
+                    best_move = parts[1] if parts[1] != '(none)' else ''
+                if len(parts) >= 4 and parts[2] == 'ponder':
+                    ponder_move = parts[3]
+                break
+
+        elapsed = time.monotonic() - t_start
+        return best_move, ponder_move, depth_reached, eval_cp, elapsed
+
+    def evaluate_position(
+        self,
+        fen: str,
+        movetime_ms: int = 120,
+    ) -> Tuple[int, int]:
+        """
+        NNUE/static eval via shallow Fairy-Stockfish search (for display / comparison).
+        Score is from side-to-move perspective (same as UCI).
+        """
+        if not self._ready:
+            raise RuntimeError('Engine not ready')
+        with self._lock:
+            _, _, depth_reached, eval_cp, _ = self._run_search(
+                fen, depth=0, time_limit=movetime_ms / 1000.0
+            )
+        return eval_cp, depth_reached
 
     def get_best_move(
         self,
@@ -89,78 +182,50 @@ class FairyStockfishEngine:
             raise RuntimeError('Engine not ready')
 
         with self._lock:
-            self._send('ucinewgame')
-            self._send(f'position fen {fen}')
-
-            if depth > 0:
-                go_cmd = f'go depth {depth}'
-            else:
-                movetime_ms = int(time_limit * 1000)
-                go_cmd = f'go movetime {movetime_ms}'
-
-            self._send(go_cmd)
-            t_start = time.monotonic()
-
-            best_move = ''
-            ponder_move = ''
-            depth_reached = 0
-            eval_cp = 0
-            lines = []
-
-            timeout = time_limit + 10
-            deadline = t_start + timeout
-
-            while time.monotonic() < deadline:
-                line = self._readline(timeout=1.0)
-                if line is None:
-                    continue
-                lines.append(line)
-
-                # Parse info lines for depth and score
-                if line.startswith('info'):
-                    m = re.search(r'depth (\d+)', line)
-                    if m:
-                        depth_reached = int(m.group(1))
-                    m = re.search(r'score cp (-?\d+)', line)
-                    if m:
-                        eval_cp = int(m.group(1))
-
-                if line.startswith('bestmove'):
-                    parts = line.split()
-                    if len(parts) >= 2:
-                        best_move = parts[1] if parts[1] != '(none)' else ''
-                    if len(parts) >= 4 and parts[2] == 'ponder':
-                        ponder_move = parts[3]
-                    break
-
-            elapsed = time.monotonic() - t_start
-            return best_move, ponder_move, depth_reached, eval_cp, elapsed
+            return self._run_search(fen, depth, time_limit)
 
     # ------------------------------------------------------------------
     # Low-level UCI communication
     # ------------------------------------------------------------------
+
+    def _stdout_reader_loop(self) -> None:
+        proc = self._proc
+        if proc is None or proc.stdout is None:
+            self._line_queue.put(None)
+            return
+        try:
+            for line in proc.stdout:
+                self._line_queue.put(line.rstrip('\n'))
+        except Exception:
+            pass
+        finally:
+            self._line_queue.put(None)
+
+    def _drain_queue(self) -> None:
+        while True:
+            try:
+                line = self._line_queue.get_nowait()
+            except queue.Empty:
+                break
+            if line is None:
+                self._line_queue.put(None)
+                break
 
     def _send(self, cmd: str) -> None:
         if self._proc and self._proc.poll() is None:
             self._proc.stdin.write(cmd + '\n')
             self._proc.stdin.flush()
 
-    def _readline(self, timeout: float = 1.0) -> Optional[str]:
-        """Read one line from the engine stdout with timeout."""
-        import select
-        if self._proc is None:
-            return None
-        ready, _, _ = select.select([self._proc.stdout], [], [], timeout)
-        if ready:
-            line = self._proc.stdout.readline()
-            return line.rstrip('\n') if line else None
-        return None
-
     def _wait_for(self, token: str, timeout: float = 10.0) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            line = self._readline(timeout=0.5)
-            if line and token in line:
+            try:
+                line = self._line_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if line is None:
+                return False
+            if token in line:
                 return True
         return False
 

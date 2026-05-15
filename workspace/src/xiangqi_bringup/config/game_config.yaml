@@ -4,11 +4,14 @@ game_manager_node:
     engine_type: "fairystockfish"    # "fairystockfish" | "minimax"
     # robot_plays_red: see robot_side.yaml (single source with task_planner_node)
     ai_time_limit: 5.0               # Seconds per AI move
+    sim_ai_time_limit: 3.0           # Sim cap (was 1s — too weak for Stockfish)
     ai_depth: 0                      # 0 = use time limit instead
 
 ai_engine_node:
   ros__parameters:
     engine_type: "fairystockfish"
-    difficulty: 15                   # Fairy-Stockfish skill level 1-20
+    difficulty: 20                   # Fairy-Stockfish skill level 1-20 (max)
     default_depth: 5
     default_time_limit: 5.0
+    minimax_nnue_display_eval: true  # Dashboard cp from NNUE, not heuristic
+    nnue_eval_movetime_ms: 120       # Shallow FSF search for Minimax display score

@@ -35,29 +35,37 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # --- Python packages ---
 # pymodbus: required by onrobot_rg2_driver (Modbus TCP to RG2 via EyeBox)
 # ultralytics: YOLOv8n for piece detection
-# flask/flask-socketio/eventlet: web dashboard
-# pyffish: Xiangqi legal move generation (custom minimax engine + game manager)
+# flask/flask-socketio/eventlet/flask-cors: web dashboard
+# numpy<2: matches ROS Humble cv_bridge (NumPy 2 breaks cv_bridge boost bindings)
+# pyffish: installed from same Fairy-Stockfish tree as the binary (see below)
 RUN pip3 install --no-cache-dir \
     pymodbus==2.5.3 \
-    pyffish \
     ultralytics \
     flask \
+    flask-cors \
     flask-socketio \
     eventlet \
-    numpy \
     scipy \
-    opencv-python-headless
+    opencv-python-headless \
+    'numpy>=1.23,<2'
 
-# --- Fairy-Stockfish: build from source ---
+# YOLO weights: place xiangqi_kaggle_v1_best.pt under workspace/src/xiangqi_vision/models/
+# before colcon, or use tools/fetch_yolo_weights.py / env XIANGQI_YOLO_DOWNLOAD_URL at runtime.
+
+# --- Fairy-Stockfish + pyffish: single source (aligned move notation) ---
 WORKDIR /opt
 RUN git clone --depth=1 https://github.com/fairy-stockfish/Fairy-Stockfish.git fairy-stockfish
 WORKDIR /opt/fairy-stockfish/src
-RUN make -j$(nproc) ARCH=x86-64-modern build \
-    && cp ../fairy-stockfish /usr/local/bin/fairy-stockfish \
+RUN make -j$(nproc) ARCH=x86-64-modern build largeboards=yes \
+    && cp stockfish /usr/local/bin/fairy-stockfish \
     && chmod +x /usr/local/bin/fairy-stockfish
+WORKDIR /opt/fairy-stockfish
+RUN pip3 install --no-cache-dir . \
+    && python3 -c "import pyffish as sf; sf.set_option('VariantPath',''); print('pyffish', sf.__file__)"
 
-# Verify it runs
-RUN echo "uci\nquit" | fairy-stockfish | grep -q "id name" && echo "Fairy-Stockfish OK"
+# Verify binary + pyffish agree on xiangqi UCI notation
+COPY tools/docker_verify_fsf_pyffish.py /opt/tools/docker_verify_fsf_pyffish.py
+RUN python3 /opt/tools/docker_verify_fsf_pyffish.py
 
 # --- Xiangqi NNUE weights (optional but recommended for strong play) ---
 # Downloaded at runtime via the engine wrapper if not present; can be baked in here:

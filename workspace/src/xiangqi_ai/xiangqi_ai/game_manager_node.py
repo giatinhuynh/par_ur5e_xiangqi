@@ -8,16 +8,20 @@ Publishes GameStatus and MoveHistory for the dashboard and planner.
 
 from __future__ import annotations
 from enum import Enum, auto
+import json
 
 import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool, Empty, Header, String
 from std_srvs.srv import Trigger
 
 from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory
 from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck, AiExecutionResult
 from xiangqi_msgs.srv import GetBestMove, GetBoardState, SetEngine
+
+from .move_resolver import resolve_to_legal_move
 
 try:
     import pyffish as sf
@@ -48,16 +52,37 @@ class GameManagerNode(Node):
 
         self.declare_parameter('engine_type', 'fairystockfish')
         self.declare_parameter('robot_plays_red', True)   # Robot is Red (moves first)
+        self.declare_parameter('self_play', False)          # Both sides played by AI
+        self.declare_parameter('simulation_mode', False)    # Skip planner/arm in simulation
         self.declare_parameter('ai_time_limit', 5.0)
+        self.declare_parameter('sim_ai_time_limit', 3.0)
         self.declare_parameter('ai_depth', 0)
 
         self._engine_type = self.get_parameter('engine_type').value
+        self._red_engine_type = str(self._engine_type)
+        self._black_engine_type = str(self._engine_type)
+        self._active_ai_engine = self._red_engine_type
+        self._ai_fail_streak = 0
         self._robot_is_red = self.get_parameter('robot_plays_red').value
-        self._ai_time_limit = self.get_parameter('ai_time_limit').value
+        self._self_play = self.get_parameter('self_play').value
+        self._simulation_mode = self.get_parameter('simulation_mode').value
+        if not self._simulation_mode:
+            # Hardware: human vs AI only; human moves come from vision on the physical board.
+            self._self_play = False
+        self._ai_time_limit = float(self.get_parameter('ai_time_limit').value)
         self._ai_depth = self.get_parameter('ai_depth').value
+        if self._simulation_mode:
+            sim_cap = float(self.get_parameter('sim_ai_time_limit').value)
+            self._ai_time_limit = min(self._ai_time_limit, max(sim_cap, 0.5))
+            if not self._self_play:
+                # Dashboard sim: human plays Red; AI plays Black.
+                self._robot_is_red = False
 
+        self._delayed_ai_timers: list = []
+        self._dashboard_mode = 'ai_vs_human'
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
+
         self._move_count = 0
         self._game_state = GameState.IDLE
 
@@ -75,6 +100,26 @@ class GameManagerNode(Node):
         self._new_game_sub = self.create_subscription(
             Empty, '/xiangqi/new_game', self._new_game_cb, 10,
             callback_group=cb_group
+        )
+        self._stop_game_sub = self.create_subscription(
+            Empty, '/xiangqi/stop_game', self._stop_game_cb, 10,
+            callback_group=cb_group,
+        )
+        self._reset_game_sub = self.create_subscription(
+            Empty, '/xiangqi/reset_game', self._reset_game_cb, 10,
+            callback_group=cb_group,
+        )
+        self._game_mode_sub = self.create_subscription(
+            String, '/xiangqi/game_mode', self._game_mode_cb, 10,
+            callback_group=cb_group,
+        )
+        self._ai_engines_sub = self.create_subscription(
+            String, '/xiangqi/ai_engines', self._ai_engines_cb, 10,
+            callback_group=cb_group,
+        )
+        self._simulate_human_move_sub = self.create_subscription(
+            String, '/xiangqi/simulate_human_move', self._simulate_human_move_cb, 10,
+            callback_group=cb_group,
         )
         self._resync_sub = self.create_subscription(
             Empty,
@@ -104,6 +149,7 @@ class GameManagerNode(Node):
 
         # Publishers
         self._game_status_pub = self.create_publisher(GameStatus, '/xiangqi/game_status', 10)
+        self._board_state_pub = self.create_publisher(BoardState, '/xiangqi/board_state', 10)
         self._move_history_pub = self.create_publisher(MoveHistory, '/xiangqi/move_history', 10)
         self._start_watching_pub = self.create_publisher(Bool, '/xiangqi/start_watching', 10)
         # Single atomic dispatch (move + capture + expected FEN + id) for the planner
@@ -157,8 +203,126 @@ class GameManagerNode(Node):
     def _board_state_cb(self, msg: BoardState) -> None:
         self._latest_board_state = msg
 
+    def _apply_dashboard_mode(self, mode: str) -> None:
+        """Apply sim play style from dashboard mode (ai_vs_ai = both sides AI)."""
+        self._dashboard_mode = mode
+        self._self_play = mode == 'ai_vs_ai'
+        if self._simulation_mode:
+            self._robot_is_red = self._self_play
+
+    @staticmethod
+    def _normalize_engine(name: str, default: str = 'minimax') -> str:
+        n = (name or '').strip().lower()
+        if n in ('stockfish', 'fairy', 'fairystockfish', 'fsf'):
+            return 'fairystockfish'
+        if n in ('minimax', 'custom'):
+            return 'minimax'
+        return default
+
+    def _side_to_move_is_red(self) -> bool:
+        return 'w' in self._current_fen.split()[1] if self._current_fen else True
+
+    def _engine_for_side(self, red: bool) -> str:
+        return self._red_engine_type if red else self._black_engine_type
+
+    def _engine_for_current_turn(self) -> str:
+        return self._engine_for_side(self._side_to_move_is_red())
+
+    def _ai_engines_cb(self, msg: String) -> None:
+        """Dashboard: per-side engine selection (setup only)."""
+        if self._game_state not in (GameState.IDLE, GameState.GAME_OVER):
+            self.get_logger().warn('Ignoring engine change during active game')
+            return
+        try:
+            data = json.loads(msg.data or '{}')
+        except json.JSONDecodeError:
+            self.get_logger().warn(f'Invalid ai_engines JSON: {msg.data!r}')
+            return
+        if 'red' in data:
+            self._red_engine_type = self._normalize_engine(
+                data['red'], self._red_engine_type
+            )
+        if 'black' in data:
+            self._black_engine_type = self._normalize_engine(
+                data['black'], self._black_engine_type
+            )
+        self.get_logger().info(
+            f'Engines: Red={self._red_engine_type}, Black={self._black_engine_type}'
+        )
+
+    def _game_mode_cb(self, msg: String) -> None:
+        """Dashboard sim-only: ai_vs_ai enables self-play; ai_vs_human uses board clicks or vision."""
+        mode = (msg.data or '').strip()
+        if mode not in ('ai_vs_ai', 'ai_vs_human'):
+            return
+        self._dashboard_mode = mode
+        if not self._simulation_mode:
+            if mode == 'ai_vs_ai':
+                self.get_logger().warn(
+                    'AI vs AI is simulation-only — ignoring (hardware uses human vs AI on the physical board)'
+                )
+            return
+        if self._game_state not in (GameState.IDLE, GameState.GAME_OVER):
+            self.get_logger().warn(
+                f'Ignoring game mode change during active game (state={self._game_state.name})'
+            )
+            return
+        prev = self._self_play
+        self._apply_dashboard_mode(mode)
+        self.get_logger().info(f'Game mode: {mode} (self_play={self._self_play})')
+
+        if prev and not self._self_play:
+            self._clear_delayed_ai_timers()
+            self._cancel_ai_rpc_in_flight()
+            if self._game_state == GameState.COMPUTING_AI:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                self._publish_status()
+        elif not prev and self._self_play:
+            self._clear_delayed_ai_timers()
+            if self._game_state == GameState.WAITING_HUMAN and self._game_result == 'ongoing':
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                self._compute_and_emit_ai_move()
+
+    def _simulate_human_move_cb(self, msg: String) -> None:
+        """Sim-only: human move from dashboard board clicks (not used on hardware)."""
+        if not self._simulation_mode or self._self_play:
+            return
+        move = (msg.data or '').strip()
+        if len(move) != 4:
+            return
+        if self._game_state != GameState.WAITING_HUMAN:
+            self.get_logger().warn(
+                f'Ignoring dashboard move {move}: not waiting for human (state={self._game_state.name})'
+            )
+            return
+        if not PYFFISH_OK:
+            return
+        try:
+            legal = sf.legal_moves(VARIANT, self._current_fen, [])
+        except Exception as e:
+            self.get_logger().error(f'Could not list legal moves: {e}')
+            return
+        if move not in legal:
+            alert = String()
+            alert.data = f'Illegal move {move} — try again'
+            self._illegal_move_pub.publish(alert)
+            return
+        self.get_logger().info(f'[SIM] Dashboard human move: {move}')
+        self._apply_move(move, is_ai=False)
+        self._check_game_over()
+        if self._game_state == GameState.GAME_OVER:
+            self._publish_status()
+            return
+        self._game_state = GameState.COMPUTING_AI
+        self._publish_status()
+        self._compute_and_emit_ai_move()
+
     def _human_move_detected_cb(self, msg: Bool) -> None:
         if not msg.data:
+            return
+        if self._self_play:
             return
         if self._game_state != GameState.WAITING_HUMAN:
             return
@@ -206,6 +370,14 @@ class GameManagerNode(Node):
             if self._game_state == GameState.GAME_OVER:
                 self.get_logger().info('Game over — robot finished last move')
                 self._publish_status()
+                return
+
+            # In self-play mode, immediately compute next AI move instead of waiting
+            if self._self_play:
+                self.get_logger().info('Self-play: computing next AI move immediately')
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                self._compute_and_emit_ai_move()
                 return
 
             self.get_logger().info('Robot move execution confirmed — waiting for human')
@@ -322,31 +494,77 @@ class GameManagerNode(Node):
         )
         self._illegal_move_pub.publish(alert)
         if self._game_state == GameState.COMPUTING_AI:
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
+            if self._self_play:
+                self._ai_fail_streak += 1
+                if self._ai_fail_streak >= 15:
+                    self._ai_fail_streak = 0
+                    self._game_state = GameState.GAME_OVER
+                    self._game_result = 'unknown'
+                    self._game_result_reason = 'ai_engine_failed'
+                    alert.data = (
+                        f'{detail} — AI vs AI stopped after repeated failures. '
+                        'Try Reset or change engines.'
+                    )
+                    self._illegal_move_pub.publish(alert)
+                else:
+                    self._schedule_ai_service_retry()
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
         self._publish_status()
 
-    def _new_game_cb(self, _: Empty) -> None:
-        self.get_logger().info('New game started')
-        self._abort_ai_computation = False
-        self._cancel_ai_rpc_in_flight()
-        self._active_ai_request_token = None
-        self._ai_fen_at_request = None
+    def _halt_game(self) -> None:
+        """Cancel all AI work and return to idle with the starting position."""
+        self._abort_ai_computation = True
         self._ai_request_token += 1
-        self._current_fen = STARTING_FEN
-        self._move_history = []
-        self._move_count = 0
+        self._clear_delayed_ai_timers()
+        self._cancel_ai_rpc_in_flight()
         self._pending_human_move = None
         self._pending_ai_move = None
         self._active_dispatch_id = None
         self._clear_planner_ack_timer()
-        self._ai_dispatch_id = 0
         self._ai_service_retry_count = 0
-        self._game_result = "ongoing"
-        self._game_result_reason = ""
+        self._ai_fail_streak = 0
+        self._current_fen = STARTING_FEN
+        self._move_history = []
+        self._move_count = 0
+        self._game_result = 'ongoing'
+        self._game_result_reason = ''
+        self._game_state = GameState.IDLE
+        if self._simulation_mode:
+            self._publish_logical_board_state()
+        self._publish_status()
 
-        # Robot plays Red and moves first -- start with AI move
-        if self._robot_is_red:
+    def _stop_game_cb(self, _: Empty) -> None:
+        """Abort current game and return to idle (setup); board reset to start."""
+        self.get_logger().info('Stop game — returning to idle')
+        self._halt_game()
+
+    def _reset_game_cb(self, _: Empty) -> None:
+        """Abort and immediately start a fresh game in the current dashboard mode."""
+        self.get_logger().info('Reset game — restarting')
+        self._halt_game()
+        self._begin_new_game()
+
+    def _new_game_cb(self, _: Empty) -> None:
+        self.get_logger().info('New game started')
+        self._halt_game()
+        self._begin_new_game()
+
+    def _begin_new_game(self) -> None:
+        """Start from the initial position (call after _halt_game or from cold idle)."""
+        self._abort_ai_computation = False
+        self._ai_fen_at_request = None
+        self._ai_dispatch_id = 0
+        self._ai_fail_streak = 0
+        self._game_result = 'ongoing'
+        self._game_result_reason = ''
+
+        if self._simulation_mode:
+            self._apply_dashboard_mode(self._dashboard_mode)
+            self._publish_logical_board_state()
+
+        if self._robot_is_red or self._self_play:
             self._game_state = GameState.COMPUTING_AI
             self._publish_status()
             self._compute_and_emit_ai_move()
@@ -509,10 +727,7 @@ class GameManagerNode(Node):
         if self._active_ai_request_token is None or token != self._active_ai_request_token:
             return
 
-        if self._abort_ai_computation:
-            self._abort_ai_computation = False
-            return
-        if self._game_state != GameState.COMPUTING_AI:
+        if self._abort_ai_computation or self._game_state != GameState.COMPUTING_AI:
             return
 
         try:
@@ -525,16 +740,44 @@ class GameManagerNode(Node):
             self._recover_ai_computation_failed('AI engine returned no move')
             return
 
+        self._ai_fail_streak = 0
         ai_move = resp.best_move
         self.get_logger().info(
             f'AI move: {ai_move} (depth={resp.depth_reached}, eval={resp.evaluation_cp}cp)'
         )
 
         fen_before_ai = self._ai_fen_at_request or self._current_fen
+
+        # Validate move is legal — pyffish and Stockfish sometimes disagree on coordinate system
+        import threading
+        if not hasattr(self, '_pyffish_lock'):
+            self._pyffish_lock = threading.Lock()
+
+        try:
+            with self._pyffish_lock:
+                legal = sf.legal_moves(VARIANT, fen_before_ai, [])
+            if not legal:
+                self._recover_ai_computation_failed('No legal moves — game over?')
+                return
+            resolved, exact = resolve_to_legal_move(fen_before_ai, ai_move, legal)
+            if not exact and resolved != ai_move:
+                self.get_logger().warn(
+                    f'Engine move {ai_move!r} not in pyffish legal set '
+                    f'({len(legal)} moves) — using {resolved!r}'
+                )
+            elif not exact:
+                self.get_logger().warn(
+                    f'Engine move {ai_move!r} matched by square parse → {resolved!r}'
+                )
+            ai_move = resolved
+        except Exception as e:
+            self.get_logger().warn(f'Could not validate move legality: {e}')
+
         is_capture = self._is_capture_move(fen_before_ai, ai_move)
 
         try:
-            expected_fen = sf.get_fen(VARIANT, fen_before_ai, [ai_move])
+            with self._pyffish_lock:
+                expected_fen = sf.get_fen(VARIANT, fen_before_ai, [ai_move])
         except Exception as e:
             self._recover_ai_computation_failed(
                 f'Could not compute post-move FEN for {ai_move}: {e}'
@@ -550,6 +793,45 @@ class GameManagerNode(Node):
         self._pending_ai_elapsed = resp.thinking_time_sec
         self._active_dispatch_id = dispatch_id
 
+        # --- Simulation mode: apply move directly, no physical robot needed ---
+        if self._simulation_mode:
+            if self._abort_ai_computation or self._game_state != GameState.COMPUTING_AI:
+                self.get_logger().info(
+                    f'[SIM] Dropping stale AI move {ai_move} (game halted or not computing)'
+                )
+                return
+            self.get_logger().info(f'[SIM] Applying AI move directly: {ai_move}')
+            # Invalidate current token so any in-flight Stockfish response (2nd bestmove)
+            # will be dropped by the token guard at the top of this callback
+            self._active_ai_request_token = None
+            self._ai_move_future = None
+
+            self._apply_move(
+                ai_move,
+                is_ai=True,
+                eval_cp=resp.evaluation_cp,
+                depth=resp.depth_reached,
+                elapsed=resp.thinking_time_sec,
+            )
+            self._pending_ai_move = None
+            self._active_dispatch_id = None
+            self._check_game_over()
+            if self._game_state == GameState.GAME_OVER:
+                self._publish_status()
+                return
+            if self._self_play:
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                # Small delay before next AI request so Stockfish has time to flush
+                delay = 0.25 if self._simulation_mode else 1.0
+                t = self.create_timer(delay, self._delayed_next_ai_move)
+                self._delayed_ai_timers.append(t)
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                self._publish_status()
+            return
+        # --- Hardware mode: dispatch to task_planner ---
         cmd = AiMoveCommand()
         cmd.dispatch_id = dispatch_id
         cmd.move = ai_move
@@ -564,6 +846,24 @@ class GameManagerNode(Node):
         self._clear_planner_ack_timer()
         # Planner must ack the command quickly, or we abandon to avoid deadlock
         self._planner_ack_timer = self.create_timer(2.0, self._on_planner_ack_timeout)
+
+    def _clear_delayed_ai_timers(self) -> None:
+        for t in self._delayed_ai_timers:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+        self._delayed_ai_timers.clear()
+
+    def _delayed_next_ai_move(self) -> None:
+        """One-shot timer callback: fires next AI request after a short settle delay."""
+        self._clear_delayed_ai_timers()
+        if (
+            not self._abort_ai_computation
+            and self._game_state == GameState.COMPUTING_AI
+            and self._self_play
+        ):
+            self._compute_and_emit_ai_move()
 
     def _compute_and_emit_ai_move(self) -> None:
         """Start async GetBestMove so the executor can still process e-stop and other I/O."""
@@ -581,12 +881,24 @@ class GameManagerNode(Node):
 
         self._ai_service_retry_count = 0
 
+        if PYFFISH_OK and self._current_fen:
+            try:
+                fen_stm = self._current_fen.split()[1]
+                is_red_turn = fen_stm == 'w'
+                if self._check_no_legal_moves(self._current_fen, is_red_turn):
+                    self._publish_status()
+                    return
+            except Exception as e:
+                self.get_logger().warn(f'Pre-move terminal check failed: {e}')
+
         req = GetBestMove.Request()
         self._ai_fen_at_request = self._current_fen
         req.fen = self._ai_fen_at_request
         req.depth = self._ai_depth
         req.time_limit = self._ai_time_limit
-        req.engine_type = self._engine_type
+        engine = self._engine_for_current_turn()
+        self._active_ai_engine = engine
+        req.engine_type = engine
 
         self._ai_request_token += 1
         token = self._ai_request_token
@@ -619,63 +931,136 @@ class GameManagerNode(Node):
             hist_msg.thinking_time_sec = elapsed
             hist_msg.search_depth = depth
             hist_msg.evaluation_cp = eval_cp
-            hist_msg.engine_used = self._engine_type if is_ai else 'human'
+            hist_msg.engine_used = self._active_ai_engine if is_ai else 'human'
             self._move_history_pub.publish(hist_msg)
+            self._publish_status()
+            if self._simulation_mode:
+                self._publish_logical_board_state()
         except Exception as e:
             self.get_logger().error(f'Failed to apply move {move}: {e}')
 
+    # Safety-net move limit (~150 full moves); pyffish handles repetition natively
+    _MAX_HALF_MOVES = 300
+
+    @staticmethod
+    def _pyffish_score_to_result(value: int, is_red_turn: bool,
+                                  is_immediate: bool) -> tuple[str, str]:
+        """
+        Map a pyffish side-to-move score to (game_result, reason).
+          value > 0  → side to move wins
+          value < 0  → side to move loses
+          value == 0 → draw
+        """
+        if value > 0:
+            result = 'red_wins' if is_red_turn else 'black_wins'
+            reason = 'checkmate' if is_immediate else 'perpetual_rule'
+        elif value < 0:
+            result = 'black_wins' if is_red_turn else 'red_wins'
+            reason = 'checkmate' if is_immediate else 'perpetual_rule'
+        else:
+            result = 'draw'
+            reason = 'stalemate' if is_immediate else 'draw_by_repetition'
+        return result, reason
+
+    def _declare_game_over(self, result: str, reason: str) -> None:
+        self._game_state = GameState.GAME_OVER
+        self._game_result = result
+        self._game_result_reason = reason
+        self.get_logger().info(
+            f'Game over: result={result}, reason={reason}, move={self._move_count}'
+        )
+
+    def _terminal_from_game_result(self, gr: int, is_red_turn: bool) -> tuple[str, str] | None:
+        """Map pyffish game_result() to (result, reason) when side to move has no moves."""
+        if gr == -sf.VALUE_MATE:
+            winner = 'red_wins' if not is_red_turn else 'black_wins'
+            return winner, 'checkmate'
+        if gr == sf.VALUE_MATE:
+            winner = 'black_wins' if is_red_turn else 'red_wins'
+            return winner, 'checkmate'
+        if gr in (sf.VALUE_DRAW, 0):
+            return 'draw', 'stalemate'
+        return None
+
+    def _check_no_legal_moves(self, fen: str, is_red_turn: bool) -> bool:
+        """True if game was declared over (checkmate/stalemate with 0 legal moves)."""
+        legal = sf.legal_moves(VARIANT, fen, [])
+        if legal:
+            return False
+        gr = sf.game_result(VARIANT, fen, [])
+        parsed = self._terminal_from_game_result(gr, is_red_turn)
+        if parsed:
+            result, reason = parsed
+            self._declare_game_over(result, reason)
+            return True
+        self.get_logger().warn(
+            f'No legal moves but game_result={gr}; declaring checkmate for side to move'
+        )
+        result = 'red_wins' if not is_red_turn else 'black_wins'
+        self._declare_game_over(result, 'checkmate')
+        return True
+
     def _check_game_over(self) -> None:
-        """Classify terminal positions using pyffish game_result."""
+        """
+        Classify terminal positions using pyffish native game-end functions:
+          1. is_immediate_game_end  – checkmate / stalemate
+          2. is_optional_game_end   – repetition / perpetual check / chasing rules
+          3. has_insufficient_material – dead-draw material
+          4. _MAX_HALF_MOVES         – safety-net draw
+        """
         fen = self._current_fen
         if not (PYFFISH_OK and fen):
             return
+
+        is_red_turn = 'w' in fen.split()[1]
+
         try:
-            legal = sf.legal_moves(VARIANT, fen, [])
-            res = sf.game_result(VARIANT, fen, [])
-        except Exception as e:
-            self.get_logger().error(f'game_result/legal_moves error: {e}')
-            # Fallback: preserve legacy behaviour
+            # ── 1. Immediate: checkmate / stalemate ──────────────────────────
+            immediate, imm_val = sf.is_immediate_game_end(VARIANT, fen, [])
+            if immediate:
+                result, reason = self._pyffish_score_to_result(imm_val, is_red_turn, True)
+                self._declare_game_over(result, reason)
+                return
+
+            # Some mates: 0 legal moves but is_immediate_game_end is False
+            if self._check_no_legal_moves(fen, is_red_turn):
+                return
+
+            # ── 2. Optional: repetition / perpetual check / chasing ──────────
+            # Pass the full move history from STARTING_FEN so pyffish can
+            # reconstruct position counts and apply Xiangqi chasing rules.
+            optional, opt_val = sf.is_optional_game_end(
+                VARIANT, STARTING_FEN, self._move_history
+            )
+            if optional:
+                result, reason = self._pyffish_score_to_result(opt_val, is_red_turn, False)
+                self._declare_game_over(result, reason)
+                return
+
+            # ── 3. Insufficient material (dead draw) ─────────────────────────
             try:
-                legal = sf.legal_moves(VARIANT, fen, [])
-                if not legal:
-                    self._game_state = GameState.GAME_OVER
-                    self._game_result = "unknown"
-                    self._game_result_reason = "no_legal_moves"
-                    self.get_logger().info('Game over -- no legal moves (fallback)')
+                red_insuf, blk_insuf = sf.has_insufficient_material(VARIANT, fen, [])
+                if red_insuf and blk_insuf:
+                    self._declare_game_over('draw', 'insufficient_material')
+                    return
+            except AttributeError:
+                pass  # older pyffish build without this function
+
+            # ── 4. Safety-net move limit ──────────────────────────────────────
+            if self._move_count >= self._MAX_HALF_MOVES:
+                self._declare_game_over('draw', 'move_limit')
+
+        except Exception as e:
+            self.get_logger().error(f'_check_game_over error: {e}')
+            # Fallback: detect checkmate / stalemate via gives_check
+            try:
+                if not sf.legal_moves(VARIANT, fen, []):
+                    in_check = sf.gives_check(VARIANT, fen, [])
+                    result = ('black_wins' if is_red_turn else 'red_wins') if in_check else 'draw'
+                    reason = 'checkmate' if in_check else 'stalemate'
+                    self._declare_game_over(result, reason)
             except Exception:
                 pass
-            return
-
-        no_legal = len(legal) == 0
-        result = "ongoing"
-        reason = ""
-
-        if res in ("1-0", "0-1", "1/2-1/2"):
-            # Winner / draw from pyffish score
-            if res == "1-0":
-                result = "red_wins"
-            elif res == "0-1":
-                result = "black_wins"
-            else:
-                result = "draw"
-
-            if result in ("red_wins", "black_wins"):
-                reason = "checkmate" if no_legal else "win_by_rule_or_resign"
-            else:
-                reason = "stalemate" if no_legal else "draw_by_rule"
-        else:
-            # Non-terminal or unknown code from pyffish
-            if no_legal:
-                result = "unknown"
-                reason = "no_legal_moves"
-
-        if result != "ongoing":
-            self._game_state = GameState.GAME_OVER
-            self._game_result = result
-            self._game_result_reason = reason
-            self.get_logger().info(
-                f'Game over: result={result}, reason={reason}, res_code={res}, no_legal={no_legal}'
-            )
 
     def _infer_move_from_board(self, fen: str, new_grid: list) -> str | None:
         """
@@ -761,6 +1146,19 @@ class GameManagerNode(Node):
         except (IndexError, ValueError, AttributeError):
             return False
 
+    def _publish_logical_board_state(self) -> None:
+        """Publish authoritative board from game FEN (sim / dashboard display)."""
+        grid = self._fen_to_grid(self._current_fen)
+        msg = BoardState()
+        msg.header = Header()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.grid = [int(x) for x in grid]
+        msg.fen = self._current_fen
+        msg.last_move = self._move_history[-1] if self._move_history else ''
+        msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
+        msg.detection_confidence = 1.0
+        self._board_state_pub.publish(msg)
+
     def _publish_status(self) -> None:
         msg = GameStatus()
         msg.header = Header()
@@ -769,11 +1167,18 @@ class GameManagerNode(Node):
         msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
         msg.move_count = self._move_count
         msg.current_fen = self._current_fen
-        msg.engine_type = self._engine_type
+        if self._game_state == GameState.COMPUTING_AI:
+            msg.engine_type = self._engine_for_current_turn()
+        elif self._self_play:
+            msg.engine_type = f'{self._red_engine_type}|{self._black_engine_type}'
+        else:
+            msg.engine_type = self._black_engine_type
         msg.system_state = self._game_state.name
         msg.game_result = self._game_result
         msg.game_result_reason = self._game_result_reason
         self._game_status_pub.publish(msg)
+        if self._simulation_mode:
+            self._publish_logical_board_state()
 
     @staticmethod
     def _fen_to_grid(fen: str) -> list:
@@ -807,8 +1212,10 @@ class GameManagerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GameManagerNode()
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

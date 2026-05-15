@@ -1,0 +1,20 @@
+# vision_config_sim.yaml — used by xiangqi_sim.launch.py (home / no lab files).
+#
+# Packaged board_calibration_sim.yaml is used when workspace calibration is missing.
+#
+# YOLO: vision_config.yaml sets require_yolo_weights:=true for lab runs. For sim at home
+# without a .pt in the tree, this file defaults require_yolo_weights:=false so the stack
+# starts; set true and place xiangqi_kaggle_v1_best.pt under
+# workspace/src/xiangqi_vision/models/ before colcon, or set yolo_download_url /
+# env XIANGQI_YOLO_DOWNLOAD_URL to fetch weights at startup.
+
+vision_node:
+  ros__parameters:
+    model_path: ""
+    calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
+    require_yolo_weights: false
+    yolo_download_url: ""
+    confidence_threshold: 0.45
+    stability_frames: 6
+    poll_rate_hz: 4.0
+    camera_topic: "/camera/color/image_raw"

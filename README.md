@@ -10,7 +10,7 @@ A fully autonomous robotic system that plays Chinese Chess (Xiangqi) against a h
 |------|---------|
 | [`workspace/src/`](workspace/src/) | Six ROS 2 packages: `xiangqi_msgs`, `xiangqi_bringup`, `xiangqi_vision`, `xiangqi_ai`, `xiangqi_planner`, `xiangqi_manipulation`, `xiangqi_dashboard` |
 | [`workspace/config/`](workspace/config/) | **Runtime** calibration output (`board_calibration.yaml` after `calibration_tool`); created on first save; bind-mounted with the workspace in Docker |
-| [`workspace/models/`](workspace/models/) | YOLO weights (`.pt`); not tracked in git (see [`.gitignore`](.gitignore)) |
+| [`workspace/src/xiangqi_vision/models/`](workspace/src/xiangqi_vision/models/) | YOLO weights (`xiangqi_kaggle_v1_best.pt`, tracked in git); optional copy at `workspace/models/` for lab `vision_config.yaml` |
 | [`tools/`](tools/) | Host-side Python helpers for board SVG generation, dataset merge, Kaggle/local YOLO training, and prediction previews (see [docs/README.md](docs/README.md)) |
 | [`docs/`](docs/) | Printing and vision guides, generated board SVGs (`board_mat_*.svg`), and geometry YAML used with `generate_board_svg.py` |
 | [`Dockerfile`](Dockerfile) | Extends the UR5e_Env image with Fairy-Stockfish, Ultralytics, pyffish, Flask dashboard stack, py_trees, OpenCV, etc. |
@@ -223,13 +223,15 @@ Calibration is written to **`/home/rosuser/workspace/config/board_calibration.ya
 
 ### 5. Train / place the YOLOv8 model
 
-Place the trained `.pt` file (e.g. `xiangqi_kaggle_v1_best.pt`) at:
+The default weights file **`xiangqi_kaggle_v1_best.pt`** is committed under `workspace/src/xiangqi_vision/models/` and installed to `share/xiangqi_vision/models/` after `colcon build`.
+
+For **lab hardware**, you can still use the legacy path (set in `vision_config.yaml`):
 
 ```
 /home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt
 ```
 
-Copy it into `workspace/models/` on the host so the bind-mounted workspace exposes it inside the container. The path is set in `workspace/src/xiangqi_bringup/config/vision_config.yaml` (`model_path`). For a different filename, update that YAML or override at launch:
+Copy or symlink from the package `models/` folder if needed. For a different filename, update that YAML or override at launch:
 
 ```bash
 ros2 run xiangqi_vision vision_node --ros-args -p model_path:=/path/to/your.pt
@@ -260,25 +262,79 @@ moveit_config_driver
 ros2 launch xiangqi_bringup xiangqi_system.launch.py
 ```
 
-**Simulation** (no hardware; `xiangqi_sim.launch.py` wraps the system launch with `simulation_mode:=true` and defaults to **minimax** so a Fairy-Stockfish binary is not required):
+### 8b. Simulation mode (no robot — recommended for AI / dashboard testing)
+
+Use this when you want to test **game rules**, **AI vs AI**, **Stockfish vs Minimax**, and the **web dashboard** without the UR5e, RealSense, MoveIt, or gripper.
+
+#### What simulation does differently
+
+| Aspect | Simulation (`simulation_mode:=true`) | Hardware (lab) |
+|--------|--------------------------------------|----------------|
+| **Board state** | Maintained in `game_manager` from **pyffish** (logical FEN + grid) | From **vision** (camera + YOLO + calibration) |
+| **Human moves** | Click pieces on the **dashboard** board (AI vs Human), or both sides AI | Physical moves on the mat; vision infers when you finish |
+| **Robot moves** | Applied **instantly** in software (no planner / arm) | `task_planner` → `PickAndPlace` → MoveIt + RG2 |
+| **Drivers** | Do **not** run `arm_drivers` or `moveit_config_driver` | Required before `xiangqi_system.launch.py` |
+| **Vision node** | Still launched; uses `vision_config_sim.yaml` (YOLO optional) | `vision_config.yaml` + calibration + weights required |
+| **AI vs AI** | Supported from dashboard | Ignored (hardware is human vs robot only) |
+| **Think time** | Capped by `sim_ai_time_limit` (default **3 s** in `game_config.yaml`) | Full `ai_time_limit` (default 5 s) |
+
+The same ROS nodes start in both modes so topics and the dashboard stay compatible; only behaviour inside `game_manager`, the planner path, and dashboard options change.
+
+#### Quick start with Docker (WSL / home PC)
+
+Build the extended image once (includes **Fairy-Stockfish** and **pyffish** built from the same source — required for Stockfish moves to match legal-move checks):
+
+```bash
+docker build -f Dockerfile --build-arg BASE_IMAGE=ros:humble -t ur5e_xiangqi:latest .
+```
+
+Start sim + dashboard (host port **5000** → container 5000):
+
+```bash
+# From repo root (Git Bash / WSL)
+tools/wsl_docker_sim_run.sh
+# Or: tools/wsl_docker_rebuild.sh   # rebuild image then start
+```
+
+Open **`http://127.0.0.1:5000/`**, hard-refresh (Ctrl+F5). Wait ~30–60 s for the first `colcon build` inside the container.
+
+On the dashboard:
+
+1. **Engine Setup** — choose Red/Black engine (`Minimax` / `Stockfish`), Stockfish strength **1–20**, mode **AI vs AI** or **AI vs Human**.
+2. **Start Game** — in AI vs AI, both sides play automatically; in AI vs Human, click a piece then a destination (legal squares come from pyffish).
+3. **Stop / Reset** — halts AI loops; Reset returns to the starting position.
+
+Useful checks after code changes:
+
+```bash
+wsl docker logs -f xiangqi_sim_ui
+# Stockfish moves should NOT spam "not in pyffish legal set"
+python3 tools/verify_api_pyffish.py http://127.0.0.1:5000/
+```
+
+#### Launch inside an existing container (lab or dev)
 
 ```bash
 ros2 launch xiangqi_bringup xiangqi_sim.launch.py
+# Stockfish L20 + AI vs AI friendly defaults:
+ros2 launch xiangqi_bringup xiangqi_sim.launch.py engine_type:=fairystockfish difficulty:=20
 ```
 
-Optional overrides (full system):
+Equivalent:
 
 ```bash
-ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true engine_type:=minimax difficulty:=10
+ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=true
 ```
 
-Declared launch arguments: `simulation_mode`, `engine_type`, `difficulty` (see `xiangqi_system.launch.py`).
+Launch arguments: `simulation_mode`, `engine_type`, `difficulty`, `self_play`, `robot_plays_red` (see `xiangqi_system.launch.py` / `xiangqi_sim.launch.py`).
 
 ### 9. Open the dashboard
 
-The dashboard listens on **port 5000** inside the container (`0.0.0.0:5000`). From another machine on the lab network, open **`http://<host-ip>:5000`** (the lab PC is often `10.234.7.84`; use `localhost` only when browsing from the same machine with port forwarding).
+The dashboard listens on **port 5000** inside the container (`0.0.0.0:5000`). From another machine on the lab network, open **`http://<host-ip>:5000`** (the lab PC is often `10.234.7.84`; use `localhost` when browsing on the same machine or with port forwarding).
 
-Click **New Game** to start. The robot (Red) moves first.
+**Hardware:** click **New Game** — the robot (Red) moves first after vision and the behaviour tree run.
+
+**Simulation:** use **Start Game** on the Engine Setup panel (see §8b).
 
 ---
 
@@ -302,6 +358,10 @@ Click **New Game** to start. The robot (Red) moves first.
 | `kaggle_train_xiangqi_yolo.py` | One-shot YOLOv8 train (Kaggle/local), label remap, plots |
 | `kaggle_preview_detections.py` | Grid preview of detections on sample boards |
 | `capture_training_images.py` | Guided capture from the lab camera with per-setup counters |
+| `wsl_docker_sim_run.sh` | Start detached sim container + dashboard on port 5000 (WSL) |
+| `wsl_docker_rebuild.sh` | Rebuild `ur5e_xiangqi:latest` then start sim |
+| `verify_api_pyffish.py` | Compare dashboard game-end result with pyffish rules |
+| `docker_verify_fsf_pyffish.py` | Build-time check: FSF `bestmove` ∈ pyffish `legal_moves` |
 | `merge_datasets.py` | Merge Roboflow (or similar) base data with lab captures |
 | `inspect_predictions.py` | Visual inspection of model predictions on validation images |
 

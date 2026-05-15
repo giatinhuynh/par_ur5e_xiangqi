@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start persistent sim + dashboard (detached). Open http://127.0.0.1:15001/
+# Start persistent sim + dashboard (detached). Open http://127.0.0.1:5000/ (override port as 4th arg)
 set -eu
 
 WS_HOST="${1:-/mnt/c/Users/Welcome/Documents/GitHub/par_ur5e_xiangqi/workspace}"

@@ -212,12 +212,11 @@ class GameManagerNode(Node):
         """Apply sim play style from dashboard mode (ai_vs_ai = both sides AI)."""
         self._dashboard_mode = mode
         self._self_play = mode == 'ai_vs_ai'
-        if self._simulation_mode:
-            if self._self_play:
-                self._robot_is_red = True
-            else:
-                # AI plays Red when human chose Black.
-                self._robot_is_red = (self._human_color == 'black')
+        if self._self_play:
+            self._robot_is_red = True
+        else:
+            # AI (robot) plays Red when human chose Black — applies to both sim and hardware.
+            self._robot_is_red = (self._human_color == 'black')
 
     @staticmethod
     def _normalize_engine(name: str, default: str = 'minimax') -> str:
@@ -300,8 +299,8 @@ class GameManagerNode(Node):
         if color not in ('red', 'black'):
             return
         self._human_color = color
-        # Update robot_is_red: AI plays Red when human plays Black.
-        if self._simulation_mode and not self._self_play:
+        # Update robot_is_red: AI (robot) plays Red when human plays Black.
+        if not self._self_play:
             self._robot_is_red = color == 'black'
         self.get_logger().info(f'Human color: {color} (robot_is_red={self._robot_is_red})')
 

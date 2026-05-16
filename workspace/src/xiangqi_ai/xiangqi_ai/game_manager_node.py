@@ -80,6 +80,7 @@ class GameManagerNode(Node):
 
         self._delayed_ai_timers: list = []
         self._dashboard_mode = 'ai_vs_human'
+        self._human_color = 'red'   # which color the human plays in ai_vs_human
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
 
@@ -119,6 +120,10 @@ class GameManagerNode(Node):
         )
         self._simulate_human_move_sub = self.create_subscription(
             String, '/xiangqi/simulate_human_move', self._simulate_human_move_cb, 10,
+            callback_group=cb_group,
+        )
+        self._human_color_sub = self.create_subscription(
+            String, '/xiangqi/human_color', self._human_color_cb, 10,
             callback_group=cb_group,
         )
         self._resync_sub = self.create_subscription(
@@ -208,7 +213,11 @@ class GameManagerNode(Node):
         self._dashboard_mode = mode
         self._self_play = mode == 'ai_vs_ai'
         if self._simulation_mode:
-            self._robot_is_red = self._self_play
+            if self._self_play:
+                self._robot_is_red = True
+            else:
+                # AI plays Red when human chose Black.
+                self._robot_is_red = (self._human_color == 'black')
 
     @staticmethod
     def _normalize_engine(name: str, default: str = 'minimax') -> str:
@@ -284,6 +293,17 @@ class GameManagerNode(Node):
                 self._game_state = GameState.COMPUTING_AI
                 self._publish_status()
                 self._compute_and_emit_ai_move()
+
+    def _human_color_cb(self, msg: String) -> None:
+        """Dashboard: which color the human plays in ai_vs_human (red or black)."""
+        color = (msg.data or '').strip().lower()
+        if color not in ('red', 'black'):
+            return
+        self._human_color = color
+        # Update robot_is_red: AI plays Red when human plays Black.
+        if self._simulation_mode and not self._self_play:
+            self._robot_is_red = color == 'black'
+        self.get_logger().info(f'Human color: {color} (robot_is_red={self._robot_is_red})')
 
     def _simulate_human_move_cb(self, msg: String) -> None:
         """Sim-only: human move from dashboard board clicks (not used on hardware)."""

@@ -78,6 +78,21 @@ let state = {
   last_alert: '',
 };
 
+// Human color choice in AI vs Human mode ('red' | 'black')
+let humanColor = 'red';
+
+function setHumanColor(color) {
+  humanColor = color;
+  document.getElementById('btn-play-red').classList.toggle('active', color === 'red');
+  document.getElementById('btn-play-black').classList.toggle('active', color === 'black');
+  updateEngineSelectors();
+  fetch('/api/set_human_color', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ color }),
+  }).catch(() => {});
+}
+
 // Interactive selection state
 let selectedIdx = null;
 let legalDests  = [];
@@ -167,9 +182,12 @@ function formatActivity(status) {
   if (aiVsAi && gs === 'executing_move') {
     return 'AI move in progress';
   }
+  if (gs === 'waiting_human') {
+    const side = humanColor === 'red' ? 'Red' : 'Black';
+    return `Waiting for you (${side})`;
+  }
   const map = {
     idle: 'Idle — choose mode, then Start',
-    waiting_human: 'Waiting for you (Red)',
     detecting_move: 'Detecting move',
     validating_move: 'Validating move',
     computing_ai: 'AI thinking',
@@ -476,10 +494,11 @@ socket.on('state_update', (data) => {
 function renderAll() {
   estopActive = !!state.estop_active;
   checkGameStartComplete();
+  const humanIsRed = humanColor === 'red';
   const humanTurn =
     state.game_mode === 'ai_vs_human' &&
     (state.game_status || '').toLowerCase() === 'waiting_human' &&
-    state.is_red_turn;
+    (humanIsRed ? state.is_red_turn : !state.is_red_turn);
   if (!humanTurn) {
     selectedIdx = null;
     legalDests = [];
@@ -560,7 +579,7 @@ function updateModeBar() {
   if (newGameBtn) {
     newGameBtn.disabled = !!state.estop_active || busy;
     newGameBtn.classList.toggle('is-loading', starting);
-    newGameBtn.textContent = starting ? '⟳ Starting…' : '▶ Start Game';
+    newGameBtn.textContent = starting ? 'Starting…' : 'Start';
   }
   if (stopBtn) stopBtn.disabled = !busy || !!state.estop_active;
   if (resetBtn) resetBtn.disabled = !!state.estop_active;
@@ -596,10 +615,12 @@ function updateModeBar() {
       state.game_mode === 'ai_vs_ai' ? 'AI vs AI — thinking…' : 'AI thinking…';
   } else if (gs === 'game_over') {
     turnLabel.textContent = 'Game over';
-  } else   if (humanTurn && !starting) {
-    turnLabel.textContent = 'Your move — click a Red piece';
-  } else if (isHumanMode && !state.is_red_turn && gs === 'waiting_human') {
-    turnLabel.textContent = 'Waiting for AI (Black)…';
+  } else if (humanTurn && !starting) {
+    const humanSide = humanColor === 'red' ? 'Red' : 'Black';
+    turnLabel.textContent = `Your move — click a ${humanSide} piece`;
+  } else if (isHumanMode && gs === 'waiting_human' && !humanTurn) {
+    const aiSide = humanColor === 'red' ? 'Black' : 'Red';
+    turnLabel.textContent = `AI thinking (${aiSide})…`;
   } else {
     turnLabel.textContent = state.is_red_turn ? 'Red to move' : 'Black to move';
   }
@@ -672,9 +693,11 @@ function updateFlowBanner() {
   }
 
   if (gs === 'computing_ai') {
-    textEl.textContent = `${mode}: AI (Black) is thinking…`;
+    const aiSide = humanColor === 'red' ? 'Black' : 'Red';
+    textEl.textContent = `${mode}: AI (${aiSide}) is thinking…`;
   } else if (gs === 'waiting_human') {
-    textEl.textContent = `${mode}: your turn — click a Red piece on the board`;
+    const humanSide = humanColor === 'red' ? 'Red' : 'Black';
+    textEl.textContent = `${mode}: your turn — click a ${humanSide} piece on the board`;
   } else if (gs === 'executing_move') {
     textEl.textContent = `${mode}: robot executing move…`;
   } else {
@@ -766,7 +789,9 @@ function engineMatchupLabel() {
     ? ` · L${skill}`
     : '';
   if (state.game_mode === 'ai_vs_human') {
-    return `Human vs ${black}${skillNote}`;
+    return humanColor === 'red'
+      ? `You (Red) vs ${black}${skillNote}`
+      : `${red}${skillNote} vs You (Black)`;
   }
   return `${red} vs ${black}${skillNote}`;
 }
@@ -792,13 +817,36 @@ function updateEngineSelectors() {
   const sim = !!state.simulation_mode;
   const humanMode = state.game_mode === 'ai_vs_human';
   const locked = sim && (!canChangeMode() || isGameStarting() || isGameInProgress());
+  const humanIsRed = humanColor === 'red';
   const redVal = selRed.value;
   const blackVal = selBlack.value;
-  const showDifficulty = engineUsesStockfish(redVal, blackVal);
+  const showDifficulty = humanMode
+    ? engineUsesStockfish(humanIsRed ? blackVal : redVal, humanIsRed ? blackVal : redVal)
+    : engineUsesStockfish(redVal, blackVal);
 
   if (panel) panel.classList.toggle('hidden', !sim);
-  selRed.disabled = locked || humanMode;
-  selBlack.disabled = locked;
+
+  // Color picker — only in human mode
+  const colorRow = document.getElementById('human-color-row');
+  if (colorRow) colorRow.classList.toggle('hidden', !humanMode);
+
+  // Per-side visibility: human side shows "(you)", AI side shows selector
+  const youRedEl  = document.getElementById('engine-you-red');
+  const youBlackEl = document.getElementById('engine-you-black');
+  if (humanMode) {
+    selRed.classList.toggle('hidden', humanIsRed);
+    selBlack.classList.toggle('hidden', !humanIsRed);
+    if (youRedEl)   youRedEl.classList.toggle('hidden', !humanIsRed);
+    if (youBlackEl) youBlackEl.classList.toggle('hidden', humanIsRed);
+  } else {
+    selRed.classList.remove('hidden');
+    selBlack.classList.remove('hidden');
+    if (youRedEl)   youRedEl.classList.add('hidden');
+    if (youBlackEl) youBlackEl.classList.add('hidden');
+  }
+
+  selRed.disabled   = locked || (humanMode && humanIsRed);
+  selBlack.disabled = locked || (humanMode && !humanIsRed);
   if (diffSlider) diffSlider.disabled = locked;
 
   if (diffRow) diffRow.classList.toggle('hidden', !showDifficulty);
@@ -808,22 +856,10 @@ function updateEngineSelectors() {
   updateDifficultyDisplay();
 
   if (lockBadge) lockBadge.classList.toggle('hidden', !locked);
-  if (hint) {
-    hint.textContent = humanMode
-      ? 'You play Red on the board. Pick the Black AI engine and Stockfish level, then Start Game.'
-      : 'Pick engines and Stockfish strength (when used), then Start Game.';
-  }
   if (matchup) matchup.textContent = engineMatchupLabel();
 
-  const redLabel = cfg.querySelector('.engine-side-row:first-child .engine-pick');
-  if (redLabel) redLabel.textContent = humanMode ? 'Red (you)' : 'Red';
-
-  if (state.red_engine && selRed.value !== state.red_engine) {
-    selRed.value = state.red_engine;
-  }
-  if (state.black_engine && selBlack.value !== state.black_engine) {
-    selBlack.value = state.black_engine;
-  }
+  if (state.red_engine && selRed.value !== state.red_engine) selRed.value = state.red_engine;
+  if (state.black_engine && selBlack.value !== state.black_engine) selBlack.value = state.black_engine;
 }
 
 function updateAIPanel() {
@@ -910,14 +946,14 @@ function updateSystemPanel() {
   document.getElementById('sys-gripper').textContent    = state.gripper_active ? 'Active' : 'Idle';
 
   const estopEl = document.getElementById('sys-estop');
-  estopEl.textContent = state.estop_active ? '⚠ ACTIVE' : 'OK';
+  estopEl.textContent = state.estop_active ? 'ACTIVE' : 'OK';
   estopEl.className   = state.estop_active ? 'status-err' : 'status-ok';
 
   const estopBtn = document.getElementById('btn-estop');
   const estopHint = document.getElementById('estop-hint');
   if (estopBtn) {
     estopBtn.classList.toggle('active', state.estop_active);
-    estopBtn.textContent = state.estop_active ? '✓ Release E-Stop' : '⛔ E-Stop';
+    estopBtn.textContent = state.estop_active ? 'Release E-Stop' : 'E-Stop';
   }
   if (estopHint) {
     estopHint.textContent = state.estop_active ? 'Click to resume' : 'Halt robot / AI';
@@ -983,7 +1019,8 @@ canvas.addEventListener('click', (e) => {
   }
   if (state.game_mode !== 'ai_vs_human') return;
   if ((state.game_status || '').toLowerCase() !== 'waiting_human') return;
-  if (!state.is_red_turn) return;
+  const humanIsRed2 = humanColor === 'red';
+  if (humanIsRed2 ? !state.is_red_turn : state.is_red_turn) return;
 
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width  / rect.width;
@@ -997,8 +1034,8 @@ canvas.addEventListener('click', (e) => {
   const clickedCode = state.board_grid[clickedIdx];
 
   if (selectedIdx === null) {
-    // Select a Red piece
-    if (clickedCode > 0) {
+    // Select a piece belonging to the human's color (positive = red, negative = black)
+    if (humanIsRed2 ? clickedCode > 0 : clickedCode < 0) {
       selectedIdx = clickedIdx;
       fetchLegalDests(clickedIdx);
     }

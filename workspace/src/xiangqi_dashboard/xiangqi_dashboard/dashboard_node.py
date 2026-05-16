@@ -94,6 +94,7 @@ _state = {
     'game_result_reason': '',
     'simulation_mode': True,
     'game_mode': 'ai_vs_human',   # 'ai_vs_ai' (sim only) | 'ai_vs_human'
+    'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
     '_dirty': False,
 }
@@ -345,6 +346,24 @@ def api_set_engines():
     })
 
 
+@_flask_app.route('/api/set_human_color', methods=['POST'])
+def api_set_human_color():
+    """Set which color the human plays in ai_vs_human mode."""
+    data = request.json or {}
+    color = (data.get('color') or '').strip().lower()
+    if color not in ('red', 'black'):
+        return jsonify({'ok': False, 'error': 'color must be red or black'}), 400
+    with _state_lock:
+        _state['human_color'] = color
+        _state['_dirty'] = True
+    pub = _ros_publishers.get('human_color')
+    if pub:
+        msg = String()
+        msg.data = color
+        pub.publish(msg)
+    return jsonify({'ok': True, 'human_color': color})
+
+
 def _publish_game_mode(mode: str) -> None:
     pub = _ros_publishers.get('game_mode')
     if pub:
@@ -462,10 +481,12 @@ def api_legal_moves():
         fen = _state.get('fen') or STARTING_FEN
         status = (_state.get('game_status') or '').lower()
         is_red = _state.get('is_red_turn', True)
+        human_color = _state.get('human_color', 'red')
 
     if not sim or mode != 'ai_vs_human':
         return jsonify({'ok': False, 'error': 'Only in simulation AI vs Human', 'dest_indices': []}), 403
-    if status != 'waiting_human' or not is_red:
+    human_is_red = human_color == 'red'
+    if status != 'waiting_human' or (human_is_red != is_red):
         return jsonify({'ok': False, 'error': 'Not your turn', 'dest_indices': []}), 409
 
     try:
@@ -565,6 +586,7 @@ class DashboardNode(Node):
         self._ai_engines_pub = self.create_publisher(String, '/xiangqi/ai_engines', 10)
         self._stop_game_pub = self.create_publisher(Empty, '/xiangqi/stop_game', 10)
         self._reset_game_pub = self.create_publisher(Empty, '/xiangqi/reset_game', 10)
+        self._human_color_pub = self.create_publisher(String, '/xiangqi/human_color', 10)
 
         _ros_publishers['new_game'] = self._new_game_pub
         _ros_publishers['stop_game'] = self._stop_game_pub
@@ -574,6 +596,7 @@ class DashboardNode(Node):
         _ros_publishers['human_ready'] = self._human_ready_pub
         _ros_publishers['estop'] = self._estop_pub
         _ros_publishers['resync'] = self._resync_pub
+        _ros_publishers['human_color'] = self._human_color_pub
         _ros_publishers['set_engine_cli'] = self.create_client(SetEngine, 'set_engine')
 
         # Push state to browsers (threading async_mode allows emit from this ROS thread)

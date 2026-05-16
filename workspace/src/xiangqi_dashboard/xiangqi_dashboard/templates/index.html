@@ -6,15 +6,15 @@
   <title>Xiangqi Robot Dashboard</title>
   <meta name="description" content="Real-time Xiangqi robot simulation control dashboard with AI engine analysis and board visualization." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Noto+Serif+SC:wght@400;600&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/css/style.css" />
 </head>
 <body>
   <header id="app-header">
     <div class="header-left">
-      <span class="logo-icon">♟</span>
+      <span class="logo-icon">棋</span>
       <span class="logo-text">Xiangqi Robot</span>
-      <div id="sim-badge" class="sim-badge hidden">⚙ SIMULATION MODE</div>
+      <div id="sim-badge" class="sim-badge hidden">SIMULATION</div>
     </div>
     <div class="header-right">
       <div id="connection-dot" class="conn-dot disconnected" title="WebSocket connection"></div>
@@ -24,8 +24,7 @@
 
   <div id="mode-bar">
     <div id="mode-bar-sim" class="mode-bar-sim">
-      <span class="flow-step-num">1</span>
-      <span class="mode-label">Choose mode</span>
+      <span class="mode-label">Mode</span>
       <div class="mode-toggle" id="mode-toggle">
         <button type="button" id="btn-ai-vs-ai" class="mode-btn active" onclick="setMode('ai_vs_ai')">AI vs AI</button>
         <button type="button" id="btn-ai-vs-human" class="mode-btn" onclick="setMode('ai_vs_human')">AI vs Human</button>
@@ -33,31 +32,18 @@
       <span id="mode-lock-hint" class="mode-lock-hint hidden">Locked while playing</span>
     </div>
     <div id="hardware-play-banner" class="hardware-play-banner hidden">
-      Human vs AI — play on the physical board; camera detects your moves
+      Human vs AI — play on the physical board
     </div>
 
     <div id="flow-banner" class="flow-banner" role="status" aria-live="polite">
-      <span class="flow-step-num">2</span>
-      <span id="flow-banner-text">Choose mode, engines (right panel), then Start Game</span>
+      <span id="flow-banner-text">Choose mode and engines, then Start Game</span>
     </div>
 
     <div class="header-controls">
-      <div class="ctrl-group">
-        <span class="ctrl-hint">Start (setup only)</span>
-        <button type="button" class="ctrl-btn new-game-btn" id="btn-new-game" onclick="newGame()">▶ Start Game</button>
-      </div>
-      <div class="ctrl-group">
-        <span class="ctrl-hint">End game → setup (no auto-start)</span>
-        <button type="button" class="ctrl-btn stop-game-btn" id="btn-stop-game" onclick="stopGame()">■ Stop</button>
-      </div>
-      <div class="ctrl-group">
-        <span class="ctrl-hint">Restart same mode immediately</span>
-        <button type="button" class="ctrl-btn reset-game-btn" id="btn-reset-game" onclick="resetGame()">↺ Restart</button>
-      </div>
-      <div class="ctrl-group">
-        <span class="ctrl-hint" id="estop-hint">Halt robot / AI</span>
-        <button type="button" class="ctrl-btn estop-btn" id="btn-estop" onclick="toggleEstop()">⛔ E-Stop</button>
-      </div>
+      <button type="button" class="ctrl-btn new-game-btn" id="btn-new-game" onclick="newGame()">Start</button>
+      <button type="button" class="ctrl-btn stop-game-btn" id="btn-stop-game" onclick="stopGame()">Stop</button>
+      <button type="button" class="ctrl-btn reset-game-btn" id="btn-reset-game" onclick="resetGame()">Restart</button>
+      <button type="button" class="ctrl-btn estop-btn" id="btn-estop" onclick="toggleEstop()">E-Stop</button>
     </div>
   </div>
 
@@ -68,13 +54,13 @@
         <span id="game-result-detail" class="game-result-detail"></span>
       </div>
       <div id="estop-banner" class="estop-banner hidden" role="alert">
-        E-STOP active — click Release E-Stop, then New Game to continue
+        E-STOP active — Release E-Stop, then New Game to continue
       </div>
       <div id="board-wrapper">
         <div id="board-loading" class="board-loading hidden" aria-live="polite">
           <div class="board-loading-inner">
             <div class="loading-spinner" aria-hidden="true"></div>
-            <span id="board-loading-text">Starting game…</span>
+            <span id="board-loading-text">Starting…</span>
           </div>
         </div>
         <canvas id="board-canvas" width="480" height="533"></canvas>
@@ -99,15 +85,26 @@
     <aside id="right-panel">
       <div class="panel" id="panel-engines">
         <div class="panel-header">
-          <span class="panel-icon">🤖</span> Engine Setup
+          <span class="panel-glyph">将</span>
+          Engine Setup
           <span id="engine-setup-lock" class="engine-setup-lock hidden">Locked</span>
         </div>
-        <p id="engine-setup-hint" class="engine-setup-hint">
-          Choose AI for each side before Start Game.
-        </p>
+        <div id="human-color-row" class="human-color-row hidden">
+          <span class="human-color-label">You play as</span>
+          <div class="human-color-toggle">
+            <button type="button" id="btn-play-red" class="human-color-btn active" onclick="setHumanColor('red')">
+              <span class="engine-side-dot red-dot"></span> Red
+            </button>
+            <button type="button" id="btn-play-black" class="human-color-btn" onclick="setHumanColor('black')">
+              <span class="engine-side-dot black-dot"></span> Black
+            </button>
+          </div>
+        </div>
         <div id="engine-config" class="engine-config-panel">
           <div class="engine-side-row">
+            <span class="engine-side-dot red-dot"></span>
             <label class="engine-pick" for="sel-red-engine">Red</label>
+            <span id="engine-you-red" class="engine-you hidden">(you)</span>
             <select id="sel-red-engine" class="engine-select" onchange="onEngineChange()">
               <option value="minimax">Minimax</option>
               <option value="fairystockfish">Stockfish</option>
@@ -115,7 +112,9 @@
           </div>
           <span class="engine-vs">vs</span>
           <div class="engine-side-row">
+            <span class="engine-side-dot black-dot"></span>
             <label class="engine-pick" for="sel-black-engine">Black</label>
+            <span id="engine-you-black" class="engine-you hidden">(you)</span>
             <select id="sel-black-engine" class="engine-select" onchange="onEngineChange()">
               <option value="minimax">Minimax</option>
               <option value="fairystockfish">Stockfish</option>
@@ -123,21 +122,24 @@
           </div>
         </div>
         <div id="stockfish-difficulty-row" class="engine-difficulty-row hidden">
-          <label class="engine-difficulty-label" for="sel-stockfish-difficulty">Stockfish strength</label>
-          <div class="engine-difficulty-controls">
-            <input type="range" id="sel-stockfish-difficulty" class="engine-difficulty-slider"
-                   min="1" max="20" value="20" step="1"
-                   oninput="onDifficultyInput()" onchange="onDifficultyChange()" />
+          <div class="engine-difficulty-header">
+            <label class="engine-difficulty-label" for="sel-stockfish-difficulty">Stockfish Strength</label>
             <span id="stockfish-difficulty-value" class="engine-difficulty-value" title="UCI Skill Level 1–20">20</span>
           </div>
-          <p class="engine-difficulty-hint">Level 20 = strongest. Applies when either side uses Stockfish.</p>
+          <input type="range" id="sel-stockfish-difficulty" class="engine-difficulty-slider"
+                 min="1" max="20" value="20" step="1"
+                 oninput="onDifficultyInput()" onchange="onDifficultyChange()" />
+          <div class="engine-difficulty-scale">
+            <span>Weakest</span><span>Strongest</span>
+          </div>
         </div>
         <p id="engine-matchup-label" class="engine-matchup-label">Minimax vs Minimax</p>
       </div>
 
       <div class="panel" id="panel-ai">
         <div class="panel-header">
-          <span class="panel-icon">🧠</span> AI Analysis
+          <span class="panel-glyph">析</span>
+          AI Analysis
           <span id="engine-badge" class="engine-badge">--</span>
         </div>
         <div class="eval-bar-wrapper">
@@ -171,7 +173,10 @@
       </div>
 
       <div class="panel" id="panel-system">
-        <div class="panel-header"><span class="panel-icon">⚙</span> System Status</div>
+        <div class="panel-header">
+          <span class="panel-glyph">状</span>
+          System Status
+        </div>
         <div class="info-grid">
           <div class="info-item">
             <label>Phase</label>
@@ -206,7 +211,8 @@
 
       <div class="panel panel-history" id="panel-history">
         <div class="panel-header">
-          <span class="panel-icon">📋</span> Move History
+          <span class="panel-glyph">谱</span>
+          Move History
           <span id="history-count-note" class="history-count-note"></span>
         </div>
         <div id="history-list" class="history-list"></div>

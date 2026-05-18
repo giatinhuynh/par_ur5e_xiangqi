@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="594.0mm" height="420.0mm" viewBox="0 0 594.0 420.0">
+<svg xmlns="http://www.w3.org/2000/svg" width="297.0mm" height="420.0mm" viewBox="0 0 297.0 420.0">
+  <defs><clipPath id="tile_clip"><rect x="0" y="0" width="297.00" height="420.00"/></clipPath></defs>
+  <g clip-path="url(#tile_clip)">
+    <g transform="translate(-0.00,-0.00)">
   <rect x="0.00" y="0.00" width="594.00" height="420.00" fill="#f5e6c8" stroke="none" stroke-width="0.5" rx="0"/>
   <rect x="8.00" y="8.00" width="27.30" height="27.30" fill="#ffffff" stroke="none" stroke-width="0.5" rx="0"/>
   <rect x="8.000" y="8.000" width="3.900" height="3.900" fill="#000000"/>
@@ -319,7 +322,7 @@
   <text x="145.60" y="83.10" font-size="3.5" text-anchor="end" fill="#555" font-family="serif">8</text>
   <text x="145.60" y="46.50" font-size="3.5" text-anchor="end" fill="#555" font-family="serif">9</text>
   <rect x="150.60" y="45.30" width="292.80" height="329.40" fill="none" stroke="#1a1a1a" stroke-width="1.0" rx="0"/>
-  <text x="297.00" y="34.30" font-size="2.3" text-anchor="middle" fill="#777" font-family="serif" dominant-baseline="middle">594×420 mm | 9×10 | cell 36.6 mm sq | ArUco 4×4_50 0–3 | 27 mm</text>
+  <text x="297.00" y="34.30" font-size="2.3" text-anchor="middle" fill="#777" font-family="serif" dominant-baseline="middle">2×A3 portrait → A2 size | 594×420 mm | 9×10 | cell 36.6 mm sq | ArUco 4×4_50 0–3 | 27 mm</text>
   <text x="297.00" y="36.50" font-size="3.6" text-anchor="middle" fill="#1a1a1a" font-weight="bold" font-family="serif">黑方  BLACK (Human)</text>
   <text x="150.60" y="382.36" font-size="3.5" text-anchor="middle" fill="#555" font-family="serif">A</text>
   <text x="187.20" y="382.36" font-size="3.5" text-anchor="middle" fill="#555" font-family="serif">B</text>
@@ -331,4 +334,14 @@
   <text x="406.80" y="382.36" font-size="3.5" text-anchor="middle" fill="#555" font-family="serif">H</text>
   <text x="443.40" y="382.36" font-size="3.5" text-anchor="middle" fill="#555" font-family="serif">I</text>
   <text x="297.00" y="389.31" font-size="3.6" text-anchor="middle" fill="#c0392b" font-weight="bold" font-family="serif">红方  RED (Robot)</text>
+    </g>
+  </g>
+  <line x1="286.00" y1="92.40" x2="294.00" y2="92.40" stroke="#c0392b" stroke-width="0.45"/>
+  <line x1="294.00" y1="89.60" x2="294.00" y2="95.20" stroke="#c0392b" stroke-width="0.45"/>
+  <line x1="286.00" y1="210.00" x2="294.00" y2="210.00" stroke="#c0392b" stroke-width="0.45"/>
+  <line x1="294.00" y1="207.20" x2="294.00" y2="212.80" stroke="#c0392b" stroke-width="0.45"/>
+  <line x1="286.00" y1="327.60" x2="294.00" y2="327.60" stroke="#c0392b" stroke-width="0.45"/>
+  <line x1="294.00" y1="324.80" x2="294.00" y2="330.40" stroke="#c0392b" stroke-width="0.45"/>
+  <text x="279.00" y="408.00" font-size="2.5" text-anchor="middle" fill="#c0392b" font-family="serif">TAPE →</text>
+  <text x="287.00" y="10.00" font-size="2.4" text-anchor="end" fill="#888" font-family="serif">2×A3 · L</text>
 </svg>

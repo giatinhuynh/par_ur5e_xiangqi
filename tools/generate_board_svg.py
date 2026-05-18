@@ -12,7 +12,11 @@ Layout rules (fixes overlap / corner issues):
   - **a–i** sit directly under the bottom grid line with the same clearance as **0–9** left of gx(0).
   - **红方** sits **below** the file row; **黑方** sits **above** the top grid with extra margin (CJK/serif).
 
-Output: docs/board_mat_A2.svg, docs/board_mat_A3.svg
+Output: docs/board_mat_A2.svg, docs/board_mat_A3.svg,
+         docs/board_mat_2xA3_left.svg, docs/board_mat_2xA3_right.svg
+         (two portrait A3 → A2-sized mat),
+         docs/board_mat_4xA3_{TL,TR,BL,BR}.svg
+         (four portrait A3 in 2×2 → 594×840 mm tall mat, wide capture strips)
 """
 
 import os
@@ -32,6 +36,15 @@ PAGE_W_MM_A2 = 594.0
 PAGE_H_MM_A2 = 420.0
 PAGE_W_MM_A3 = 420.0
 PAGE_H_MM_A3 = 297.0
+# Portrait A3 (print with long edge vertical): 297 × 420 mm per sheet.
+PAGE_W_MM_A3_PORTRAIT = PAGE_H_MM_A3
+PAGE_H_MM_A3_PORTRAIT = PAGE_W_MM_A3
+# Two portrait A3 sheets taped along the 420 mm height → same footprint as A2.
+PAGE_W_MM_2XA3 = PAGE_W_MM_A2
+PAGE_H_MM_2XA3 = PAGE_H_MM_A2
+# Four portrait A3 sheets in 2×2 → 594 × 840 mm (board runs vertically).
+PAGE_W_MM_4XA3 = PAGE_W_MM_A3_PORTRAIT * 2.0
+PAGE_H_MM_4XA3 = PAGE_H_MM_A3_PORTRAIT * 2.0
 
 # Corner ArUcos: bleed inset (mm) used for inner layout band only.
 CORNER_INSET_MM = 1.5
@@ -45,9 +58,20 @@ ARUCO_BAND_GAP_MM = 10.0
 
 GRAVEYARD_W_MM = 56.0
 GRAVEYARD_GAP_MM = 5.0
-# Extend each graveyard strip above/below the grid (mm per side).
+
+# 4×A3 (594×840 mm portrait mat): capture strips above/below the grid (BLACK top,
+# RED bottom); large ArUco; strips stay between side corner markers vertically.
+LAYOUT_4XA3 = {
+    'graveyard_w_mm': 85.0,
+    'graveyard_placement': 'ends',
+    'aruco_mm': 38.0,
+    'aruco_band_gap_mm': 6.0,
+    'corner_inset_mm': 1.0,
+    'graveyard_clip_to_aruco_band': True,
+}
+# Extend each graveyard strip above/below the grid (mm per side), within inner band only.
 GRAVEYARD_VERTICAL_EXTEND_MM = 22.0
-# When inner height ≈ grid height, allow strip to grow into cream band toward top/bottom.
+# Legacy bleed toward page edge (disabled when graveyard_clip_to_aruco_band is set).
 GRAVEYARD_VERTICAL_BLEED_MM = 10.0
 
 # Rank (0–9) / file (a–i) labels: same font; horizontal gap = gx(0) - rank_label_x;
@@ -120,20 +144,30 @@ def aruco_to_svg(x, y, size_mm, marker_id, pixels=7):
     return svg
 
 
-def compute_layout(page_w: float, page_h: float):
+def compute_layout(page_w: float, page_h: float, layout: dict | None = None):
     """
     Returns dict with geometry helpers.
     Origin top-left; rank 0 = bottom (robot/red), rank 9 = top (human/black).
-    """
-    aruco = aruco_size_for_page(page_w, page_h)
-    inset = CORNER_INSET_MM
-    band = ARUCO_BAND_GAP_MM
 
-    # Inner rectangle that may contain graveyards + board (never overlaps corner ArUcos)
-    inner_left = inset + aruco + band
-    inner_right = page_w - inset - aruco - band
-    inner_top = inset + aruco + band
-    inner_bottom = page_h - inset - aruco - band
+    layout: optional overrides — graveyard_w_mm, graveyard_placement ('sides'|'ends'),
+            aruco_mm, aruco_band_gap_mm, corner_inset_mm, graveyard_clip_to_aruco_band.
+    """
+    opts = layout or {}
+    graveyard_w = float(opts.get('graveyard_w_mm', GRAVEYARD_W_MM))
+    placement = str(opts.get('graveyard_placement', 'sides'))
+    aruco = float(opts['aruco_mm']) if 'aruco_mm' in opts else aruco_size_for_page(page_w, page_h)
+    inset = float(opts.get('corner_inset_mm', CORNER_INSET_MM))
+    band = float(opts.get('aruco_band_gap_mm', ARUCO_BAND_GAP_MM))
+    clip_graveyards = bool(opts.get('graveyard_clip_to_aruco_band', False))
+
+    # Match build_board_svg_parts: markers sit at max(corner inset, page inset).
+    aruco_inset = max(inset, ARUCO_PAGE_INSET_MM)
+
+    # Inner rectangle between corner ArUcos (graveyards + grid stay inside).
+    inner_left = aruco_inset + aruco + band
+    inner_right = page_w - aruco_inset - aruco - band
+    inner_top = aruco_inset + aruco + band
+    inner_bottom = page_h - aruco_inset - aruco - band
 
     iw = inner_right - inner_left
     ih = inner_bottom - inner_top
@@ -142,43 +176,71 @@ def compute_layout(page_w: float, page_h: float):
             f'Page {page_w}×{page_h} mm too small after ArUco bands (inner {iw:.0f}×{ih:.0f} mm).'
         )
 
-    bl = inner_left + GRAVEYARD_W_MM + GRAVEYARD_GAP_MM
-    br = inner_right - GRAVEYARD_W_MM - GRAVEYARD_GAP_MM
-    bw = br - bl
-    bh = inner_bottom - inner_top
-    if bw < 60 or bh < 60:
-        raise ValueError('Board interior too small; reduce graveyard width or print larger.')
+    gy_left = inner_left
+    gy_right = inner_right
 
-    # Square cells, centred in [bl, br] × [inner_top, inner_bottom]
-    cell = min(bw / (FILES - 1), bh / (RANKS - 1))
-    grid_w = cell * (FILES - 1)
-    grid_h = cell * (RANKS - 1)
-    bl_grid = bl + (bw - grid_w) / 2.0
-    v_lo = inner_top + (bh - grid_h) / 2.0
-    bb_grid = v_lo + grid_h  # y of rank-0 horizontal (bottom edge of grid)
+    if placement == 'ends':
+        # Horizontal strips: BLACK captured above grid, RED below (portrait-friendly).
+        strip_d = graveyard_w
+        bl = inner_left
+        br = inner_right
+        bw = br - bl
+        board_top = inner_top + strip_d + GRAVEYARD_GAP_MM
+        board_bottom = inner_bottom - strip_d - GRAVEYARD_GAP_MM
+        bh = board_bottom - board_top
+        if bw < 60 or bh < 60:
+            raise ValueError('Board interior too small; reduce graveyard strip depth or print larger.')
+        cell = min(bw / (FILES - 1), bh / (RANKS - 1))
+        grid_w = cell * (FILES - 1)
+        grid_h = cell * (RANKS - 1)
+        bl_grid = bl + (bw - grid_w) / 2.0
+        v_lo = board_top + (bh - grid_h) / 2.0
+        bb_grid = v_lo + grid_h
+        grave_top = inner_top
+        grave_h = strip_d
+        grave_strip_w = iw
+        grave_bottom_y = inner_bottom - strip_d
+    else:
+        bl = inner_left + graveyard_w + GRAVEYARD_GAP_MM
+        br = inner_right - graveyard_w - GRAVEYARD_GAP_MM
+        bw = br - bl
+        bh = inner_bottom - inner_top
+        if bw < 60 or bh < 60:
+            raise ValueError('Board interior too small; reduce graveyard width or print larger.')
+        cell = min(bw / (FILES - 1), bh / (RANKS - 1))
+        grid_w = cell * (FILES - 1)
+        grid_h = cell * (RANKS - 1)
+        bl_grid = bl + (bw - grid_w) / 2.0
+        v_lo = inner_top + (bh - grid_h) / 2.0
+        bb_grid = v_lo + grid_h
+        gy_right = br + GRAVEYARD_GAP_MM
+        grave_strip_w = graveyard_w
+        grave_bottom_y = None
+        ext = GRAVEYARD_VERTICAL_EXTEND_MM
+        if clip_graveyards:
+            grave_top = max(inner_top, v_lo - ext)
+            grave_bottom = min(inner_bottom, v_lo + grid_h + ext)
+        else:
+            bleed = GRAVEYARD_VERTICAL_BLEED_MM
+            grave_top = max(inner_top - bleed, v_lo - ext)
+            grave_bottom = min(inner_bottom + bleed, v_lo + grid_h + ext)
+            grave_top = min(grave_top, v_lo)
+            grave_bottom = max(grave_bottom, v_lo + grid_h)
+            edge = 2.0
+            grave_top = max(edge, grave_top)
+            grave_bottom = min(page_h - edge, grave_bottom)
+        grave_top = max(grave_top, inner_top)
+        grave_bottom = min(grave_bottom, inner_bottom)
+        grave_h = grave_bottom - grave_top
+        if grave_h < grid_h:
+            grave_top = max(inner_top, v_lo)
+            grave_h = min(grid_h, inner_bottom - grave_top)
 
     def gx(file_idx: int) -> float:
         return bl_grid + file_idx * cell
 
     def gy(rank_idx: int) -> float:
         return bb_grid - rank_idx * cell
-
-    # Graveyard strips: wider than grid; extend vertically (bleed into margin band if needed).
-    gy_left = inner_left
-    gy_right = br + GRAVEYARD_GAP_MM
-    ext = GRAVEYARD_VERTICAL_EXTEND_MM
-    bleed = GRAVEYARD_VERTICAL_BLEED_MM
-    grave_top = max(inner_top - bleed, v_lo - ext)
-    grave_bottom = min(inner_bottom + bleed, v_lo + grid_h + ext)
-    grave_top = min(grave_top, v_lo)
-    grave_bottom = max(grave_bottom, v_lo + grid_h)
-    edge = 2.0
-    grave_top = max(edge, grave_top)
-    grave_bottom = min(page_h - edge, grave_bottom)
-    grave_h = grave_bottom - grave_top
-    if grave_h < grid_h:
-        grave_top = v_lo
-        grave_h = grid_h
 
     return {
         'aruco': aruco,
@@ -199,11 +261,74 @@ def compute_layout(page_w: float, page_h: float):
         'gy_right': gy_right,
         'grave_top': grave_top,
         'grave_h': grave_h,
+        'graveyard_w': graveyard_w,
+        'graveyard_placement': placement,
+        'grave_strip_w': grave_strip_w if placement == 'ends' else graveyard_w,
+        'grave_bottom_y': grave_bottom_y if placement == 'ends' else None,
+        'aruco_inset': aruco_inset,
     }
 
 
-def generate_board_svg(output_path: str, page_w: float, page_h: float):
-    L = compute_layout(page_w, page_h)
+def tile_seam_marks(
+    tile_w: float,
+    tile_h: float,
+    seam_edges: frozenset[str],
+    tile_label: str,
+) -> str:
+    """
+    Registration marks on tile edges that join a neighbour.
+    seam_edges: subset of 'left', 'right', 'top', 'bottom' (this tile's outward seams).
+    """
+    tick = 8.0
+    gap = 3.0
+    stroke = '#c0392b'
+    sw = 0.45
+    parts: list[str] = []
+
+    if 'right' in seam_edges:
+        sx = tile_w - gap
+        for y in (tile_h * 0.22, tile_h * 0.5, tile_h * 0.78):
+            parts.append(line(sx - tick, y, sx, y, stroke=stroke, width=sw))
+            parts.append(line(sx, y - tick * 0.35, sx, y + tick * 0.35, stroke=stroke, width=sw))
+        parts.append(text(tile_w - 18.0, tile_h - 12.0, 'TAPE →', size=2.5, fill='#c0392b'))
+    if 'left' in seam_edges:
+        sx = gap
+        for y in (tile_h * 0.22, tile_h * 0.5, tile_h * 0.78):
+            parts.append(line(sx, y, sx + tick, y, stroke=stroke, width=sw))
+            parts.append(line(sx, y - tick * 0.35, sx, y + tick * 0.35, stroke=stroke, width=sw))
+        parts.append(text(18.0, tile_h - 12.0, '← TAPE', size=2.5, fill='#c0392b'))
+    if 'bottom' in seam_edges:
+        sy = tile_h - gap
+        for x in (tile_w * 0.22, tile_w * 0.5, tile_w * 0.78):
+            parts.append(line(x, sy - tick, x, sy, stroke=stroke, width=sw))
+            parts.append(line(x - tick * 0.35, sy, x + tick * 0.35, sy, stroke=stroke, width=sw))
+        parts.append(text(tile_w * 0.5, tile_h - 12.0, 'TAPE ↓', size=2.5, fill='#c0392b'))
+    if 'top' in seam_edges:
+        sy = gap
+        for x in (tile_w * 0.22, tile_w * 0.5, tile_w * 0.78):
+            parts.append(line(x, sy, x, sy + tick, stroke=stroke, width=sw))
+            parts.append(line(x - tick * 0.35, sy, x + tick * 0.35, sy, stroke=stroke, width=sw))
+        parts.append(text(tile_w * 0.5, 14.0, '↑ TAPE', size=2.5, fill='#c0392b'))
+
+    parts.append(
+        text(tile_w - 10.0, 10.0, tile_label, size=2.4, anchor='end', fill='#888')
+    )
+    return ''.join(parts)
+
+
+def build_board_svg_parts(
+    page_w: float,
+    page_h: float,
+    *,
+    aruco_ids: set[int] | None = None,
+    sheet_label: str | None = None,
+    layout: dict | None = None,
+) -> list[str]:
+    """Return SVG fragment strings (no outer <svg> wrapper)."""
+    if aruco_ids is None:
+        aruco_ids = {0, 1, 2, 3}
+
+    L = compute_layout(page_w, page_h, layout)
     aruco = L['aruco']
     inset = L['inset']
     gx, gy = L['gx'], L['gy']
@@ -213,11 +338,13 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
     grid_w, grid_h = L['grid_w'], L['grid_h']
     gy_left, gy_right = L['gy_left'], L['gy_right']
     gt, gh = L['grave_top'], L['grave_h']
+    graveyard_w = L['graveyard_w']
+    grave_placement = L['graveyard_placement']
+    grave_strip_w = L['grave_strip_w']
+    grave_bottom_y = L['grave_bottom_y']
+    inner_left = L['inner_left']
 
-    svg_parts = [
-        '<?xml version="1.0" encoding="UTF-8"?>\n',
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'width="{page_w}mm" height="{page_h}mm" viewBox="0 0 {page_w} {page_h}">\n',
+    svg_parts: list[str] = [
         rect(0, 0, page_w, page_h, fill='#f5e6c8', stroke='none'),
     ]
 
@@ -231,6 +358,8 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
     ]
 
     for mx, my, mid in aruco_positions_ul:
+        if mid not in aruco_ids:
+            continue
         svg_parts.append(aruco_to_svg(mx, my, aruco, mid))
         if mid == 0:
             lx, ly = mx + aruco + 2.0, my + aruco * 0.55
@@ -246,26 +375,46 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
             anc = 'start'
         svg_parts.append(text(lx, ly, f'{mid}', size=2.8, anchor=anc, fill='#666'))
 
-    # --- Graveyards (wider + taller than grid; labels centred) ---
-    svg_parts.append(
-        rect(gy_left, gt, GRAVEYARD_W_MM, gh, fill='#e8d5a0', stroke='#888', width=0.4)
-    )
-    svg_parts.append(
-        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 - 3.5, 'BLACK', size=4.2, fill='#222', baseline='middle')
-    )
-    svg_parts.append(
-        text(gy_left + GRAVEYARD_W_MM / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
-    )
-
-    svg_parts.append(
-        rect(gy_right, gt, GRAVEYARD_W_MM, gh, fill='#e8d5a0', stroke='#888', width=0.4)
-    )
-    svg_parts.append(
-        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 - 3.5, 'RED', size=4.2, fill='#8b0000', baseline='middle')
-    )
-    svg_parts.append(
-        text(gy_right + GRAVEYARD_W_MM / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
-    )
+    # --- Graveyards: ends = top BLACK / bottom RED strips; sides = left / right strips ---
+    if grave_placement == 'ends':
+        cx = inner_left + grave_strip_w / 2.0
+        svg_parts.append(
+            rect(inner_left, gt, grave_strip_w, gh, fill='#e8d5a0', stroke='#888', width=0.4)
+        )
+        svg_parts.append(
+            text(cx, gt + gh / 2 - 3.5, 'BLACK', size=4.2, fill='#222', baseline='middle')
+        )
+        svg_parts.append(
+            text(cx, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
+        )
+        svg_parts.append(
+            rect(inner_left, grave_bottom_y, grave_strip_w, gh, fill='#e8d5a0', stroke='#888', width=0.4)
+        )
+        svg_parts.append(
+            text(cx, grave_bottom_y + gh / 2 - 3.5, 'RED', size=4.2, fill='#8b0000', baseline='middle')
+        )
+        svg_parts.append(
+            text(cx, grave_bottom_y + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
+        )
+    else:
+        svg_parts.append(
+            rect(gy_left, gt, graveyard_w, gh, fill='#e8d5a0', stroke='#888', width=0.4)
+        )
+        svg_parts.append(
+            text(gy_left + graveyard_w / 2, gt + gh / 2 - 3.5, 'BLACK', size=4.2, fill='#222', baseline='middle')
+        )
+        svg_parts.append(
+            text(gy_left + graveyard_w / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
+        )
+        svg_parts.append(
+            rect(gy_right, gt, graveyard_w, gh, fill='#e8d5a0', stroke='#888', width=0.4)
+        )
+        svg_parts.append(
+            text(gy_right + graveyard_w / 2, gt + gh / 2 - 3.5, 'RED', size=4.2, fill='#8b0000', baseline='middle')
+        )
+        svg_parts.append(
+            text(gy_right + graveyard_w / 2, gt + gh / 2 + 4.5, 'CAPTURED', size=3.5, fill='#444', baseline='middle')
+        )
 
     # --- Grid ---
     for f in range(FILES):
@@ -330,7 +479,7 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
 
     rank_label_x = max(
         gx(0) - COORD_LABEL_LINE_GAP_MM,
-        gy_left + GRAVEYARD_W_MM + 2.0,
+        inner_left + (2.0 if grave_placement == 'ends' else graveyard_w + 2.0),
     )
     coord_gap_mm = gx(0) - rank_label_x
     for r in range(RANKS):
@@ -350,14 +499,17 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
 
     # Spec line (top margin) first so it stays under any rare overlap with 黑方.
     gap_mid_y = inset + aruco + ARUCO_BAND_GAP_MM * 0.55
+    spec = (
+        f'{page_w:.0f}×{page_h:.0f} mm | {FILES}×{RANKS} | cell {cell:.1f} mm sq | '
+        f'ArUco 4×4_50 0–3 | {aruco:.0f} mm'
+    )
+    if sheet_label:
+        spec = f'{sheet_label} | {spec}'
     svg_parts.append(
         text(
             page_w / 2,
             gap_mid_y,
-            (
-                f'{page_w:.0f}×{page_h:.0f} mm | {FILES}×{RANKS} | cell {cell:.1f} mm sq | '
-                f'ArUco 4×4_50 0–3 | {aruco:.0f} mm'
-            ),
+            spec,
             size=2.3,
             anchor='middle',
             fill='#777',
@@ -405,14 +557,142 @@ def generate_board_svg(output_path: str, page_w: float, page_h: float):
             'Use a larger page or reduce SIDE_LABEL_FONT_MM / graveyard width.'
         )
 
-    svg_parts.append('</svg>\n')
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(''.join(svg_parts))
+    return svg_parts, cell
 
+
+def write_svg_file(output_path: str, parts: list[str], page_w: float, page_h: float) -> None:
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write(
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{page_w}mm" height="{page_h}mm" viewBox="0 0 {page_w} {page_h}">\n'
+        )
+        f.write(''.join(parts))
+        f.write('</svg>\n')
+
+
+def write_mat_tile(
+    output_path: str,
+    parts: list[str],
+    *,
+    tile_x0: float,
+    tile_y0: float,
+    tile_w: float,
+    tile_h: float,
+    seam_edges: frozenset[str],
+    tile_label: str,
+) -> None:
+    """Write one print tile clipped from a larger combined mat."""
+    clip_id = 'tile_clip'
+    extra = tile_seam_marks(tile_w, tile_h, seam_edges, tile_label)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+        f.write(
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'width="{tile_w}mm" height="{tile_h}mm" viewBox="0 0 {tile_w} {tile_h}">\n'
+        )
+        f.write(
+            f'  <defs><clipPath id="{clip_id}">'
+            f'<rect x="0" y="0" width="{tile_w:.2f}" height="{tile_h:.2f}"/></clipPath></defs>\n'
+        )
+        f.write(f'  <g clip-path="url(#{clip_id})">\n')
+        f.write(f'    <g transform="translate({-tile_x0:.2f},{-tile_y0:.2f})">\n')
+        f.write(''.join(parts))
+        f.write('    </g>\n')
+        f.write('  </g>\n')
+        f.write(extra)
+        f.write('</svg>\n')
+
+
+def generate_board_svg(output_path: str, page_w: float, page_h: float):
+    parts, cell = build_board_svg_parts(page_w, page_h)
+    write_svg_file(output_path, parts, page_w, page_h)
     print(f'Board SVG written to: {output_path}')
-    print(f'Page: {page_w}×{page_h} mm | ArUco: {aruco:.1f} mm | cell: {cell:.2f} mm (square)')
-    print(f'Grid box: {grid_w:.1f}×{grid_h:.1f} mm')
+    print(f'Page: {page_w}×{page_h} mm | cell: {cell:.2f} mm (square)')
     return cell, cell
+
+
+def generate_board_2xa3_tiles(out_left: str, out_right: str, geo_path: str) -> float:
+    """Full mat = A2 (594×420 mm); each tile is portrait A3 (297×420 mm)."""
+    parts, cell = build_board_svg_parts(
+        PAGE_W_MM_2XA3,
+        PAGE_H_MM_2XA3,
+        aruco_ids={0, 1, 2, 3},
+        sheet_label='2×A3 portrait → A2 size',
+    )
+    tw, th = PAGE_W_MM_A3_PORTRAIT, PAGE_H_MM_A3_PORTRAIT
+    write_mat_tile(
+        out_left,
+        parts,
+        tile_x0=0.0,
+        tile_y0=0.0,
+        tile_w=tw,
+        tile_h=th,
+        seam_edges=frozenset({'right'}),
+        tile_label='2×A3 · L',
+    )
+    write_mat_tile(
+        out_right,
+        parts,
+        tile_x0=tw,
+        tile_y0=0.0,
+        tile_w=tw,
+        tile_h=th,
+        seam_edges=frozenset({'left'}),
+        tile_label='2×A3 · R',
+    )
+    write_board_geometry_yaml(geo_path, cell, PAGE_W_MM_2XA3, PAGE_H_MM_2XA3)
+    print(f'2×A3 tiles written: {out_left}')
+    print(f'                  {out_right}')
+    print(
+        f'Joined mat: {PAGE_W_MM_2XA3:.0f}×{PAGE_H_MM_2XA3:.0f} mm (A2) | '
+        f'each tile: {PAGE_W_MM_A3_PORTRAIT:.0f}×{PAGE_H_MM_A3_PORTRAIT:.0f} mm portrait | '
+        f'cell: {cell:.2f} mm'
+    )
+    return cell
+
+
+def generate_board_4xa3_tiles(out_paths: dict[str, str], geo_path: str) -> float:
+    """
+    Full mat 594×840 mm (portrait) from four portrait A3 sheets (2×2).
+
+    Print each tile A3 portrait (297×420 mm), 100% scale. Tape centre cross:
+      TL—TR, BL—BR, then join top row to bottom row.
+    """
+    parts, cell = build_board_svg_parts(
+        PAGE_W_MM_4XA3,
+        PAGE_H_MM_4XA3,
+        aruco_ids={0, 1, 2, 3},
+        sheet_label='4×A3 portrait 2×2',
+        layout=LAYOUT_4XA3,
+    )
+    tw, th = PAGE_W_MM_A3_PORTRAIT, PAGE_H_MM_A3_PORTRAIT
+    tiles = {
+        'TL': (0.0, 0.0, frozenset({'right', 'bottom'}), '4×A3 · TL'),
+        'TR': (tw, 0.0, frozenset({'left', 'bottom'}), '4×A3 · TR'),
+        'BL': (0.0, th, frozenset({'right', 'top'}), '4×A3 · BL'),
+        'BR': (tw, th, frozenset({'left', 'top'}), '4×A3 · BR'),
+    }
+    for key, (x0, y0, edges, label) in tiles.items():
+        write_mat_tile(
+            out_paths[key],
+            parts,
+            tile_x0=x0,
+            tile_y0=y0,
+            tile_w=tw,
+            tile_h=th,
+            seam_edges=edges,
+            tile_label=label,
+        )
+    write_board_geometry_yaml(geo_path, cell, PAGE_W_MM_4XA3, PAGE_H_MM_4XA3)
+    print('4×A3 tiles written:')
+    for key in ('TL', 'TR', 'BL', 'BR'):
+        print(f'  {key}: {out_paths[key]}')
+    print(
+        f'Joined mat: {PAGE_W_MM_4XA3:.0f}×{PAGE_H_MM_4XA3:.0f} mm | '
+        f'each tile: {tw:.0f}×{th:.0f} mm portrait | cell: {cell:.2f} mm'
+    )
+    return cell
 
 
 def write_board_geometry_yaml(path: str, cell_mm: float, page_w: float, page_h: float) -> None:
@@ -431,12 +711,27 @@ def write_board_geometry_yaml(path: str, cell_mm: float, page_w: float, page_h: 
 
 if __name__ == '__main__':
     root = os.path.dirname(__file__)
-    out_a2 = os.path.join(root, '..', 'docs', 'board_mat_A2.svg')
-    out_a3 = os.path.join(root, '..', 'docs', 'board_mat_A3.svg')
-    geo_dir = os.path.join(root, '..', 'docs')
+    docs = os.path.join(root, '..', 'docs')
+    out_a2 = os.path.join(docs, 'board_mat_A2.svg')
+    out_a3 = os.path.join(docs, 'board_mat_A3.svg')
+    out_2xa3_l = os.path.join(docs, 'board_mat_2xA3_left.svg')
+    out_2xa3_r = os.path.join(docs, 'board_mat_2xA3_right.svg')
+    out_4xa3 = {
+        k: os.path.join(docs, f'board_mat_4xA3_{k}.svg')
+        for k in ('TL', 'TR', 'BL', 'BR')
+    }
     c2, _ = generate_board_svg(out_a2, PAGE_W_MM_A2, PAGE_H_MM_A2)
     c3, _ = generate_board_svg(out_a3, PAGE_W_MM_A3, PAGE_H_MM_A3)
-    write_board_geometry_yaml(os.path.join(geo_dir, 'board_geometry_A2.yaml'), c2, PAGE_W_MM_A2, PAGE_H_MM_A2)
-    write_board_geometry_yaml(os.path.join(geo_dir, 'board_geometry_A3.yaml'), c3, PAGE_W_MM_A3, PAGE_H_MM_A3)
-    print('\nA2 file-a spacing:', c2, 'mm  |  A3:', c3, 'mm')
-    print('Wrote docs/board_geometry_A2.yaml and docs/board_geometry_A3.yaml')
+    c2x = generate_board_2xa3_tiles(
+        out_2xa3_l,
+        out_2xa3_r,
+        os.path.join(docs, 'board_geometry_2xA3.yaml'),
+    )
+    c4x = generate_board_4xa3_tiles(
+        out_4xa3,
+        os.path.join(docs, 'board_geometry_4xA3.yaml'),
+    )
+    write_board_geometry_yaml(os.path.join(docs, 'board_geometry_A2.yaml'), c2, PAGE_W_MM_A2, PAGE_H_MM_A2)
+    write_board_geometry_yaml(os.path.join(docs, 'board_geometry_A3.yaml'), c3, PAGE_W_MM_A3, PAGE_H_MM_A3)
+    print('\nA2:', c2, 'mm  |  A3:', c3, 'mm  |  2×A3:', c2x, 'mm  |  4×A3:', c4x, 'mm')
+    print('Wrote board_geometry_*.yaml (A2, A3, 2xA3, 4xA3)')

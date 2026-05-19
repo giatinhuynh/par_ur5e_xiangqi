@@ -28,8 +28,8 @@ Coordinate conventions:
       pick/place z values.
 
 Gripper widths (all in mm):
-    OPEN_WIDTH    = 70   Pre-grasp open; fingers clear around a ~30 mm piece
-    GRASP_WIDTH   = 28   Closed on piece (~30 mm diameter, 2 mm compression)
+    OPEN_WIDTH    = 50   Pre-grasp open; fingers clear around a ~20 mm piece
+    GRASP_WIDTH   = 18   Closed on piece (~20 mm diameter, 2 mm compression)
     RELEASE_WIDTH = 50   Open enough to lift off a released piece
     GRASP_FORCE   = 15 N Firm but gentle
 """
@@ -65,9 +65,9 @@ except ImportError:
 
 
 # Gripper widths in millimetres
-OPEN_WIDTH    = 70.0   # Clearance width before descending onto piece
-GRASP_WIDTH   = 28.0   # Grip width for ~30 mm diameter Xiangqi piece
-RELEASE_WIDTH = 50.0   # Width after releasing piece at destination
+OPEN_WIDTH    = 50.0   # Clearance width before descending onto piece
+GRASP_WIDTH   = 18.0   # Grip width for ~20 mm diameter Xiangqi piece
+RELEASE_WIDTH = 34.0   # Width after releasing piece at destination
 GRASP_FORCE   = 15.0   # Newtons — firm grip without crushing
 OPEN_FORCE    = 10.0   # Newtons — gentle open
 
@@ -81,12 +81,16 @@ class ManipulationNode(Node):
         self.declare_parameter('grasp_width',        GRASP_WIDTH)
         self.declare_parameter('release_width',      RELEASE_WIDTH)
         self.declare_parameter('grasp_force',        GRASP_FORCE)
-        # Scan pose fallback (used when calibration file is absent or has no TF).
-        # When calibration IS available, x/y are replaced by the computed board centre.
-        self.declare_parameter('scan_pose_x',        -0.40)
-        self.declare_parameter('scan_pose_y',         0.00)
-        self.declare_parameter('scan_pose_z',         0.55)
-        self.declare_parameter('scan_pose_yaw',       0.0)
+        # Rest / scan pose (base_link, metres / radians). Pendant: 41.11, -357.06, 459.54 mm; RZ=-0.339.
+        self.declare_parameter('initial_pose_x',     0.04111)
+        self.declare_parameter('initial_pose_y',    -0.35706)
+        self.declare_parameter('initial_pose_z',     0.45954)
+        self.declare_parameter('initial_pose_yaw',  -0.339)
+        self.declare_parameter('scan_pose_x',        0.04111)
+        self.declare_parameter('scan_pose_y',       -0.35706)
+        self.declare_parameter('scan_pose_z',        0.45954)
+        self.declare_parameter('scan_pose_yaw',     -0.339)
+        self.declare_parameter('use_manual_scan_pose', True)
         self.declare_parameter(
             'calibration_file',
             '/home/rosuser/workspace/config/board_calibration.yaml',
@@ -98,11 +102,18 @@ class ManipulationNode(Node):
         self._release_width = self.get_parameter('release_width').value
         self._grasp_force   = self.get_parameter('grasp_force').value
         self._scan_pose_yaw = self.get_parameter('scan_pose_yaw').value
+        self._initial_pose_x = float(self.get_parameter('initial_pose_x').value)
+        self._initial_pose_y = float(self.get_parameter('initial_pose_y').value)
+        self._initial_pose_z = float(self.get_parameter('initial_pose_z').value)
+        self._initial_pose_yaw = float(self.get_parameter('initial_pose_yaw').value)
 
-        # Compute scan pose x/y from board calibration (board centre in base_link).
-        # Falls back to manual scan_pose_x/y params if calibration is unavailable.
-        self._scan_pose_x, self._scan_pose_y, self._scan_pose_z = \
-            self._resolve_scan_pose()
+        self._taught_scan_pose = False
+        self._apply_taught_poses_from_calibration()
+
+        if not self._taught_scan_pose:
+            # Compute scan pose x/y from board calibration (board centre in base_link).
+            self._scan_pose_x, self._scan_pose_y, self._scan_pose_z = \
+                self._resolve_scan_pose()
 
         # Separate callback groups to avoid ROS action deadlocks
         self._server_cbg = MutuallyExclusiveCallbackGroup()
@@ -144,7 +155,13 @@ class ManipulationNode(Node):
             callback_group=self._server_cbg,
         )
 
-        # --- Service: move arm to top-down scan pose ---
+        # --- Services: rest (initial) and top-down scan poses ---
+        self._initial_pose_srv = self.create_service(
+            Trigger,
+            '/xiangqi/move_to_initial_pose',
+            self._move_to_initial_pose_cb,
+            callback_group=self._arm_cbg,
+        )
         self._scan_pose_srv = self.create_service(
             Trigger,
             '/xiangqi/move_to_scan_pose',
@@ -252,18 +269,61 @@ class ManipulationNode(Node):
     # Scan pose helpers
     # ------------------------------------------------------------------
 
-    def _resolve_scan_pose(self):
-        """Return (x, y, z) for the scan pose.
+    def _apply_taught_poses_from_calibration(self) -> None:
+        """Use scan_pose / initial_pose from calibration_tool Step 1 if present."""
+        cal_file = resolve_manipulation_calibration_path(
+            self.get_parameter('calibration_file').value,
+            self.get_logger(),
+        )
+        if not os.path.isfile(cal_file):
+            return
+        try:
+            cal = BoardCalibration.load(cal_file)
+        except Exception as e:
+            self.get_logger().warn(f'Could not load taught poses from {cal_file}: {e}')
+            return
 
-        If a valid board_to_base_tf exists in the calibration file, x/y are
-        derived from the board centre (file=4, midpoint of ranks 4 and 5 on a
-        9-file × 10-rank board).  z is always taken from the scan_pose_z param.
-        Falls back to (scan_pose_x, scan_pose_y, scan_pose_z) from params when
-        calibration is absent or incomplete.
+        if cal.initial_pose and all(k in cal.initial_pose for k in ('x', 'y', 'z', 'yaw')):
+            p = cal.initial_pose
+            self._initial_pose_x = float(p['x'])
+            self._initial_pose_y = float(p['y'])
+            self._initial_pose_z = float(p['z'])
+            self._initial_pose_yaw = float(p['yaw'])
+            self.get_logger().info(
+                f'Initial pose from calibration: '
+                f'({self._initial_pose_x:.3f}, {self._initial_pose_y:.3f}, '
+                f'{self._initial_pose_z:.3f}), yaw={self._initial_pose_yaw:.3f}'
+            )
+
+        if cal.scan_pose and all(k in cal.scan_pose for k in ('x', 'y', 'z', 'yaw')):
+            p = cal.scan_pose
+            self._scan_pose_x = float(p['x'])
+            self._scan_pose_y = float(p['y'])
+            self._scan_pose_z = float(p['z'])
+            self._scan_pose_yaw = float(p['yaw'])
+            self._taught_scan_pose = True
+            self.get_logger().info(
+                f'Scan pose from calibration: '
+                f'({self._scan_pose_x:.3f}, {self._scan_pose_y:.3f}, '
+                f'{self._scan_pose_z:.3f}), yaw={self._scan_pose_yaw:.3f}'
+            )
+
+    def _resolve_scan_pose(self):
+        """Return (x, y, z) for the scan pose in base_link (metres).
+
+        When use_manual_scan_pose is true, returns scan_pose_x/y/z from params
+        (absolute TCP position). Otherwise, if board_to_base_tf exists, x/y are
+        derived from the board centre and scan_pose_z is height above the board surface.
         """
         z = float(self.get_parameter('scan_pose_z').value)
         fallback_x = float(self.get_parameter('scan_pose_x').value)
         fallback_y = float(self.get_parameter('scan_pose_y').value)
+
+        if self.get_parameter('use_manual_scan_pose').value:
+            self.get_logger().info(
+                f'Using manual scan pose: ({fallback_x:.3f}, {fallback_y:.3f}, {z:.3f})'
+            )
+            return fallback_x, fallback_y, z
 
         cal_file = resolve_manipulation_calibration_path(
             self.get_parameter('calibration_file').value,
@@ -304,8 +364,24 @@ class ManipulationNode(Node):
             return fallback_x, fallback_y, z
 
     # ------------------------------------------------------------------
-    # Scan pose service  →  /xiangqi/move_to_scan_pose
+    # Rest / scan pose services
     # ------------------------------------------------------------------
+
+    def _move_to_initial_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
+        """Move arm to configured rest / initial position."""
+        self.get_logger().info(
+            f'Moving to initial pose '
+            f'({self._initial_pose_x:.3f}, {self._initial_pose_y:.3f}, {self._initial_pose_z:.3f})'
+        )
+        ok = self._move(
+            self._initial_pose_x,
+            self._initial_pose_y,
+            self._initial_pose_z,
+            self._initial_pose_yaw,
+        )
+        response.success = ok
+        response.message = 'at initial pose' if ok else 'initial pose move failed'
+        return response
 
     def _move_to_scan_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
         """Move arm to configured top-down scan position for board vision."""

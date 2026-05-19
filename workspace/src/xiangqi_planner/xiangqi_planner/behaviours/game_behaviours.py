@@ -207,8 +207,8 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             approach_pick, grasp, lift, approach_place, place = translator.move_to_poses(move)
             self._bb.set('pick_pose', grasp)
             self._bb.set('place_pose', place)
-            self._bb.set('approach_height', 0.12)
-            self._bb.set('transit_height', 0.20)
+            self._bb.set('approach_height', translator._approach_height_m())
+            self._bb.set('transit_height', translator._transit_height_m())
 
             # Check if capture and set capture pick pose
             is_capture = _bb_get(self._bb, 'is_capture', False)
@@ -320,49 +320,43 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
         return py_trees.common.Status.SUCCESS
 
 
-class VerifyBoardState(py_trees_ros.service_clients.FromBlackboard):
+class VerifyBoardState(py_trees.behaviour.Behaviour):
     """
     Calls ``get_board_state`` (vision) and compares the observed grid to
-    ``expected_board_fen`` on the blackboard (published by game_manager before motion).
+    ``expected_board_fen`` on the blackboard.
 
-    Supports both py_trees_ros variants (``key_request`` / ``key_response`` vs ``key`` only).
+    Plain rclpy client (lab py_trees_ros 2.0.x has no ``service_clients`` module).
     """
-    def __init__(self, name: str = 'VerifyBoardState'):
-        try:
-            super().__init__(
-                name=name,
-                service_type=GetBoardState,
-                service_name='get_board_state',
-                key_request='verify_request',
-                key_response='verify_response',
-            )
-        except TypeError:
-            super().__init__(
-                service_type=GetBoardState,
-                service_name='get_board_state',
-                key='verify_request',
-                name=name,
-            )
+
+    def __init__(self, node: Node, name: str = 'VerifyBoardState'):
+        super().__init__(name)
+        self._node = node
         self._bb = py_trees.blackboard.Blackboard()
+        self._cli = node.create_client(GetBoardState, 'get_board_state')
+        self._future = None
 
     def initialise(self) -> None:
         self._bb.set('verification_passed', False)
+        self._future = None
+        if not self._cli.service_is_ready():
+            self.feedback_message = 'get_board_state service not ready'
+            return
         req = GetBoardState.Request()
         req.force_rescan = True
-        self._bb.set('verify_request', req)
-        super().initialise()
+        self._future = self._cli.call_async(req)
 
     def update(self) -> py_trees.common.Status:
-        status = super().update()
-        if status == py_trees.common.Status.RUNNING:
-            return status
-        if status == py_trees.common.Status.FAILURE:
-            self.feedback_message = 'GetBoardState client failure or service not ready'
-            return status
+        if self._future is None:
+            return py_trees.common.Status.FAILURE
+        if not self._future.done():
+            return py_trees.common.Status.RUNNING
 
-        resp = _bb_get(self._bb, 'verify_response')
-        if resp is None:
-            resp = getattr(self, 'response', None)
+        try:
+            resp = self._future.result()
+        except Exception as e:
+            self.feedback_message = f'GetBoardState error: {e}'
+            return py_trees.common.Status.FAILURE
+
         if resp is None or not resp.success:
             self.feedback_message = 'vision scan failed or no board'
             return py_trees.common.Status.FAILURE

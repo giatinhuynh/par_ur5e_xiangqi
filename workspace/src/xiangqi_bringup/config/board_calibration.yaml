@@ -2,12 +2,19 @@
 # Run: ros2 run xiangqi_vision calibration_tool
 # to generate the actual homography and board_to_base_tf values.
 #
-# grid_spacing_mm must match the printed mat: run tools/generate_board_svg.py and copy
-# the value from docs/board_geometry_A2.yaml or docs/board_geometry_A3.yaml (same page you print).
+# Mat: 4×A3 quarter tile docs/board_mat_4xA3_BR.svg (full mat = TL+TR+BL+BR).
+# grid_spacing_mm from docs/board_geometry_4xA3.yaml — intersection-to-intersection (mm).
 
 homography: null          # Will be a 3x3 matrix [[...],[...],[...]] after calibration
 board_to_base_tf: null    # Will be a 4x4 matrix after calibration
-grid_spacing_mm: 45.0     # Replace with board_geometry_*.yaml when using generated mats
+grid_spacing_mm: 61.25    # 4×A3 mat (square cells); measure after print if unsure
+piece_diameter_mm: 20.0   # Lab pieces (~2 cm diameter)
+grasp_height_mm: 10.0     # TCP height above board plane at pick (≈ half piece height)
+approach_height_mm: 120.0
+transit_height_mm: 200.0
 board_origin_mm: [0.0, 0.0]
 image_width: 640
 image_height: 480
+# Filled by calibration_tool Step 1 (SPACE at scan pose):
+scan_pose: null       # {x, y, z, yaw} in base_link, metres / radians
+initial_pose: null   # same TCP as scan_pose unless taught separately later

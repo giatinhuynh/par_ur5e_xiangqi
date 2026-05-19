@@ -27,7 +27,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from std_msgs.msg import Bool
 
 import py_trees
-import py_trees_ros.trees
+import py_trees.trees
 
 from xiangqi_msgs.msg import GameStatus
 from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck
@@ -100,7 +100,7 @@ class TaskPlannerNode(Node):
         )
 
         self._tree = self._build_tree()
-        self._tree.setup(timeout=15.0)
+        self._tree.setup(timeout=15.0, node=self)
 
         self._tick_timer = self.create_timer(0.1, self._tick_tree)
 
@@ -190,7 +190,7 @@ class TaskPlannerNode(Node):
         # Could extend GameStatus with robot side; keep launch parameter as source of truth
         self._bb.set('robot_is_red', self.get_parameter('robot_plays_red').value)
 
-    def _build_tree(self) -> py_trees_ros.trees.BehaviourTree:
+    def _build_tree(self) -> py_trees.trees.BehaviourTree:
         estop_check = py_trees.decorators.Inverter(
             name='NotEstopped', child=IsEstopActive()
         )
@@ -226,7 +226,7 @@ class TaskPlannerNode(Node):
             name='ScanPoseBestEffort', child=GoToScanPose(self)
         )
 
-        verify = VerifyBoardState(name='VerifyBoard')
+        verify = VerifyBoardState(self, name='VerifyBoard')
         retry_verify = py_trees.decorators.Retry(
             name='RetryVerify', child=verify, num_failures=3
         )
@@ -259,8 +259,7 @@ class TaskPlannerNode(Node):
         root = py_trees.composites.Sequence(name='Root', memory=False)
         root.add_children([estop_check, motion_or_abort])
 
-        tree = py_trees_ros.trees.BehaviourTree(root, unicode_tree_debug=False)
-        return tree
+        return py_trees.trees.BehaviourTree(root)
 
     def _tick_tree(self) -> None:
         if self._bb_get('ai_move') is None:

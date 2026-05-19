@@ -9,7 +9,7 @@ Xiangqi coordinate notation (coordinate-style):
 """
 
 from __future__ import annotations
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from geometry_msgs.msg import Pose, Point, Quaternion
@@ -23,22 +23,36 @@ class BoardCalibration:
 
     homography: Optional[object] = None
     board_to_base_tf: Optional[np.ndarray] = None
-    grid_spacing_mm: float = 45.0
+    grid_spacing_mm: float = 61.25
     board_origin_mm: Tuple[float, float] = (0.0, 0.0)
+    piece_diameter_mm: float = 20.0
+    grasp_height_mm: float = 15.0
+    approach_height_mm: float = 120.0
+    transit_height_mm: float = 200.0
+    scan_pose: Optional[Dict[str, float]] = None
+    initial_pose: Optional[Dict[str, float]] = None
 
     @classmethod
     def load(cls, path: str) -> 'BoardCalibration':
         """Load from the same `board_calibration.yaml` written by calibration_tool / vision."""
         with open(path, 'r') as f:
-            data = yaml.safe_load(f)
+            data = yaml.safe_load(f) or {}
         cal = cls()
         if data.get('homography'):
             cal.homography = np.array(data['homography'])
         if data.get('board_to_base_tf'):
             cal.board_to_base_tf = np.array(data['board_to_base_tf'])
-        cal.grid_spacing_mm = float(data.get('grid_spacing_mm', 45.0))
+        cal.grid_spacing_mm = float(data.get('grid_spacing_mm', 61.25))
         bo = data.get('board_origin_mm', [0.0, 0.0])
         cal.board_origin_mm = (float(bo[0]), float(bo[1]))
+        cal.piece_diameter_mm = float(data.get('piece_diameter_mm', 20.0))
+        cal.grasp_height_mm = float(data.get('grasp_height_mm', cal.piece_diameter_mm / 2.0))
+        cal.approach_height_mm = float(data.get('approach_height_mm', 120.0))
+        cal.transit_height_mm = float(data.get('transit_height_mm', 200.0))
+        if isinstance(data.get('scan_pose'), dict):
+            cal.scan_pose = {k: float(data['scan_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['scan_pose']}
+        if isinstance(data.get('initial_pose'), dict):
+            cal.initial_pose = {k: float(data['initial_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['initial_pose']}
         return cal
 
     def grid_to_world(self, file_idx: int, rank_idx: int) -> np.ndarray:
@@ -52,10 +66,10 @@ class BoardCalibration:
         return world_pos[:3]
 
 
-# Height offsets (metres) for different motion phases
-APPROACH_HEIGHT   = 0.12   # Above piece surface for approach
-GRASP_HEIGHT      = 0.005  # z height at piece centre for RG2 side-grip contact
-TRANSIT_HEIGHT    = 0.20   # Safe clearance height during transit
+# Default height offsets (metres); overridden per-calibration from board_calibration.yaml
+APPROACH_HEIGHT   = 0.12   # Above board plane at intersection
+GRASP_HEIGHT      = 0.010  # Side-grip at mid-piece (~10 mm for 20 mm disc)
+TRANSIT_HEIGHT    = 0.20   # Clearance during transit
 GRAVEYARD_OFFSET  = 0.10   # Z-offset above graveyard zone
 
 
@@ -100,13 +114,28 @@ class MoveTranslator:
         self._red_graveyard_idx = 0
         self._black_graveyard_idx = 0
 
+    def _approach_height_m(self) -> float:
+        return self._cal.approach_height_mm / 1000.0
+
+    def _grasp_height_m(self) -> float:
+        return self._cal.grasp_height_mm / 1000.0
+
+    def _transit_height_m(self) -> float:
+        return self._cal.transit_height_mm / 1000.0
+
     def move_to_poses(
         self,
         move: str,
-        approach_height: float = APPROACH_HEIGHT,
-        grasp_height: float = GRASP_HEIGHT,
-        transit_height: float = TRANSIT_HEIGHT,
+        approach_height: float | None = None,
+        grasp_height: float | None = None,
+        transit_height: float | None = None,
     ) -> Tuple[Pose, Pose, Pose, Pose, Pose]:
+        if approach_height is None:
+            approach_height = self._approach_height_m()
+        if grasp_height is None:
+            grasp_height = self._grasp_height_m()
+        if transit_height is None:
+            transit_height = self._transit_height_m()
         """
         Convert a 4-char move to the 5 key waypoint poses:
           (approach_pick, grasp, lift, approach_place, place)

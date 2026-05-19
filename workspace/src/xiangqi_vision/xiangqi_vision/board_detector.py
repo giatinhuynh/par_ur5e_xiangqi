@@ -16,7 +16,7 @@ import numpy as np
 import yaml
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 
 # Xiangqi board: 9 files (columns a-i) x 10 ranks (rows 0-9)
@@ -29,30 +29,41 @@ class BoardCalibration:
     """Stores the computed calibration between camera image and board/robot frames."""
     homography: Optional[np.ndarray] = None          # 3x3 image -> normalised board frame
     board_to_base_tf: Optional[np.ndarray] = None    # 4x4 board frame -> robot base_link
-    grid_spacing_mm: float = 45.0                    # Physical spacing between intersections
+    grid_spacing_mm: float = 61.25                   # 4×A3 mat default (docs/board_geometry_4xA3.yaml)
     board_origin_mm: Tuple[float, float] = (0.0, 0.0)  # Bottom-left corner in robot base XY
     marker_ids: list = field(default_factory=lambda: [0, 1, 2, 3])
     image_width: int = 640
     image_height: int = 480
+    # Taught in calibration_tool Step 1 (arm at scan pose, SPACE): base_link TCP, metres / rad.
+    scan_pose: Optional[Dict[str, float]] = None
+    initial_pose: Optional[Dict[str, float]] = None
 
     @property
     def is_valid(self) -> bool:
         return self.homography is not None and self.board_to_base_tf is not None
 
     def save(self, path: str) -> None:
-        data = {
+        data = {}
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                data = yaml.safe_load(f) or {}
+        data.update({
             'homography': self.homography.tolist() if self.homography is not None else None,
             'board_to_base_tf': self.board_to_base_tf.tolist() if self.board_to_base_tf is not None else None,
             'grid_spacing_mm': self.grid_spacing_mm,
             'board_origin_mm': list(self.board_origin_mm),
             'image_width': self.image_width,
             'image_height': self.image_height,
-        }
+        })
+        if self.scan_pose is not None:
+            data['scan_pose'] = {k: float(v) for k, v in self.scan_pose.items()}
+        if self.initial_pose is not None:
+            data['initial_pose'] = {k: float(v) for k, v in self.initial_pose.items()}
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
         with open(path, 'w') as f:
-            yaml.dump(data, f)
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
     @classmethod
     def load(cls, path: str) -> 'BoardCalibration':
@@ -63,10 +74,14 @@ class BoardCalibration:
             cal.homography = np.array(data['homography'])
         if data.get('board_to_base_tf'):
             cal.board_to_base_tf = np.array(data['board_to_base_tf'])
-        cal.grid_spacing_mm = data.get('grid_spacing_mm', 45.0)
+        cal.grid_spacing_mm = float(data.get('grid_spacing_mm', 61.25))
         cal.board_origin_mm = tuple(data.get('board_origin_mm', [0.0, 0.0]))
         cal.image_width = data.get('image_width', 640)
         cal.image_height = data.get('image_height', 480)
+        if isinstance(data.get('scan_pose'), dict):
+            cal.scan_pose = {k: float(data['scan_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['scan_pose']}
+        if isinstance(data.get('initial_pose'), dict):
+            cal.initial_pose = {k: float(data['initial_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['initial_pose']}
         return cal
 
 
@@ -74,12 +89,22 @@ class BoardDetector:
     """Detects the Xiangqi board position using ArUco markers and computes homography."""
 
     ARUCO_DICT = cv2.aruco.DICT_4X4_50
+    REQUIRED_MARKER_IDS = (0, 1, 2, 3)
 
     def __init__(self, calibration: Optional[BoardCalibration] = None):
         self.calibration = calibration or BoardCalibration()
         aruco_dict = cv2.aruco.getPredefinedDictionary(self.ARUCO_DICT)
         self._detector_params = cv2.aruco.DetectorParameters()
+        # Lab mats: markers can be small in frame, glare on white print — relax defaults.
+        self._detector_params.minMarkerPerimeterRate = 0.015
+        self._detector_params.maxMarkerPerimeterRate = 4.0
+        self._detector_params.adaptiveThreshWinSizeMin = 3
+        self._detector_params.adaptiveThreshWinSizeMax = 23
+        self._detector_params.adaptiveThreshWinSizeStep = 4
+        self._detector_params.minCornerDistanceRate = 0.04
+        self._detector_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self._aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, self._detector_params)
+        self._last_detect_diag = ''
 
         # Destination points in a normalised board image (800x890 px). Margins
         # place the warped 9×10 intersections on a uniform grid; file/rank use
@@ -94,6 +119,39 @@ class BoardDetector:
             [self._margin, self._margin],                         # ID 3: bottom-left
         ])
 
+    def _preprocess(self, image: np.ndarray) -> np.ndarray:
+        """Improve ArUco contrast under uneven lab lighting."""
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+    def _detect_markers(self, image: np.ndarray):
+        """Run ArUco on raw and CLAHE images; keep the pass with most corner IDs 0–3."""
+        best_corners, best_ids = None, None
+        best_count = -1
+        for frame in (image, self._preprocess(image)):
+            corners, ids, _ = self._aruco_detector.detectMarkers(frame)
+            if ids is None:
+                continue
+            n_required = sum(1 for mid in ids.flatten() if mid in self.REQUIRED_MARKER_IDS)
+            if n_required > best_count:
+                best_count = n_required
+                best_corners, best_ids = corners, ids
+            if best_count >= 4:
+                break
+        return best_corners, best_ids
+
+    @staticmethod
+    def _draw_status(debug: np.ndarray, title: str, detail: str, ok: bool) -> None:
+        colour = (0, 200, 0) if ok else (0, 0, 255)
+        cv2.putText(debug, title, (16, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, colour, 2, cv2.LINE_AA)
+        if detail:
+            y = 72
+            for line in detail.split('\n'):
+                cv2.putText(debug, line, (16, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, colour, 1, cv2.LINE_AA)
+                y += 26
+
     def detect(self, image: np.ndarray) -> Tuple[bool, Optional[np.ndarray], np.ndarray]:
         """
         Detect ArUco markers and compute homography.
@@ -102,18 +160,31 @@ class BoardDetector:
             (success, homography_3x3, debug_image)
         """
         debug = image.copy()
-        corners, ids, _ = self._aruco_detector.detectMarkers(image)
+        corners, ids = self._detect_markers(image)
 
-        if ids is None or len(ids) < 4:
-            return False, None, debug
-
+        all_ids = [] if ids is None else sorted(int(x) for x in ids.flatten())
         id_to_corner = {}
-        for i, marker_id in enumerate(ids.flatten()):
-            if marker_id in [0, 1, 2, 3]:
-                centre = corners[i][0].mean(axis=0)
-                id_to_corner[marker_id] = centre
+        if ids is not None:
+            for i, marker_id in enumerate(ids.flatten()):
+                if marker_id in self.REQUIRED_MARKER_IDS:
+                    centre = corners[i][0].mean(axis=0)
+                    id_to_corner[int(marker_id)] = centre
+
+        missing = [mid for mid in self.REQUIRED_MARKER_IDS if mid not in id_to_corner]
+        self._last_detect_diag = (
+            f'markers in frame: {len(all_ids)}  ids: {all_ids}\n'
+            f'corner IDs 0-3: {sorted(id_to_corner.keys())}  missing: {missing or "none"}'
+        )
 
         if len(id_to_corner) < 4:
+            hint = 'Need ALL four ArUco IDs 0,1,2,3 at mat outer corners (4xA3: tape full mat).'
+            if missing:
+                hint += f' Missing ID(s): {missing}.'
+            if len(all_ids) == 0:
+                hint += ' None detected — check print scale 100%, DICT_4X4_50, no glare.'
+            self._draw_status(debug, 'BOARD NOT FOUND', self._last_detect_diag + '\n' + hint, False)
+            if corners is not None and ids is not None:
+                cv2.aruco.drawDetectedMarkers(debug, corners, ids)
             return False, None, debug
 
         cv2.aruco.drawDetectedMarkers(debug, corners, ids)
@@ -127,8 +198,10 @@ class BoardDetector:
 
         H, _ = cv2.findHomography(src_pts, self._dst_corners, cv2.RANSAC, 5.0)
         if H is None:
+            self._draw_status(debug, 'BOARD NOT FOUND', self._last_detect_diag + '\nhomography failed', False)
             return False, None, debug
 
+        self._draw_status(debug, 'BOARD DETECTED', 'Press SPACE to capture', True)
         return True, H, debug
 
     def warp_board(self, image: np.ndarray, H: np.ndarray) -> np.ndarray:

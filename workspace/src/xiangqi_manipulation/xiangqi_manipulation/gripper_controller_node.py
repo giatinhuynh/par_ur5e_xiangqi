@@ -17,10 +17,10 @@ This node provides the xiangqi_msgs/srv/GripperControl service as a
 thin synchronous bridge so the rest of the xiangqi stack does not need
 to import onrobot_rg2_msgs directly.
 
-Gripper geometry for round Xiangqi pieces (~30 mm diameter):
-  OPEN_WIDTH    = 70 mm   - finger clearance to lower around a piece
-  GRASP_WIDTH   = 28 mm   - firm grip on ~30 mm piece
-  RELEASE_WIDTH = 50 mm   - enough clearance to lift off a released piece
+Gripper geometry for round Xiangqi pieces (~20 mm diameter):
+  OPEN_WIDTH    = 50 mm   - finger clearance to lower around a piece
+  GRASP_WIDTH   = 18 mm   - firm grip on ~20 mm piece
+  RELEASE_WIDTH = 34 mm   - enough clearance to lift off a released piece
   GRASP_FORCE   = 15 N    - firm but gentle (pieces are plastic/wood)
 """
 
@@ -41,9 +41,9 @@ except ImportError:
 
 
 # Default gripper widths (mm) — tune after physical testing
-OPEN_WIDTH    = 70.0   # Opening width to clear piece before descent
-GRASP_WIDTH   = 28.0   # Closing width to grip a ~30 mm Xiangqi piece
-RELEASE_WIDTH = 50.0   # Width to open when releasing piece at destination
+OPEN_WIDTH    = 50.0   # Opening width to clear piece before descent
+GRASP_WIDTH   = 18.0   # Closing width to grip a ~20 mm Xiangqi piece
+RELEASE_WIDTH = 34.0   # Width to open when releasing piece at destination
 DEFAULT_FORCE = 15.0   # Gripping force in Newtons
 
 

@@ -8,4 +8,4 @@ vision_node:
     confidence_threshold: 0.5
     stability_frames: 8           # Frames to confirm a stable board state (~2s at 4Hz)
     poll_rate_hz: 4.0
-    camera_topic: "/camera/color/image_raw"
+    camera_topic: "/camera/camera/color/image_raw"

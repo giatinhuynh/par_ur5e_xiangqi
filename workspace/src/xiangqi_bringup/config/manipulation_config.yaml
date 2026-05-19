@@ -5,38 +5,48 @@
 #   - Max open width: 110 mm
 #   - Max force: 40 N
 #   - Controlled via Modbus TCP at EyeBox IP 10.234.6.47:502
-#   - Xiangqi piece diameter: ~30 mm (plastic or wooden round pieces)
+#   - Xiangqi pieces: lab set (~20 mm diameter)
+#   - Board mat: 4×A3 assembly (docs/board_mat_4xA3_BR.svg), grid_spacing_mm: 61.25
 #
 # Arm motion: lab's /par_moveit/waypoint_move action server (par_moveit_config)
 
 manipulation_node:
   ros__parameters:
     simulation_mode: false
-    # Gripper widths in millimetres
-    open_width:    70.0   # Pre-grasp open (fingers clear a ~30 mm piece)
-    grasp_width:   28.0   # Grip on ~30 mm piece (2 mm compression)
-    release_width: 50.0   # Open to release at destination
+    # Lab pieces ~20 mm diameter + 4×A3 mat (see docs/board_geometry_4xA3.yaml)
+    piece_diameter_mm:     20.0
+    grid_spacing_mm:     61.25
+    grasp_compression_mm:  2.0
+    # Gripper widths (mm) — sized for piece_diameter_mm
+    open_width:    50.0   # ~2.5× diameter (clearance)
+    grasp_width:   18.0   # diameter − compression
+    release_width: 34.0   # ~1.7× diameter
     grasp_force:   15.0   # Gripping force in Newtons
-    # Calibration file — used to derive scan pose from board centre automatically.
-    # If absent or board_to_base_tf is missing, scan_pose_x/y below are used instead.
+    # Calibration file — used to derive scan pose from board centre when use_manual_scan_pose is false.
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
-    # Scan pose: top-down bird's-eye position for board vision scans.
-    # scan_pose_z is the height ABOVE the board surface (metres) — always used.
-    # scan_pose_x/y are fallback values used only when calibration is unavailable.
-    # scan_pose_yaw: end-effector yaw (radians); 0.0 = straight down.
-    scan_pose_x:   -0.40
-    scan_pose_y:    0.00
-    scan_pose_z:    0.55
-    scan_pose_yaw:  0.0
+    # Use the taught scan pose below (base_link, metres / radians) instead of board centre.
+    use_manual_scan_pose: true
+    # Rest / scan pose taught on UR pendant (horizontal board layout):
+    #   x=41.11 mm, y=-357.06 mm, z=459.54 mm
+    #   RX=0.012 rad, RY=3.167 rad, RZ=-0.339 rad
+    # par_moveit WaypointPose only has one rotation field (maps to RZ); roll/pitch are fixed in the lab driver.
+    initial_pose_x:    0.04111     # 41.11 mm
+    initial_pose_y:   -0.35706     # -357.06 mm
+    initial_pose_z:    0.45954     # 459.54 mm (absolute TCP height in base_link)
+    initial_pose_yaw: -0.339       # RZ (rad)
+    scan_pose_x:       0.04111
+    scan_pose_y:      -0.35706
+    scan_pose_z:       0.45954
+    scan_pose_yaw:    -0.339
 
 gripper_controller_node:
   ros__parameters:
     simulation_mode: false
     gripper_ip:   "10.234.6.47"  # EyeBox IP (Modbus TCP to RG2)
     gripper_port: 502
-    open_width:    70.0
-    grasp_width:   28.0
-    release_width: 50.0
+    open_width:    50.0
+    grasp_width:   18.0
+    release_width: 34.0
     default_force: 15.0
 
 safety_monitor_node:

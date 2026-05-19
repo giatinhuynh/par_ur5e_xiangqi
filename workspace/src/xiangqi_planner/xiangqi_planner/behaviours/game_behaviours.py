@@ -53,6 +53,14 @@ def fen_to_grid(fen: str) -> list[int]:
     return grid
 
 
+def cell_colour(cell: int) -> int:
+    if cell > 0:
+        return 1
+    if cell < 0:
+        return -1
+    return 0
+
+
 # ------------------------------------------------------------------
 # Conditions (return SUCCESS/FAILURE without side-effects)
 # ------------------------------------------------------------------
@@ -369,11 +377,15 @@ class VerifyBoardState(py_trees.behaviour.Behaviour):
         observed = list(resp.board_state.grid)
         expected = fen_to_grid(expected_fen)
         tol = int(_bb_get(self._bb, 'verify_grid_tolerance', 0))
-        mismatches = sum(1 for a, b in zip(observed, expected) if a != b)
+        mismatches = sum(
+            1
+            for a, b in zip(observed, expected)
+            if cell_colour(int(a)) != cell_colour(int(b))
+        )
         if mismatches <= tol:
             self._bb.set('verification_passed', True)
-            self.feedback_message = 'board matches expected FEN'
+            self.feedback_message = 'board occupancy/colour matches expected FEN'
             return py_trees.common.Status.SUCCESS
 
-        self.feedback_message = f'board mismatch: {mismatches} cells differ (tol={tol})'
+        self.feedback_message = f'board occupancy/colour mismatch: {mismatches} cells differ (tol={tol})'
         return py_trees.common.Status.FAILURE

@@ -15,13 +15,23 @@ WS="$UR5E/workspace"
 
 copy_config() {
   mkdir -p "$WS/config"
-  cp -f "$WS/src/xiangqi_bringup/config/board_calibration.yaml" "$WS/config/"
+  dest="$WS/config/board_calibration.yaml"
+  src="$WS/src/xiangqi_bringup/config/board_calibration.yaml"
+  if [ "${1:-}" = "--force" ]; then
+    cp -f "$src" "$dest"
+    echo "Force-installed: $dest"
+  elif [ -f "$dest" ] && ! grep -qE 'board_to_base_tf: null$|board_to_base_tf: null[[:space:]]*$' "$dest" 2>/dev/null \
+       && grep -q 'board_to_base_tf:' "$dest" 2>/dev/null; then
+    echo "SKIP board_calibration.yaml — already calibrated (use: $0 copy-config --force)"
+  else
+    cp -f "$src" "$dest"
+    echo "Installed: $dest"
+  fi
   if [ ! -f "$WS/config/manipulation_config.yaml" ]; then
     cp -f "$WS/src/xiangqi_bringup/config/manipulation_config.yaml" "$WS/config/"
-    echo "Installed: $WS/config/manipulation_config.yaml (optional mirror for taught poses)"
+    echo "Installed: $WS/config/manipulation_config.yaml"
   fi
-  echo "Installed: $WS/config/board_calibration.yaml"
-  grep -E 'grid_spacing_mm|piece_diameter' "$WS/config/board_calibration.yaml" || true
+  grep -E 'grid_spacing_mm|scan_pose|board_to_base_tf' "$dest" 2>/dev/null | head -8 || true
 }
 
 docker_env() {
@@ -35,7 +45,7 @@ EOF
 
 case "${1:-help}" in
   copy-config)
-    copy_config
+    copy_config "${2:-}"
     ;;
   attach)
     echo "cd $UR5E && ./docker-attach.sh"

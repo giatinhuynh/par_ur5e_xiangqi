@@ -82,21 +82,25 @@ class ManipulationNode(Node):
         self.declare_parameter('release_width',      RELEASE_WIDTH)
         self.declare_parameter('grasp_force',        GRASP_FORCE)
         # Rest / scan pose (base_link, metres / radians). Pendant: 41.11, -357.06, 459.54 mm; RZ=-0.339.
-        self.declare_parameter('initial_pose_x',     0.04111)
-        self.declare_parameter('initial_pose_y',    -0.35706)
-        self.declare_parameter('initial_pose_z',     0.45954)
-        self.declare_parameter('initial_pose_yaw',  -0.339)
-        self.declare_parameter('scan_pose_x',        0.04111)
-        self.declare_parameter('scan_pose_y',       -0.35706)
-        self.declare_parameter('scan_pose_z',        0.45954)
-        self.declare_parameter('scan_pose_yaw',     -0.339)
+        self.declare_parameter('initial_pose_x',     -0.04182)
+        self.declare_parameter('initial_pose_y',      0.20871)
+        self.declare_parameter('initial_pose_z',      0.82941)
+        self.declare_parameter('initial_pose_yaw',   -0.01369)
+        self.declare_parameter('scan_pose_x',        -0.04182)
+        self.declare_parameter('scan_pose_y',        0.20871)
+        self.declare_parameter('scan_pose_z',         0.82941)
+        self.declare_parameter('scan_pose_yaw',      -0.01369)
         self.declare_parameter('use_manual_scan_pose', True)
         self.declare_parameter(
             'calibration_file',
             '/home/rosuser/workspace/config/board_calibration.yaml',
         )
+        self.declare_parameter('move_to_initial_pose_on_startup', True)
+        self.declare_parameter('startup_move_delay_sec', 5.0)
 
         self._sim_mode      = self.get_parameter('simulation_mode').value
+        self._startup_timer = None
+        self._startup_move_done = False
         self._open_width    = self.get_parameter('open_width').value
         self._grasp_width   = self.get_parameter('grasp_width').value
         self._release_width = self.get_parameter('release_width').value
@@ -173,6 +177,21 @@ class ManipulationNode(Node):
             f'manipulation_node ready '
             f'(sim={self._sim_mode}, arm={PAR_INTERFACES_OK}, rg2={RG2_OK})'
         )
+
+        if (
+            not self._sim_mode
+            and self.get_parameter('move_to_initial_pose_on_startup').value
+        ):
+            delay = float(self.get_parameter('startup_move_delay_sec').value)
+            self.get_logger().info(
+                f'Startup: will move to initial pose in {delay:.1f}s '
+                '(pendant Play + External Control must be ON)'
+            )
+            self._startup_timer = self.create_timer(
+                delay,
+                self._startup_move_to_initial_pose_cb,
+                callback_group=self._arm_cbg,
+            )
 
     # ------------------------------------------------------------------
     # Action execution: 8-step pick-and-place sequence
@@ -366,6 +385,33 @@ class ManipulationNode(Node):
     # ------------------------------------------------------------------
     # Rest / scan pose services
     # ------------------------------------------------------------------
+
+    def _startup_move_to_initial_pose_cb(self) -> None:
+        """One-shot homing when the stack starts (hardware only)."""
+        if self._startup_move_done:
+            return
+        self._startup_move_done = True
+        if self._startup_timer is not None:
+            self._startup_timer.cancel()
+            self._startup_timer = None
+
+        self.get_logger().info(
+            f'Startup: moving to initial pose '
+            f'({self._initial_pose_x:.3f}, {self._initial_pose_y:.3f}, '
+            f'{self._initial_pose_z:.3f})'
+        )
+        ok = self._move(
+            self._initial_pose_x,
+            self._initial_pose_y,
+            self._initial_pose_z,
+            self._initial_pose_yaw,
+        )
+        if ok:
+            self.get_logger().info('Startup: reached initial pose')
+        else:
+            self.get_logger().warn(
+                'Startup: initial pose move failed — check pendant Play and MoveIt'
+            )
 
     def _move_to_initial_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
         """Move arm to configured rest / initial position."""

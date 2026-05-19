@@ -22,15 +22,20 @@ MoveitActionServerNode::MoveitActionServerNode(const rclcpp::NodeOptions& option
       std::bind(&MoveitActionServerNode::handle_accepted, this, _1));
 
 
-  move_plane_height = 0.25;
+  move_plane_height = this->declare_parameter("move_plane_height", 0.25);
+  max_velocity_scaling_factor_ = this->declare_parameter("max_velocity_scaling_factor", 0.05);
+  max_acceleration_scaling_factor_ = this->declare_parameter("max_acceleration_scaling_factor", 0.05);
 
   executing_move = false;
   this->move_group_interface =
       std::make_shared<MoveGroupInterface>(std::shared_ptr<rclcpp::Node>(node_), "ur_manipulator_end_effector");
   this->move_group_interface->setPlanningTime(5.0);
   this->move_group_interface->setNumPlanningAttempts(10);
-  this->move_group_interface->setMaxVelocityScalingFactor(0.1);
-  this->move_group_interface->setMaxAccelerationScalingFactor(0.1);
+  apply_motion_speed_limits();
+  RCLCPP_INFO(
+      this->get_logger(),
+      "Motion speed limits: velocity_scaling=%.2f acceleration_scaling=%.2f",
+      max_velocity_scaling_factor_, max_acceleration_scaling_factor_);
   this->executor_->add_node(node_);
 
   this->executor_thread_ = std::thread([this]() { this->executor_->spin(); });
@@ -70,9 +75,16 @@ void MoveitActionServerNode::handle_accepted(const std::shared_ptr<GoalHandle> g
   std::thread{ std::bind(&MoveitActionServerNode::execute, this, _1), goal_handle }.detach();
 }
 
+void MoveitActionServerNode::apply_motion_speed_limits()
+{
+  this->move_group_interface->setMaxVelocityScalingFactor(max_velocity_scaling_factor_);
+  this->move_group_interface->setMaxAccelerationScalingFactor(max_acceleration_scaling_factor_);
+}
+
 void MoveitActionServerNode::execute(const std::shared_ptr<GoalHandle> goal_handle)
 {
   RCLCPP_INFO(this->get_logger(), "Executing Goal");
+  apply_motion_speed_limits();
 
   std::vector<Pose> waypoints;
 
@@ -172,6 +184,7 @@ void MoveitActionServerNode::execute(const std::shared_ptr<GoalHandle> goal_hand
 void MoveitActionServerNode::execute_plan(moveit_msgs::msg::RobotTrajectory trajectory)
 {
   this->executing_move = true;
+  apply_motion_speed_limits();
   this->move_group_interface->execute(trajectory);
   this->executing_move = false;
 }

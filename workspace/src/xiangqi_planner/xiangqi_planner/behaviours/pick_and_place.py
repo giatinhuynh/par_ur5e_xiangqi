@@ -11,6 +11,15 @@ from geometry_msgs.msg import Pose
 from xiangqi_msgs.action import PickAndPlace
 
 
+def _bb_get(bb, key: str, default=None):
+    """py_trees Blackboard.get() only accepts the key (no default) in some versions."""
+    try:
+        val = bb.get(key)
+        return val if val is not None else default
+    except Exception:
+        return default
+
+
 class PickPieceBehaviour(py_trees_ros.action_clients.FromBlackboard):
     """
     Sends a PickAndPlace action goal using poses from the blackboard.
@@ -35,8 +44,8 @@ class PickPieceBehaviour(py_trees_ros.action_clients.FromBlackboard):
         goal = PickAndPlace.Goal()
         goal.pick_pose = bb.get('pick_pose')
         goal.place_pose = bb.get('place_pose')
-        goal.approach_height = float(bb.get('approach_height', 0.12))
-        goal.transit_height = float(bb.get('transit_height', 0.20))
+        goal.approach_height = float(_bb_get(bb, 'approach_height', 0.12))
+        goal.transit_height = float(_bb_get(bb, 'transit_height', 0.20))
         bb.set('pick_place_goal', goal)
         super().initialise()
 
@@ -60,7 +69,7 @@ class PlaceInGraveyardBehaviour(py_trees_ros.action_clients.FromBlackboard):
         goal = PickAndPlace.Goal()
         goal.pick_pose = bb.get('capture_pick_pose')
         goal.place_pose = bb.get('graveyard_pose')
-        goal.approach_height = float(bb.get('approach_height', 0.12))
-        goal.transit_height = float(bb.get('transit_height', 0.20))
+        goal.approach_height = float(_bb_get(bb, 'approach_height', 0.12))
+        goal.transit_height = float(_bb_get(bb, 'transit_height', 0.20))
         bb.set('graveyard_goal', goal)
         super().initialise()

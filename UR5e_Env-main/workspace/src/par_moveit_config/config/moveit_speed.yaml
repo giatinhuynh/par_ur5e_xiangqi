@@ -1,0 +1,7 @@
+# MoveIt Cartesian waypoint speed (fraction of UR joint limits, 0.0–1.0).
+# Lower = slower/safer. Was hard-coded at 0.1; lab default 0.05 for xiangqi.
+moveit_action_server_node:
+  ros__parameters:
+    max_velocity_scaling_factor: 0.05
+    max_acceleration_scaling_factor: 0.05
+    move_plane_height: 0.25

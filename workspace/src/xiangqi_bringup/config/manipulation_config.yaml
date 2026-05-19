@@ -8,7 +8,8 @@
 #   - Xiangqi pieces: lab set (~20 mm diameter)
 #   - Board mat: 4×A3 assembly (docs/board_mat_4xA3_BR.svg), grid_spacing_mm: 61.25
 #
-# Arm motion: lab's /par_moveit/waypoint_move action server (par_moveit_config)
+# Arm motion: lab's /par_moveit/waypoint_move action server (par_moveit_config).
+# Speed: par_moveit_config/config/moveit_speed.yaml (max_velocity_scaling_factor, default 0.05).
 
 manipulation_node:
   ros__parameters:
@@ -26,18 +27,19 @@ manipulation_node:
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     # Use the taught scan pose below (base_link, metres / radians) instead of board centre.
     use_manual_scan_pose: true
-    # Rest / scan pose taught on UR pendant (horizontal board layout):
-    #   x=41.11 mm, y=-357.06 mm, z=459.54 mm
-    #   RX=0.012 rad, RY=3.167 rad, RZ=-0.339 rad
-    # par_moveit WaypointPose only has one rotation field (maps to RZ); roll/pitch are fixed in the lab driver.
-    initial_pose_x:    0.04111     # 41.11 mm
-    initial_pose_y:   -0.35706     # -357.06 mm
-    initial_pose_z:    0.45954     # 459.54 mm (absolute TCP height in base_link)
-    initial_pose_yaw: -0.339       # RZ (rad)
-    scan_pose_x:       0.04111
-    scan_pose_y:      -0.35706
-    scan_pose_z:       0.45954
-    scan_pose_yaw:    -0.339
+    # Rest / scan pose (2026-05-19 calibration_tool Step 1, TF base_link). Same TCP.
+    #   x=-41.82 mm, y=208.71 mm, z=829.41 mm, yaw=-0.0137 rad
+    initial_pose_x:    -0.04182
+    initial_pose_y:     0.20871
+    initial_pose_z:     0.82941
+    initial_pose_yaw:  -0.01369
+    scan_pose_x:       -0.04182
+    scan_pose_y:        0.20871
+    scan_pose_z:        0.82941
+    scan_pose_yaw:     -0.01369
+    # Move to initial_pose once after stack launch (hardware only; needs Play on pendant).
+    move_to_initial_pose_on_startup: true
+    startup_move_delay_sec: 5.0
 
 gripper_controller_node:
   ros__parameters:

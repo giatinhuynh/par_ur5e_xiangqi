@@ -1,20 +1,33 @@
-# board_calibration.yaml: Calibration template -- populated by calibration_tool
-# Run: ros2 run xiangqi_vision calibration_tool
-# to generate the actual homography and board_to_base_tf values.
-#
-# Mat: 4×A3 quarter tile docs/board_mat_4xA3_BR.svg (full mat = TL+TR+BL+BR).
-# grid_spacing_mm from docs/board_geometry_4xA3.yaml — intersection-to-intersection (mm).
+# board_calibration.yaml — lab VXLab fallback (2026-05-19 calibration_tool teach-in)
+# Used as install template: tools/lab_calibration_test.sh copy-config
+# Runtime path: /home/rosuser/workspace/config/board_calibration.yaml
+# Residuals at teach-in: ~8–10 mm per corner.
 
-homography: null          # Will be a 3x3 matrix [[...],[...],[...]] after calibration
-board_to_base_tf: null    # Will be a 4x4 matrix after calibration
-grid_spacing_mm: 61.25    # 4×A3 mat (square cells); measure after print if unsure
-piece_diameter_mm: 20.0   # Lab pieces (~2 cm diameter)
-grasp_height_mm: 10.0     # TCP height above board plane at pick (≈ half piece height)
+homography:
+  - [-0.034684049293094446, -2.257089422768313, 986.7793915765003]
+  - [-1.805104362265766, 0.33206136347950155, 1006.2990214906088]
+  - [-3.821257025004253e-05, 0.0006338260554098821, 1.0]
+board_to_base_tf:
+  - [-0.0025740767348526716, -0.999996664285916, -0.0002134150988697422, 0.24053195701926122]
+  - [0.9999464323424324, -0.0025718077524403355, -0.010025879040063426, 0.2974776385170102]
+  - [0.01002529673399175, -0.00023921104870628052, 0.9999497168375365, 0.21760115743132205]
+  - [0.0, 0.0, 0.0, 1.0]
+grid_spacing_mm: 61.25
+piece_diameter_mm: 20.0
+grasp_height_mm: 10.0
 approach_height_mm: 120.0
 transit_height_mm: 200.0
 board_origin_mm: [0.0, 0.0]
 image_width: 640
 image_height: 480
-# Filled by calibration_tool Step 1 (SPACE at scan pose):
-scan_pose: null       # {x, y, z, yaw} in base_link, metres / radians
-initial_pose: null   # same TCP as scan_pose unless taught separately later
+# Step 1 scan pose (TF base_link -> tool0), metres / rad:
+scan_pose:
+  x: -0.04182
+  y: 0.20871
+  z: 0.82941
+  yaw: -0.01369
+initial_pose:
+  x: -0.04182
+  y: 0.20871
+  z: 0.82941
+  yaw: -0.01369

@@ -177,8 +177,9 @@ def _cancel_pending_new_game() -> None:
 
 def _apply_idle_board_state() -> None:
     with _state_lock:
-        _state['board_grid'] = fen_to_grid(STARTING_FEN)
-        _state['fen'] = STARTING_FEN
+        if _state.get('simulation_mode', False):
+            _state['board_grid'] = fen_to_grid(STARTING_FEN)
+            _state['fen'] = STARTING_FEN
         _state['move_history'] = []
         _state['move_count'] = 0
         _state['game_status'] = 'idle'
@@ -200,8 +201,11 @@ def _queue_new_game(mode: str) -> None:
     _apply_fairy_stockfish_skill()
     _pending_new_game_mode = mode
     with _state_lock:
-        _state['board_grid'] = fen_to_grid(STARTING_FEN)
-        _state['fen'] = STARTING_FEN
+        # Sim: show logical start position. Hardware: keep live vision grid until next
+        # /xiangqi/board_state (pressing Start was resetting the UI to empty start FEN).
+        if _state.get('simulation_mode', False):
+            _state['board_grid'] = fen_to_grid(STARTING_FEN)
+            _state['fen'] = STARTING_FEN
         _state['move_history'] = []
         _state['move_count'] = 0
         _state['game_result'] = 'ongoing'
@@ -679,7 +683,11 @@ class DashboardNode(Node):
             # publishes the logical board from FEN after each move.
             if sim and piece_count < 8:
                 return
+            # On hardware, ignore empty/sparse YOLO frames so the UI does not flicker.
+            if not sim and piece_count < 4:
+                return
             _state['board_grid'] = [int(x) for x in msg.grid]
+            _state['board_source'] = 'vision'
             if msg.fen:
                 _state['fen'] = msg.fen
             _state['is_red_turn'] = msg.is_red_turn
@@ -705,10 +713,13 @@ class DashboardNode(Node):
             _state['system_state'] = msg.system_state
             _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
             _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
-            # Always update FEN and derive grid (works without vision in sim mode)
+            # Sim: logical FEN drives the board (no camera). Hardware: vision drives the grid;
+            # only update FEN here for game metadata — do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
                 _state['fen'] = msg.current_fen
-                _state['board_grid'] = fen_to_grid(msg.current_fen)
+                if _state.get('simulation_mode', False):
+                    _state['board_grid'] = fen_to_grid(msg.current_fen)
+                    _state['board_source'] = 'fen'
             _state['_dirty'] = True
 
     def _move_history_cb(self, msg: MoveHistory) -> None:

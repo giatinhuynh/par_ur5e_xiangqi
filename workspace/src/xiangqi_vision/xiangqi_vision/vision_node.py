@@ -44,7 +44,7 @@ class VisionNode(Node):
         self.declare_parameter('confidence_threshold', 0.5)
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('poll_rate_hz', 3.0)
-        self.declare_parameter('camera_topic', '/camera/color/image_raw')
+        self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
 
         model_path_param = self.get_parameter('model_path').value
         cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
@@ -221,7 +221,11 @@ class VisionNode(Node):
         ok, H, debug = self._board_detector.detect(image)
 
         if not ok:
-            self.get_logger().warn('ArUco detection failed -- board not visible', throttle_duration_sec=5.0)
+            diag = getattr(self._board_detector, '_last_detect_diag', '')
+            self.get_logger().warn(
+                f'ArUco detection failed -- board not visible. {diag.replace(chr(10), " ")}',
+                throttle_duration_sec=5.0,
+            )
             self._publish_debug(debug)
             return None
 

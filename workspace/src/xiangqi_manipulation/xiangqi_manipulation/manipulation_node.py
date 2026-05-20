@@ -1,14 +1,10 @@
 """
 manipulation_node: Pick-and-place action server for Xiangqi pieces.
 
-The lab's UR5e uses a custom C++ MoveIt action server (from par_moveit_config)
-that exposes arm motion via:
-
-    /par_moveit/waypoint_move  (par_interfaces/action/WaypointMove)
-        goal:   par_interfaces/WaypointPose target_pose
-                    geometry_msgs/Point position   (x, y, z in metres, robot base frame)
-                    float64 rotation               (end-effector yaw in radians)
-        result: par_interfaces/WaypointPose final_pose
+Arm motion (hardware): OMPL joint-space planning only via move_group
+    /move_action  (moveit_msgs/action/MoveGroup) — same pipeline as RViz Plan & Execute.
+    All pick/place, scan, and homing steps use _move() → OMPL (6-DOF UR5e solves joints).
+    Requires moveit_config_driver before arm moves. No Cartesian / waypoint_move path.
 
 The RG2 gripper is controlled via (from onrobot_rg2_driver):
 
@@ -49,13 +45,7 @@ from std_srvs.srv import Trigger
 from xiangqi_msgs.action import PickAndPlace
 from xiangqi_manipulation.move_translator import BoardCalibration
 from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
-
-try:
-    from par_interfaces.action import WaypointMove
-    from par_interfaces.msg import WaypointPose
-    PAR_INTERFACES_OK = True
-except ImportError:
-    PAR_INTERFACES_OK = False
+from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient
 
 try:
     from onrobot_rg2_msgs.action import GripperSetWidth
@@ -97,8 +87,19 @@ class ManipulationNode(Node):
         )
         self.declare_parameter('move_to_initial_pose_on_startup', True)
         self.declare_parameter('startup_move_delay_sec', 5.0)
+        self.declare_parameter('startup_move_max_retries', 3)
+        self.declare_parameter('move_max_retries', 2)
+        self.declare_parameter('move_group_action', '/move_action')
+        self.declare_parameter('move_group_name', 'ur_manipulator_end_effector')
+        self.declare_parameter('end_effector_link', 'end_effector_link')
+        self.declare_parameter('planning_frame', 'base_link')
+        self.declare_parameter('max_velocity_scaling_factor', 0.05)
+        self.declare_parameter('max_acceleration_scaling_factor', 0.05)
+        self.declare_parameter('allowed_planning_time', 5.0)
+        self.declare_parameter('num_planning_attempts', 10)
 
         self._sim_mode      = self.get_parameter('simulation_mode').value
+        self._move_max_retries = int(self.get_parameter('move_max_retries').value)
         self._startup_timer = None
         self._startup_move_done = False
         self._open_width    = self.get_parameter('open_width').value
@@ -124,20 +125,12 @@ class ManipulationNode(Node):
         self._arm_cbg    = MutuallyExclusiveCallbackGroup()
         self._grip_cbg   = MutuallyExclusiveCallbackGroup()
 
-        # --- Action clients for lab infrastructure ---
-        self._arm_client  = None
+        # --- OMPL arm planner + gripper ---
+        self._ompl_client = None
         self._rg2_client  = None
 
         if not self._sim_mode:
-            if PAR_INTERFACES_OK:
-                self._arm_client = ActionClient(
-                    self, WaypointMove, '/par_moveit/waypoint_move',
-                    callback_group=self._arm_cbg
-                )
-            else:
-                self.get_logger().warn(
-                    'par_interfaces not found — arm motion will be simulated'
-                )
+            self._setup_arm_planner()
             if RG2_OK:
                 self._rg2_client = ActionClient(
                     self, GripperSetWidth, '/rg2/set_width',
@@ -173,9 +166,10 @@ class ManipulationNode(Node):
             callback_group=self._arm_cbg,
         )
 
+        arm_backend = 'sim' if self._sim_mode else ('ompl' if self._ompl_client else 'none')
         self.get_logger().info(
             f'manipulation_node ready '
-            f'(sim={self._sim_mode}, arm={PAR_INTERFACES_OK}, rg2={RG2_OK})'
+            f'(sim={self._sim_mode}, arm={arm_backend}, rg2={RG2_OK})'
         )
 
         if (
@@ -185,12 +179,39 @@ class ManipulationNode(Node):
             delay = float(self.get_parameter('startup_move_delay_sec').value)
             self.get_logger().info(
                 f'Startup: will move to initial pose in {delay:.1f}s '
-                '(pendant Play + External Control must be ON)'
+                f'(planner={arm_backend}; pendant Play + moveit_config_driver required)'
             )
             self._startup_timer = self.create_timer(
                 delay,
                 self._startup_move_to_initial_pose_cb,
                 callback_group=self._arm_cbg,
+            )
+
+    def _setup_arm_planner(self) -> None:
+        """OMPL via move_group /move_action (joint-space, same as RViz)."""
+        self._ompl_client = MoveGroupOmplClient(
+            self,
+            action_name=str(self.get_parameter('move_group_action').value),
+            group_name=str(self.get_parameter('move_group_name').value),
+            end_effector_link=str(self.get_parameter('end_effector_link').value),
+            planning_frame=str(self.get_parameter('planning_frame').value),
+            velocity_scaling=float(
+                self.get_parameter('max_velocity_scaling_factor').value
+            ),
+            acceleration_scaling=float(
+                self.get_parameter('max_acceleration_scaling_factor').value
+            ),
+            allowed_planning_time=float(
+                self.get_parameter('allowed_planning_time').value
+            ),
+            num_planning_attempts=int(
+                self.get_parameter('num_planning_attempts').value
+            ),
+        )
+
+        if not self._ompl_client.available:
+            self.get_logger().error(
+                'move_group /move_action not available — run moveit_config_driver first'
             )
 
     # ------------------------------------------------------------------
@@ -395,22 +416,40 @@ class ManipulationNode(Node):
             self._startup_timer.cancel()
             self._startup_timer = None
 
+        if self._ompl_client is not None:
+            wait_s = max(5.0, float(self.get_parameter('startup_move_delay_sec').value))
+            if not self._ompl_client.wait_for_server(timeout_sec=wait_s):
+                self.get_logger().warn(
+                    f'Startup: {self.get_parameter("move_group_action").value} '
+                    'not ready — start moveit_config_driver, then call '
+                    '/xiangqi/move_to_initial_pose'
+                )
+
         self.get_logger().info(
             f'Startup: moving to initial pose '
             f'({self._initial_pose_x:.3f}, {self._initial_pose_y:.3f}, '
             f'{self._initial_pose_z:.3f})'
         )
-        ok = self._move(
-            self._initial_pose_x,
-            self._initial_pose_y,
-            self._initial_pose_z,
-            self._initial_pose_yaw,
-        )
+        max_retries = int(self.get_parameter('startup_move_max_retries').value)
+        ok = False
+        for attempt in range(1, max_retries + 1):
+            if attempt > 1:
+                self.get_logger().info(f'Startup: initial pose retry {attempt}/{max_retries}')
+                time.sleep(2.0)
+            ok = self._move(
+                self._initial_pose_x,
+                self._initial_pose_y,
+                self._initial_pose_z,
+                self._initial_pose_yaw,
+            )
+            if ok:
+                break
         if ok:
             self.get_logger().info('Startup: reached initial pose')
         else:
             self.get_logger().warn(
-                'Startup: initial pose move failed — check pendant Play and MoveIt'
+                'Startup: initial pose move failed — check Play, moveit_config_driver, '
+                'and board_calibration.yaml initial_pose'
             )
 
     def _move_to_initial_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
@@ -446,49 +485,36 @@ class ManipulationNode(Node):
         return response
 
     # ------------------------------------------------------------------
-    # Arm motion primitive  →  /par_moveit/waypoint_move
+    # Arm motion: OMPL only (move_group /move_action)
     # ------------------------------------------------------------------
 
     def _move(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
-        """Move end-effector to (x, y, z) in robot base frame (metres)."""
-        if self._sim_mode or self._arm_client is None:
+        """Plan and execute in joint space (OMPL) to (x,y,z) + downward yaw."""
+        if self._sim_mode:
             self.get_logger().info(
-                f'[{"SIM" if self._sim_mode else "NOARM"}] '
-                f'Move → ({x:.3f}, {y:.3f}, {z:.3f})'
+                f'[SIM] Move → ({x:.3f}, {y:.3f}, {z:.3f})'
             )
             time.sleep(0.3)
             return True
 
-        if not self._arm_client.wait_for_server(timeout_sec=5.0):
-            self.get_logger().error('/par_moveit/waypoint_move not available')
+        if self._ompl_client is None:
+            self.get_logger().error('OMPL planner not initialized')
             return False
 
-        wp = WaypointPose()
-        wp.position.x = x
-        wp.position.y = y
-        wp.position.z = z
-        wp.rotation = yaw    # End-effector yaw; 0.0 works for all Xiangqi pieces
+        for attempt in range(1, self._move_max_retries + 1):
+            if attempt > 1:
+                self.get_logger().info(
+                    f'OMPL move retry {attempt}/{self._move_max_retries}'
+                )
+                time.sleep(1.0)
+            if self._ompl_client.move_to_pose(x, y, z, yaw):
+                return True
 
-        goal = WaypointMove.Goal()
-        goal.target_pose = wp
-
-        send_future = self._arm_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_future, timeout_sec=10.0)
-
-        goal_handle = send_future.result()
-        if goal_handle is None or not goal_handle.accepted:
-            self.get_logger().error('WaypointMove goal rejected')
-            return False
-
-        result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=30.0)
-
-        result = result_future.result()
-        if result is None:
-            self.get_logger().error('WaypointMove timed out')
-            return False
-
-        return True
+        self.get_logger().error(
+            f'OMPL move failed after {self._move_max_retries} attempt(s) '
+            f'→ ({x:.3f}, {y:.3f}, {z:.3f})'
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Gripper primitive  →  /rg2/set_width

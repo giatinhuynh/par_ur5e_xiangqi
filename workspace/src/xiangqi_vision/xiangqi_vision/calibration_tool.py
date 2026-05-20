@@ -63,8 +63,8 @@ class CalibrationTool(Node):
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
         self.declare_parameter('tool_pose_topic', '/tool_pose')
         self.declare_parameter('base_frame', 'base_link')
-        # MoveIt planning frame / pendant TCP; fallbacks tried if lookup fails.
-        self.declare_parameter('tcp_frame', 'tool0')
+        # Match MoveIt tip (ur_manipulator_end_effector → end_effector_link).
+        self.declare_parameter('tcp_frame', 'end_effector_link')
         self._camera_topic = self.get_parameter('camera_topic').value
         self._tool_pose_topic = self.get_parameter('tool_pose_topic').value
         self._base_frame = self.get_parameter('base_frame').value

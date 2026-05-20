@@ -8,7 +8,7 @@ ArUco marker IDs (printed at **sheet corners** on the mat; tools/generate_board_
   ID 3 = bottom-left  (file 0, rank 0)
 
 The grid is inset inside the marker quad — use board_geometry_*.yaml grid_spacing_mm and
-good calibration; pixel_to_grid uses separate x/y spacing in the normalised image.
+good calibration; pixel_to_grid uses board_layout (4×A3 mat geometry, not uniform margins).
 """
 
 import cv2
@@ -17,6 +17,13 @@ import yaml
 import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
+
+from xiangqi_vision.board_layout import (
+    NORM_W,
+    NORM_H,
+    MARGIN,
+    pixel_to_grid as layout_pixel_to_grid,
+)
 
 
 # Xiangqi board: 9 files (columns a-i) x 10 ranks (rows 0-9)
@@ -106,12 +113,11 @@ class BoardDetector:
         self._aruco_detector = cv2.aruco.ArucoDetector(aruco_dict, self._detector_params)
         self._last_detect_diag = ''
 
-        # Destination points in a normalised board image (800x890 px). Margins
-        # place the warped 9×10 intersections on a uniform grid; file/rank use
-        # separate spacing so rank steps match norm_h (square cells on the mat).
-        self._norm_w = 800
-        self._norm_h = 890
-        self._margin = 44
+        # Destination quad for ArUco sheet corners (800×890). Grid intersections
+        # are inset on the mat — pixel_to_grid uses board_layout anchors.
+        self._norm_w = NORM_W
+        self._norm_h = NORM_H
+        self._margin = MARGIN
         self._dst_corners = np.float32([
             [self._margin, self._norm_h - self._margin],          # ID 0: top-left  (rank 9)
             [self._norm_w - self._margin, self._norm_h - self._margin],  # ID 1: top-right
@@ -215,18 +221,7 @@ class BoardDetector:
         """
         pt = np.array([[[px, py]]], dtype=np.float32)
         warped = cv2.perspectiveTransform(pt, H)[0][0]
-
-        spacing_x = (self._norm_w - 2 * self._margin) / (BOARD_FILES - 1)
-        spacing_y = (self._norm_h - 2 * self._margin) / (BOARD_RANKS - 1)
-        file_f = (warped[0] - self._margin) / spacing_x
-        rank_f = (warped[1] - self._margin) / spacing_y
-
-        file_idx = int(round(file_f))
-        rank_idx = int(round(rank_f))
-
-        if 0 <= file_idx < BOARD_FILES and 0 <= rank_idx < BOARD_RANKS:
-            return file_idx, rank_idx
-        return -1, -1
+        return layout_pixel_to_grid(float(warped[0]), float(warped[1]))
 
     def grid_to_world(self, file_idx: int, rank_idx: int) -> np.ndarray:
         """

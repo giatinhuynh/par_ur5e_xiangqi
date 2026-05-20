@@ -10,10 +10,11 @@
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>shape_msgs</depend>
+  <depend>moveit_msgs</depend>
   <depend>xiangqi_msgs</depend>
 
-  <!-- Lab infrastructure packages (from Kibibibit/UR5e_Env base image) -->
-  <depend>par_interfaces</depend>       <!-- WaypointMove action + WaypointPose msg -->
+  <!-- Lab infrastructure (UR5e_Env base image) -->
   <depend>onrobot_rg2_msgs</depend>     <!-- GripperSetWidth action + GripperState msg -->
   <depend>ur_dashboard_msgs</depend>    <!-- SafetyMode msg (safety_monitor_node) -->
   <depend>ament_index_python</depend>

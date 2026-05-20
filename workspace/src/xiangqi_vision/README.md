@@ -34,7 +34,7 @@ So: **the board is “known” because the four ArUco corners anchor a geometric
 
 ### 3. From warped pixels to `(file, rank)` and `BoardState.grid`
 
-- **`PieceDetector`** runs YOLO on the warped image. Each detection’s centre is converted to a cell with **`_pixel_to_grid`** using the **same** margin and dimensions as `BoardDetector` (see `piece_detector.py`: `NORM_W`, `NORM_H`, `MARGIN`).
+- **`PieceDetector`** runs YOLO on the warped image. Each detection’s centre is snapped to the nearest intersection via **`board_layout.pixel_to_grid`**, which matches the **inset** 4×A3 grid on the printed mat (not uniform spacing from the 44 px warp margin alone).
 - The flat **`int8[90]`** array uses index **`rank * 9 + file`**, rank `0` = red side. Piece types use **±1…±7** (see `BoardState.msg`).
 
 If YOLO is missing, the node can still publish a grid of zeros after a successful warp (depending on configuration), but normally you need a weights file.

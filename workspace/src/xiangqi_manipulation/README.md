@@ -5,7 +5,7 @@
 ## `manipulation_node`
 
 - **Action server** `/xiangqi/pick_and_place` (`xiangqi_msgs/PickAndPlace`).
-- **Hardware path**: sends goals to **`/par_moveit/waypoint_move`** (`par_interfaces/WaypointMove`) for Cartesian-style moves in `base_link`, and **`/rg2/set_width`** (`GripperSetWidth`) for finger width/force.
+- **Hardware path**: All arm moves use OMPL joint-space planning via MoveIt **`/move_action`** (`moveit_msgs/action/MoveGroup`) — same as RViz Plan & Execute (pick/place, scan, homing). No Cartesian `waypoint_move`. Gripper: **`/rg2/set_width`** (`GripperSetWidth`).
 - **Simulation path** (`simulation_mode:=true`): skips real clients and sleeps briefly per phase so the BT can be tested without drivers.
 
 **Executed sequence** (8 logical phases): open gripper → approach above pick → descend to pick → close on piece → lift to transit → move above place → descend → open to release → lift clear. Orientation is fixed “gripper down” for round pieces.

@@ -137,8 +137,11 @@ class MoveTranslator:
         if transit_height is None:
             transit_height = self._transit_height_m()
         """
-        Convert a 4-char move to the 5 key waypoint poses:
-          (approach_pick, grasp, lift, approach_place, place)
+        Convert a 4-char move to the 5 key waypoint poses.
+
+        The returned ``grasp`` and ``place`` poses are board-surface poses.
+        The manipulation action server owns the final descent height so it can
+        apply the same grasp offset consistently for board and graveyard moves.
         """
         from_file, from_rank, to_file, to_rank = _parse_move(move)
 
@@ -146,10 +149,10 @@ class MoveTranslator:
         place_xyz = self._cal.grid_to_world(to_file, to_rank)
 
         approach_pick  = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + approach_height)
-        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + grasp_height)
+        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2])
         lift_pose      = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + transit_height)
         approach_place = _make_pose(place_xyz[0], place_xyz[1], place_xyz[2] + approach_height)
-        place_pose     = _make_pose(place_xyz[0], place_xyz[1], place_xyz[2] + grasp_height)
+        place_pose     = _make_pose(place_xyz[0], place_xyz[1], place_xyz[2])
 
         return approach_pick, grasp_pose, lift_pose, approach_place, place_pose
 

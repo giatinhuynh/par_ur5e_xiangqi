@@ -81,6 +81,7 @@ class ManipulationNode(Node):
         self.declare_parameter('grasp_width',        GRASP_WIDTH)
         self.declare_parameter('release_width',      RELEASE_WIDTH)
         self.declare_parameter('grasp_force',        GRASP_FORCE)
+        self.declare_parameter('grasp_height',       0.010)
         # Rest / scan pose (base_link, metres / radians). Pendant: 41.11, -357.06, 459.54 mm; RZ=-0.339.
         self.declare_parameter('initial_pose_x',     0.04111)
         self.declare_parameter('initial_pose_y',    -0.35706)
@@ -101,6 +102,7 @@ class ManipulationNode(Node):
         self._grasp_width   = self.get_parameter('grasp_width').value
         self._release_width = self.get_parameter('release_width').value
         self._grasp_force   = self.get_parameter('grasp_force').value
+        self._grasp_height  = float(self.get_parameter('grasp_height').value)
         self._scan_pose_yaw = self.get_parameter('scan_pose_yaw').value
         self._initial_pose_x = float(self.get_parameter('initial_pose_x').value)
         self._initial_pose_y = float(self.get_parameter('initial_pose_y').value)
@@ -193,6 +195,7 @@ class ManipulationNode(Node):
 
         approach_h = req.approach_height
         transit_h  = req.transit_height
+        grasp_h    = self._grasp_height
 
         def step(phase, fn):
             if goal_handle.is_cancel_requested:
@@ -226,7 +229,7 @@ class ManipulationNode(Node):
 
         # 3. Descend to piece
         if not step('descending_to_piece',
-                    lambda: self._move(pick_x, pick_y, pick_z)):
+                    lambda: self._move(pick_x, pick_y, pick_z + grasp_h)):
             return result
 
         # 4. Close gripper to grip piece
@@ -246,7 +249,7 @@ class ManipulationNode(Node):
 
         # 7. Descend to place position
         if not step('descending_to_place',
-                    lambda: self._move(place_x, place_y, place_z)):
+                    lambda: self._move(place_x, place_y, place_z + grasp_h)):
             return result
 
         # 8. Release piece

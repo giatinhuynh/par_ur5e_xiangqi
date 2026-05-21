@@ -22,6 +22,7 @@ manipulation_node:
     grasp_width:   18.0   # diameter − compression
     release_width: 34.0   # ~1.7× diameter
     grasp_force:   15.0   # Gripping force in Newtons
+    grasp_height:   0.010 # TCP height above board surface for side grip (metres)
     # Calibration file — used to derive scan pose from board centre when use_manual_scan_pose is false.
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     # Use the taught scan pose below (base_link, metres / radians) instead of board centre.

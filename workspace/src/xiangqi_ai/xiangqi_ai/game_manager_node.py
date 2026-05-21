@@ -1091,7 +1091,7 @@ class GameManagerNode(Node):
             for move in legal_moves:
                 candidate_fen = sf.get_fen(VARIANT, fen, [move])
                 candidate_grid = self._fen_to_grid(candidate_fen)
-                if self._grids_match_occupancy_colour(candidate_grid, new_grid):
+                if self._grids_match(candidate_grid, new_grid):
                     return move
         except Exception as e:
             self.get_logger().error(f'Move inference error: {e}')
@@ -1225,28 +1225,6 @@ class GameManagerNode(Node):
     @staticmethod
     def _grids_match(a: list, b: list, tolerance: int = 0) -> bool:
         diffs = sum(1 for x, y in zip(a, b) if x != y)
-        return diffs <= tolerance
-
-    @staticmethod
-    def _cell_colour(cell: int) -> int:
-        if cell > 0:
-            return 1
-        if cell < 0:
-            return -1
-        return 0
-
-    @classmethod
-    def _grids_match_occupancy_colour(
-        cls,
-        expected: list,
-        observed: list,
-        tolerance: int = 0,
-    ) -> bool:
-        diffs = sum(
-            1
-            for x, y in zip(expected, observed)
-            if cls._cell_colour(int(x)) != cls._cell_colour(int(y))
-        )
         return diffs <= tolerance
 
 

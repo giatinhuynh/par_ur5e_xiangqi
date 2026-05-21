@@ -168,7 +168,7 @@ class MoveTranslator:
             self._black_graveyard_idx += 1
 
         x, y, z = slots[idx]
-        return _make_pose(x, y, z + GRASP_HEIGHT)
+        return _make_pose(x, y, z)
 
     def square_to_world(self, file_idx: int, rank_idx: int) -> Pose:
         """Get the robot pose directly above a board square."""

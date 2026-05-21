@@ -90,11 +90,6 @@ class Detection:
         return self.piece_code if self.is_red else -self.piece_code
 
     @property
-    def color_grid_value(self) -> int:
-        """Colour-only occupancy value: +1 red, -1 black, 0 empty."""
-        return 1 if self.is_red else -1
-
-    @property
     def valid(self) -> bool:
         return self.file >= 0 and self.rank >= 0
 
@@ -137,17 +132,12 @@ class PieceDetector:
         return detections, annotated
 
     def detections_to_grid(self, detections: List[Detection]) -> np.ndarray:
-        """Convert detections to a colour-only flat int8[90] grid.
-
-        The game manager keeps the authoritative piece identities in FEN. Vision
-        only needs to report occupied squares and side colour so move inference
-        is not blocked by weak 14-way piece classification.
-        """
+        """Convert a list of detections to a flat int8[90] grid array."""
         grid = np.zeros(BOARD_FILES * BOARD_RANKS, dtype=np.int8)
         for det in detections:
             if det.valid:
                 idx = det.rank * BOARD_FILES + det.file
-                grid[idx] = det.color_grid_value
+                grid[idx] = det.grid_value
         return grid
 
     def mean_confidence(self, detections: List[Detection]) -> float:

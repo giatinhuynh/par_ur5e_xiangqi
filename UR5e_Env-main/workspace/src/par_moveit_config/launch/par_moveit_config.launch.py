@@ -265,14 +265,10 @@ def launch_setup(context, *args, **kwargs):
             warehouse_ros_config
     ]
 
-    moveit_speed_yaml = PathJoinSubstitution(
-        [FindPackageShare(package_name), "config", "moveit_speed.yaml"]
-    )
-
     moveit_action_server_node = Node(
         package=package_name,
         executable="moveit_action_server_node",
-        parameters=moveit_parameters + [moveit_speed_yaml],
+        parameters=moveit_parameters,
         output="screen"
     )
 

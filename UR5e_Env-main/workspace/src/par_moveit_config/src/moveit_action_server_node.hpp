@@ -34,10 +34,6 @@ class MoveitActionServerNode : public rclcpp::Node
     private:
 
         double move_plane_height;
-        double max_velocity_scaling_factor_;
-        double max_acceleration_scaling_factor_;
-
-        void apply_motion_speed_limits();
 
         rclcpp::Node::SharedPtr node_;
         rclcpp::Executor::SharedPtr executor_;

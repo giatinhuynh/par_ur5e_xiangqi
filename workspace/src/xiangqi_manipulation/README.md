@@ -10,6 +10,18 @@
 
 **Executed sequence** (8 logical phases): open gripper → approach above pick → descend to pick → close on piece → lift to transit → move above place → descend → open to release → lift clear. Orientation is fixed “gripper down” for round pieces.
 
+## `test_moveit_move` (lab smoke test)
+
+Isolated MoveIt motion test — **does not** launch the full xiangqi stack. Requires `arm_drivers`, pendant **Play**, and `moveit_config_driver` first.
+
+```bash
+source install/setup.bash
+ros2 run xiangqi_manipulation test_moveit_move --check          # prerequisites only
+ros2 run xiangqi_manipulation test_moveit_move --ompl             # /move_action (OMPL)
+ros2 run xiangqi_manipulation test_moveit_move --cartesian        # /par_moveit/waypoint_move
+ros2 run xiangqi_manipulation test_moveit_move --ompl --nudge-z 0.02   # small Z bump from current pose
+```
+
 ## `gripper_controller_node`
 
 - Exposes **`/xiangqi/gripper_control`** (`GripperControl.srv`) as a stable API for the rest of the stack.

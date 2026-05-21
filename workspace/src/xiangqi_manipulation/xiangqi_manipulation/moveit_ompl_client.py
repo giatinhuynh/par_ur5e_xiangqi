@@ -10,14 +10,16 @@ Requires moveit_config_driver (move_group) to be running.
 from __future__ import annotations
 
 import math
-import time
-from typing import Optional
+import threading
+from typing import Any, Optional
 
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.callback_groups import CallbackGroup
 from rclpy.node import Node
 
-from geometry_msgs.msg import Pose, Point, Quaternion
+from builtin_interfaces.msg import Time
+from geometry_msgs.msg import Pose, Point, Quaternion, Vector3
 from moveit_msgs.action import MoveGroup
 from moveit_msgs.msg import (
     MotionPlanRequest,
@@ -27,8 +29,13 @@ from moveit_msgs.msg import (
     OrientationConstraint,
     MoveItErrorCodes,
     BoundingVolume,
+    RobotState,
 )
 from shape_msgs.msg import SolidPrimitive
+
+
+# Goal position tolerance sphere (metres). 1 mm is too tight for OMPL sampling.
+GOAL_POSITION_TOLERANCE_M = 0.01
 
 
 def yaw_to_downward_quaternion(yaw: float) -> Quaternion:
@@ -50,11 +57,44 @@ def yaw_to_downward_quaternion(yaw: float) -> Quaternion:
     return q
 
 
+def moveit_error_name(code: int) -> str:
+    """Human-readable MoveItErrorCodes name (FAILURE=99999 is generic)."""
+    for name in dir(MoveItErrorCodes):
+        if not name.isupper():
+            continue
+        if getattr(MoveItErrorCodes, name) == code:
+            return name
+    return 'UNKNOWN'
+
+
+def _wait_on_future(future: Any, timeout_sec: float) -> Any:
+    """Block without calling spin_until_future_complete (main executor must spin)."""
+    if future.done():
+        return future.result()
+    done = threading.Event()
+    holder: dict = {'value': None, 'error': None}
+
+    def _done_cb(fut: Any) -> None:
+        try:
+            holder['value'] = fut.result()
+        except Exception as exc:  # noqa: BLE001 — surface action errors
+            holder['error'] = exc
+        done.set()
+
+    future.add_done_callback(_done_cb)
+    if not done.wait(timeout_sec):
+        return None
+    if holder['error'] is not None:
+        raise holder['error']
+    return holder['value']
+
+
 def build_motion_plan_request(
     *,
     group_name: str,
     link_name: str,
     frame_id: str,
+    stamp: Time,
     x: float,
     y: float,
     z: float,
@@ -63,6 +103,9 @@ def build_motion_plan_request(
     acceleration_scaling: float,
     allowed_planning_time: float,
     num_planning_attempts: int,
+    planner_id: str,
+    pipeline_id: str,
+    position_tolerance_m: float = GOAL_POSITION_TOLERANCE_M,
 ) -> MotionPlanRequest:
     goal_pose = Pose()
     goal_pose.position = Point(x=float(x), y=float(y), z=float(z))
@@ -70,7 +113,7 @@ def build_motion_plan_request(
 
     sphere = SolidPrimitive()
     sphere.type = SolidPrimitive.SPHERE
-    sphere.dimensions = [0.001]
+    sphere.dimensions = [float(position_tolerance_m)]
 
     region = BoundingVolume()
     region.primitives = [sphere]
@@ -78,18 +121,21 @@ def build_motion_plan_request(
 
     pos_c = PositionConstraint()
     pos_c.header.frame_id = frame_id
+    pos_c.header.stamp = stamp
     pos_c.link_name = link_name
-    pos_c.target_point_offset = Point(x=0.0, y=0.0, z=0.0)
+    pos_c.target_point_offset = Vector3(x=0.0, y=0.0, z=0.0)
     pos_c.constraint_region = region
     pos_c.weight = 1.0
 
     ori_c = OrientationConstraint()
     ori_c.header.frame_id = frame_id
+    ori_c.header.stamp = stamp
     ori_c.link_name = link_name
     ori_c.orientation = goal_pose.orientation
-    ori_c.absolute_x_axis_tolerance = 0.15
-    ori_c.absolute_y_axis_tolerance = 0.15
-    ori_c.absolute_z_axis_tolerance = 0.15
+    ori_c.absolute_x_axis_tolerance = 0.2
+    ori_c.absolute_y_axis_tolerance = 0.2
+    ori_c.absolute_z_axis_tolerance = 0.4
+    ori_c.parameterization = OrientationConstraint.XYZ_EULER_ANGLES
     ori_c.weight = 1.0
 
     constraints = Constraints()
@@ -98,11 +144,19 @@ def build_motion_plan_request(
 
     req = MotionPlanRequest()
     req.group_name = group_name
+    req.planner_id = planner_id
+    # pipeline_id must be non-empty — rclpy empty string has a CDR null-terminator bug
+    # that can corrupt the DDS stream.  When no planning_pipelines param is set, move_group
+    # falls back to "move_group" as the pipeline name (see move_group.cpp main()).
+    req.pipeline_id = pipeline_id if pipeline_id else 'move_group'
     req.num_planning_attempts = int(num_planning_attempts)
     req.allowed_planning_time = float(allowed_planning_time)
     req.max_velocity_scaling_factor = float(velocity_scaling)
     req.max_acceleration_scaling_factor = float(acceleration_scaling)
     req.goal_constraints = [constraints]
+    # Tell move_group to start from the live joint state (same as RViz Plan & Execute)
+    req.start_state = RobotState()
+    req.start_state.is_diff = True
     return req
 
 
@@ -121,7 +175,11 @@ class MoveGroupOmplClient:
         acceleration_scaling: float = 0.05,
         allowed_planning_time: float = 5.0,
         num_planning_attempts: int = 10,
+        planner_id: str = 'RRTConnectkConfigDefault',
+        pipeline_id: str = 'move_group',
         action_timeout_sec: float = 90.0,
+        callback_group: Optional[CallbackGroup] = None,
+        spin_node: bool = False,
     ) -> None:
         self._node = node
         self._action_name = action_name
@@ -132,7 +190,11 @@ class MoveGroupOmplClient:
         self._acceleration_scaling = acceleration_scaling
         self._allowed_planning_time = allowed_planning_time
         self._num_planning_attempts = num_planning_attempts
+        self._planner_id = planner_id
+        self._pipeline_id = pipeline_id
         self._action_timeout_sec = action_timeout_sec
+        self._callback_group = callback_group
+        self._spin_node = spin_node
         self._client: Optional[ActionClient] = None
         self._server_checked = False
         self._server_available = False
@@ -145,14 +207,20 @@ class MoveGroupOmplClient:
 
     def wait_for_server(self, timeout_sec: float = 30.0) -> bool:
         if self._client is None:
-            self._client = ActionClient(self._node, MoveGroup, self._action_name)
+            self._client = ActionClient(
+                self._node,
+                MoveGroup,
+                self._action_name,
+                callback_group=self._callback_group,
+            )
         ok = self._client.wait_for_server(timeout_sec=timeout_sec)
         self._server_checked = True
         self._server_available = ok
         if ok:
             self._node.get_logger().info(
                 f'OMPL arm planner: MoveGroup action {self._action_name!r} ready '
-                f'(group={self._group_name!r}, tip={self._link_name!r})'
+                f'(group={self._group_name!r}, tip={self._link_name!r}, '
+                f'planner={self._planner_id!r})'
             )
         else:
             self._node.get_logger().warn(
@@ -164,15 +232,31 @@ class MoveGroupOmplClient:
     def _probe_server(self, timeout_sec: float = 2.0) -> None:
         self.wait_for_server(timeout_sec=timeout_sec)
 
+    def _stamp_now(self) -> Time:
+        t = self._node.get_clock().now().to_msg()
+        return t
+
+    def _wait_future(self, future: Any, timeout_sec: float) -> Any:
+        if self._spin_node:
+            rclpy.spin_until_future_complete(
+                self._node, future, timeout_sec=timeout_sec
+            )
+            if not future.done():
+                return None
+            return future.result()
+        return _wait_on_future(future, timeout_sec)
+
     def move_to_pose(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
         if not self.available:
             return False
         assert self._client is not None
 
+        stamp = self._stamp_now()
         motion_req = build_motion_plan_request(
             group_name=self._group_name,
             link_name=self._link_name,
             frame_id=self._frame_id,
+            stamp=stamp,
             x=x,
             y=y,
             z=z,
@@ -181,6 +265,8 @@ class MoveGroupOmplClient:
             acceleration_scaling=self._acceleration_scaling,
             allowed_planning_time=self._allowed_planning_time,
             num_planning_attempts=self._num_planning_attempts,
+            planner_id=self._planner_id,
+            pipeline_id=self._pipeline_id,
         )
 
         goal = MoveGroup.Goal()
@@ -189,31 +275,52 @@ class MoveGroupOmplClient:
         goal.planning_options.plan_only = False
         goal.planning_options.replan = True
         goal.planning_options.replan_attempts = 3
+        # Required: tell move_group the planning scene diff is relative to current state
+        # (matches MoveGroupInterface::move() in C++ — see constructGoal / move())
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
 
         self._node.get_logger().info(
             f'OMPL move → ({x:.3f}, {y:.3f}, {z:.3f}), yaw={yaw:.3f}'
         )
 
         send_future = self._client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self._node, send_future, timeout_sec=10.0)
-        goal_handle = send_future.result()
-        if goal_handle is None or not goal_handle.accepted:
-            self._node.get_logger().error('MoveGroup goal rejected')
+        goal_handle = self._wait_future(send_future, timeout_sec=15.0)
+        if goal_handle is None:
+            self._node.get_logger().error(
+                'MoveGroup send_goal timed out (is an executor spinning?)'
+            )
+            return False
+        if not goal_handle.accepted:
+            self._node.get_logger().error('MoveGroup goal rejected by server')
             return False
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(
-            self._node, result_future, timeout_sec=self._action_timeout_sec
-        )
-        wrapped = result_future.result()
+        wrapped = self._wait_future(result_future, timeout_sec=self._action_timeout_sec)
         if wrapped is None:
             self._node.get_logger().error('MoveGroup timed out')
             return False
 
         code = wrapped.result.error_code.val
         if code != MoveItErrorCodes.SUCCESS:
+            name = moveit_error_name(code)
+            hints = []
+            if code == MoveItErrorCodes.FAILURE:
+                hints.append(
+                    'generic FAILURE — check pendant Play (External Control), '
+                    'arm_drivers, and scaled_joint_trajectory_controller'
+                )
+            elif code == MoveItErrorCodes.PLANNING_FAILED:
+                hints.append('goal may be unreachable or in collision')
+            elif code in (
+                MoveItErrorCodes.CONTROL_FAILED,
+                MoveItErrorCodes.TIMED_OUT,
+                MoveItErrorCodes.PREEMPTED,
+            ):
+                hints.append('trajectory execution failed on hardware')
+            hint = f' ({hints[0]})' if hints else ''
             self._node.get_logger().error(
-                f'MoveGroup failed (MoveItErrorCodes.val={code})'
+                f'MoveGroup failed: {name} (val={code}){hint}'
             )
             return False
 

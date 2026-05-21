@@ -1,0 +1,11 @@
+# Compose override for UR5e_Env — use without editing upstream docker-compose.yml:
+#
+#   cd ~/UR5e_Env
+#   docker-compose -f docker-compose.yml \
+#     -f ~/par_ur5e_xiangqi/tools/docker-compose.xiangqi.override.yml up -d
+#
+# Requires image ur5e_xiangqi:latest (tools/lab_build_xiangqi_image.sh).
+
+services:
+  ros2:
+    image: ur5e_xiangqi:latest

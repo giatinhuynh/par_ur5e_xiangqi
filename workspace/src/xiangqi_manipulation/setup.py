@@ -20,6 +20,7 @@ setup(
             'manipulation_node = xiangqi_manipulation.manipulation_node:main',
             'gripper_controller_node = xiangqi_manipulation.gripper_controller_node:main',
             'safety_monitor_node = xiangqi_manipulation.safety_monitor_node:main',
+            'test_moveit_move = xiangqi_manipulation.test_moveit_move:main',
         ],
     },
 )

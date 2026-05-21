@@ -202,7 +202,11 @@ class CalibrationTool(Node):
         return names
 
     def _tcp_transform_from_tf(self, max_wait_s: float = 5.0):
-        """Lookup TCP in base frame. Retries until TF tree is ready (lab needs ~0.5–2 s after Play)."""
+        """Get TCP pose. Tries CurrentWaypointPose service first, then TF, then CurrentPose."""
+        result = self._tcp_from_moveit_service()
+        if result is not None:
+            return result
+
         base_frames = self._unique_frame_names(self._base_frame, 'base_link', 'base')
         child_frames = self._unique_frame_names(self._tcp_frame, 'tool0', 'end_effector_link', 'flange')
         deadline = time.monotonic() + max_wait_s
@@ -237,7 +241,47 @@ class CalibrationTool(Node):
                         last_err = e
         if last_err is not None:
             self.get_logger().warn(f'TF lookup failed after {max_wait_s}s: {last_err}')
-        return self._tcp_from_moveit_service()
+        return self._tcp_from_current_pose_service()
+
+    def _tcp_from_current_pose_service(self):
+        """Query /par_moveit/get_current_pose (CurrentPose); same service as test_moveit_move."""
+        try:
+            from par_interfaces.srv import CurrentPose
+        except ImportError:
+            return None
+        if not hasattr(self, '_current_pose_cli'):
+            self._current_pose_cli = self.create_client(
+                CurrentPose, '/par_moveit/get_current_pose'
+            )
+        if not self._current_pose_cli.service_is_ready():
+            return None
+        future = self._current_pose_cli.call_async(CurrentPose.Request())
+        deadline = time.monotonic() + 3.0
+        in_bg = self._spin_thread is not None and self._spin_thread.is_alive()
+        while not future.done() and time.monotonic() < deadline and rclpy.ok():
+            if in_bg:
+                time.sleep(0.05)
+            else:
+                rclpy.spin_once(self, timeout_sec=0.05)
+        if not future.done():
+            return None
+        try:
+            p = future.result().pose
+        except Exception:
+            return None
+        r = p.orientation
+        yaw = self._lab_waypoint_yaw(r.x, r.y, r.z, r.w)
+        pose = {
+            'x': float(p.position.x),
+            'y': float(p.position.y),
+            'z': float(p.position.z),
+            'yaw': yaw,
+        }
+        self.get_logger().info(
+            f'TCP from /par_moveit/get_current_pose: '
+            f'[{pose["x"]:.4f}, {pose["y"]:.4f}, {pose["z"]:.4f}], yaw={pose["yaw"]:.4f}'
+        )
+        return pose
 
     def _tcp_from_moveit_service(self):
         """Fallback when TF not ready; requires moveit_config_driver."""

@@ -32,12 +32,13 @@ Gripper widths (all in mm):
 
 from __future__ import annotations
 import os
+import threading
 import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient, CancelResponse, GoalResponse
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from geometry_msgs.msg import Pose
 from std_srvs.srv import Trigger
@@ -97,6 +98,8 @@ class ManipulationNode(Node):
         self.declare_parameter('max_acceleration_scaling_factor', 0.05)
         self.declare_parameter('allowed_planning_time', 5.0)
         self.declare_parameter('num_planning_attempts', 10)
+        self.declare_parameter('planner_id', 'RRTConnectkConfigDefault')
+        self.declare_parameter('pipeline_id', 'move_group')
 
         self._sim_mode      = self.get_parameter('simulation_mode').value
         self._move_max_retries = int(self.get_parameter('move_max_retries').value)
@@ -120,10 +123,14 @@ class ManipulationNode(Node):
             self._scan_pose_x, self._scan_pose_y, self._scan_pose_z = \
                 self._resolve_scan_pose()
 
-        # Separate callback groups to avoid ROS action deadlocks
+        # Callback groups: pick/place server vs arm vs gripper.
+        # OMPL uses Reentrant + worker thread — spin_until_future_complete must not
+        # run inside a MultiThreadedExecutor callback (deadlocks MoveGroup actions).
         self._server_cbg = MutuallyExclusiveCallbackGroup()
-        self._arm_cbg    = MutuallyExclusiveCallbackGroup()
-        self._grip_cbg   = MutuallyExclusiveCallbackGroup()
+        self._arm_cbg = MutuallyExclusiveCallbackGroup()
+        self._ompl_cbg = ReentrantCallbackGroup()
+        self._grip_cbg = MutuallyExclusiveCallbackGroup()
+        self._move_lock = threading.Lock()
 
         # --- OMPL arm planner + gripper ---
         self._ompl_client = None
@@ -207,6 +214,9 @@ class ManipulationNode(Node):
             num_planning_attempts=int(
                 self.get_parameter('num_planning_attempts').value
             ),
+            planner_id=str(self.get_parameter('planner_id').value),
+            pipeline_id=str(self.get_parameter('pipeline_id').value),
+            callback_group=self._ompl_cbg,
         )
 
         if not self._ompl_client.available:
@@ -416,6 +426,13 @@ class ManipulationNode(Node):
             self._startup_timer.cancel()
             self._startup_timer = None
 
+        threading.Thread(
+            target=self._startup_move_to_initial_pose_worker,
+            name='xiangqi_startup_homing',
+            daemon=True,
+        ).start()
+
+    def _startup_move_to_initial_pose_worker(self) -> None:
         if self._ompl_client is not None:
             wait_s = max(5.0, float(self.get_parameter('startup_move_delay_sec').value))
             if not self._ompl_client.wait_for_server(timeout_sec=wait_s):
@@ -424,6 +441,7 @@ class ManipulationNode(Node):
                     'not ready — start moveit_config_driver, then call '
                     '/xiangqi/move_to_initial_pose'
                 )
+                return
 
         self.get_logger().info(
             f'Startup: moving to initial pose '
@@ -448,8 +466,9 @@ class ManipulationNode(Node):
             self.get_logger().info('Startup: reached initial pose')
         else:
             self.get_logger().warn(
-                'Startup: initial pose move failed — check Play, moveit_config_driver, '
-                'and board_calibration.yaml initial_pose'
+                'Startup: initial pose move failed — check arm_drivers, '
+                'moveit_config_driver, pendant Play (External Control), and '
+                'board_calibration.yaml initial_pose'
             )
 
     def _move_to_initial_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
@@ -501,20 +520,38 @@ class ManipulationNode(Node):
             self.get_logger().error('OMPL planner not initialized')
             return False
 
-        for attempt in range(1, self._move_max_retries + 1):
-            if attempt > 1:
-                self.get_logger().info(
-                    f'OMPL move retry {attempt}/{self._move_max_retries}'
-                )
-                time.sleep(1.0)
-            if self._ompl_client.move_to_pose(x, y, z, yaw):
-                return True
+        outcome: dict = {'ok': False}
 
-        self.get_logger().error(
-            f'OMPL move failed after {self._move_max_retries} attempt(s) '
-            f'→ ({x:.3f}, {y:.3f}, {z:.3f})'
-        )
-        return False
+        def worker() -> None:
+            with self._move_lock:
+                try:
+                    for attempt in range(1, self._move_max_retries + 1):
+                        if attempt > 1:
+                            self.get_logger().info(
+                                f'OMPL move retry {attempt}/{self._move_max_retries}'
+                            )
+                            time.sleep(1.0)
+                        if self._ompl_client.move_to_pose(x, y, z, yaw):
+                            outcome['ok'] = True
+                            return
+                    self.get_logger().error(
+                        f'OMPL move failed after {self._move_max_retries} attempt(s) '
+                        f'→ ({x:.3f}, {y:.3f}, {z:.3f})'
+                    )
+                except Exception as exc:
+                    self.get_logger().error(f'OMPL move exception: {exc}')
+
+        thread = threading.Thread(target=worker, name='xiangqi_ompl_move', daemon=True)
+        thread.start()
+        timeout = float(self._ompl_client._action_timeout_sec) + 30.0
+        thread.join(timeout=timeout)
+        if thread.is_alive():
+            self.get_logger().error(
+                f'OMPL move thread still running after {timeout:.0f}s — '
+                'is moveit_config_driver up and pendant on Play?'
+            )
+            return False
+        return bool(outcome['ok'])
 
     # ------------------------------------------------------------------
     # Gripper primitive  →  /rg2/set_width

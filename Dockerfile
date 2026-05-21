@@ -56,7 +56,8 @@ RUN pip3 install --no-cache-dir \
 WORKDIR /opt
 RUN git clone --depth=1 https://github.com/fairy-stockfish/Fairy-Stockfish.git fairy-stockfish
 WORKDIR /opt/fairy-stockfish/src
-RUN make -j$(nproc) ARCH=x86-64-modern build largeboards=yes \
+RUN ARCH_TARGET=$(uname -m | grep -q aarch64 && echo "armv8" || (uname -m | grep -q arm64 && echo "armv8" || echo "x86-64-modern")) && \
+    make -j$(nproc) ARCH=${ARCH_TARGET} build largeboards=yes \
     && cp stockfish /usr/local/bin/fairy-stockfish \
     && chmod +x /usr/local/bin/fairy-stockfish
 WORKDIR /opt/fairy-stockfish

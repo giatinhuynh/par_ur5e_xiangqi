@@ -23,6 +23,8 @@ manipulation_node:
     max_acceleration_scaling_factor: 0.05
     allowed_planning_time: 5.0
     num_planning_attempts: 10
+    planner_id: RRTConnectkConfigDefault
+    pipeline_id: move_group
     move_max_retries: 2
     startup_move_max_retries: 3
     # Lab pieces ~20 mm diameter + 4×A3 mat (see docs/board_geometry_4xA3.yaml)

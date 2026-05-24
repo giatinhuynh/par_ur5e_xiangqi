@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
   <depend>xiangqi_msgs</depend>
 
   <export>

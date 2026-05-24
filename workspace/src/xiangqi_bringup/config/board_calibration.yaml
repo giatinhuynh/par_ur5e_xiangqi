@@ -1,17 +1,28 @@
-# board_calibration.yaml — lab VXLab fallback (2026-05-19 calibration_tool teach-in)
+# board_calibration.yaml — VXLab calibration (2026-05-24 calibration_tool teach-in)
 # Used as install template: tools/lab_calibration_test.sh copy-config
 # Runtime path: /home/rosuser/workspace/config/board_calibration.yaml
-# Residuals at teach-in: ~8–10 mm per corner.
+# Residuals at teach-in: [5.21, 8.72, 8.02, 6.12] mm per corner.
+# grid_to_world uses bilinear interpolation from calibration_corners_base (not the rigid tf).
+# Joint-space pick-and-place uses bilinear interpolation of calibration_corners_joints /
+# cell_approach_joints — no OMPL or Cartesian IK for board moves.
+# NOTE: i9 approach recorded at z=0.0892 (34 mm below 120 mm target) — re-teach if arm clips.
 
 homography:
   - [-0.034684049293094446, -2.257089422768313, 986.7793915765003]
   - [-1.805104362265766, 0.33206136347950155, 1006.2990214906088]
   - [-3.821257025004253e-05, 0.0006338260554098821, 1.0]
 board_to_base_tf:
-  - [-0.0025740767348526716, -0.999996664285916, -0.0002134150988697422, 0.24053195701926122]
-  - [0.9999464323424324, -0.0025718077524403355, -0.010025879040063426, 0.2974776385170102]
-  - [0.01002529673399175, -0.00023921104870628052, 0.9999497168375365, 0.21760115743132205]
+  - [0.01493238, -0.99988768, 0.00128657, 0.24916190]
+  - [0.99978810,  0.01491264, -0.01419037, 0.36810922]
+  - [0.01416959,  0.00149819,  0.99989848, -0.00337807]
   - [0.0, 0.0, 0.0, 1.0]
+# Raw TCP positions at calibration corners (base_link, metres).
+# Order: (file=0,rank=0)=a0, (file=8,rank=0)=i0, (file=8,rank=9)=i9, (file=0,rank=9)=a9.
+calibration_corners_base:
+  - [ 0.24425475,  0.36661852, -0.00428528]   # a0
+  - [ 0.24784011,  0.85879778,  0.00447976]   # i0
+  - [-0.28703958,  0.86838378,  0.00351929]   # i9
+  - [-0.29615012,  0.37487033, -0.00168809]   # a9
 grid_spacing_mm: 61.25
 piece_diameter_mm: 20.0
 grasp_height_mm: 10.0
@@ -20,14 +31,69 @@ transit_height_mm: 200.0
 board_origin_mm: [0.0, 0.0]
 image_width: 640
 image_height: 480
-# Step 1 scan pose (TF base_link -> tool0), metres / rad:
 scan_pose:
-  x: -0.04182
-  y: 0.20871
-  z: 0.82941
-  yaw: -0.01369
+  x: 0.10415
+  y: 0.18623
+  z: 0.67068
+  yaw: -1.23933
 initial_pose:
-  x: -0.04182
-  y: 0.20871
-  z: 0.82941
-  yaw: -0.01369
+  x: 0.10415
+  y: 0.18623
+  z: 0.67068
+  yaw: -1.23933
+# Joint positions recorded at Step 1 — used for deterministic joint-space homing.
+scan_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+scan_joint_positions:
+  - -1.2271
+  - -0.6573
+  - -2.4409
+  - -4.5511
+  - -0.4307
+  -  4.5762
+# Board-level (grasp height) joint configs at the 4 calibration corners.
+# Order matches calibration_corners_base: a0, i0, i9, a9.
+calibration_corners_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+calibration_corners_joints:
+  - [-1.6394, -2.2119, -0.8971, -4.7635, -0.2277,  4.4744]   # a0
+  - [-2.3693, -1.5576, -0.0541, -4.6651, -0.1424,  4.5627]   # i0
+  - [-2.4080, -1.4907, -0.1546, -5.1433,  0.4825,  5.3398]   # i9
+  - [-1.7633, -2.0522, -0.9581, -4.6279,  0.9231,  5.6008]   # a9
+# Approach-height joint configs (~120 mm above board) at the 4 calibration corners.
+cell_approach_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+cell_approach_joints:
+  - [-1.4427, -2.1697, -1.0242, -4.7526, -0.2282,  4.4744]   # a0
+  - [-2.2551, -1.5584, -0.0988, -4.6413, -0.1426,  4.5492]   # i0
+  - [-2.3111, -1.4904, -0.1537, -5.1433,  0.4825,  5.3399]   # i9  (recorded at z=0.089, ~34 mm low)
+  - [-1.6014, -1.9821, -1.1310, -4.6502,  1.0207,  5.6227]   # a9
+# Graveyard joint configs — one fixed centre position per zone.
+graveyard_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+graveyard_red_y: 0.6107
+graveyard_red_grasp_joints:    [-1.9952, -1.9380, -0.4012, -4.6660, -0.2261,  4.4282]
+graveyard_red_approach_joints: [-1.8286, -1.9380, -0.4650, -4.6656, -0.2272,  4.4282]
+graveyard_black_y: 0.6253
+graveyard_black_grasp_joints:    [-2.0527, -1.9012, -0.4538, -5.1433,  0.8441,  5.6116]
+graveyard_black_approach_joints: [-1.9540, -1.9009, -0.4660, -5.1729,  0.8426,  5.6227]

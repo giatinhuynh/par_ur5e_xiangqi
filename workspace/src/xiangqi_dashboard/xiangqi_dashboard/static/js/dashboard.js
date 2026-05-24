@@ -444,7 +444,7 @@ function drawPiece(ctx, x, y, label, isRed, isSelected) {
 // ── Socket.IO ─────────────────────────────────────────────────────
 
 const socket = io({
-  transports: ['websocket', 'polling'],
+  transports: ['polling'],
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,

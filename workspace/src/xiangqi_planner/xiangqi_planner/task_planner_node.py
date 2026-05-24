@@ -206,10 +206,7 @@ class TaskPlannerNode(Node):
             name='CaptureOrSkip', memory=False
         )
         capture_subtree.add_children([
-            py_trees.decorators.FailureIsSuccess(
-                name='SkipCaptureIfNone',
-                child=py_trees.decorators.Inverter(name='NotACapture', child=IsCapture()),
-            ),
+            py_trees.decorators.Inverter(name='NotACapture', child=IsCapture()),
             capture_sequence,
         ])
 

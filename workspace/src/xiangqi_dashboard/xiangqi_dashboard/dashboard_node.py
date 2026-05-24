@@ -71,7 +71,7 @@ def fen_to_grid(fen: str) -> list:
 
 # Shared application state (updated by ROS callbacks, read by Flask)
 _state = {
-    'board_grid': fen_to_grid(STARTING_FEN),
+    'board_grid': [0] * 90,  # empty until vision or sim populates it
     'fen': STARTING_FEN,
     'game_status': 'idle',
     'is_red_turn': True,
@@ -138,12 +138,14 @@ _flask_app = Flask(
 _flask_app.config['SECRET_KEY'] = 'xiangqi_dashboard_2025'
 CORS(_flask_app)
 # threading: safe to emit from ROS callback/timer threads (eventlet breaks under fast AI play)
+# allow_upgrades=False: werkzeug dev server can't handle WebSocket protocol upgrades; polling works fine
 _socketio = SocketIO(
     _flask_app,
     cors_allowed_origins='*',
     async_mode='threading',
     ping_timeout=60,
     ping_interval=25,
+    allow_upgrades=False,
 )
 
 # ROS publisher/client references (set in DashboardNode.__init__)
@@ -683,9 +685,9 @@ class DashboardNode(Node):
             # publishes the logical board from FEN after each move.
             if sim and piece_count < 8:
                 return
-            # On hardware, ignore empty/sparse YOLO frames so the UI does not flicker.
-            if not sim and piece_count < 4:
-                return
+            # On hardware, show exactly what vision detected (even 1–2 pieces).
+            # Empty frames (piece_count == 0) are still passed through so the board
+            # clears when all pieces are removed.
             _state['board_grid'] = [int(x) for x in msg.grid]
             _state['board_source'] = 'vision'
             if msg.fen:

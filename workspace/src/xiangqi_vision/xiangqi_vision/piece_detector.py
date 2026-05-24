@@ -18,10 +18,21 @@ from typing import List, Tuple, Optional
 import cv2
 
 try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
+
+
+class _nullctx:
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
 
 BOARD_FILES = 9
 BOARD_RANKS = 10
@@ -94,12 +105,22 @@ class PieceDetector:
         Returns:
             (detections, annotated_image)
         """
-        results = self._model.predict(
-            board_image,
-            conf=self._conf_threshold,
-            verbose=False,
-            imgsz=board_image.shape[:2],
-        )
+        # Cap at 640 — YOLO resizes internally, and 640px is more than enough resolution
+        # for a Xiangqi board (each grid square ~70px at this size). Passing the full
+        # 890x800 warp to YOLO was causing ~2s/frame on CPU; 640 brings it to ~300-500ms.
+        MAX_INFER_SIZE = 640
+        h, w = board_image.shape[:2]
+        scale = min(MAX_INFER_SIZE / h, MAX_INFER_SIZE / w, 1.0)
+        infer_h = int(round(h * scale / 32) * 32) or 32
+        infer_w = int(round(w * scale / 32) * 32) or 32
+        ctx = torch.no_grad() if TORCH_AVAILABLE else _nullctx()
+        with ctx:
+            results = self._model.predict(
+                board_image,
+                conf=self._conf_threshold,
+                verbose=False,
+                imgsz=(infer_h, infer_w),
+            )
 
         detections: List[Detection] = []
         if results and results[0].boxes is not None:

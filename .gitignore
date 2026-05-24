@@ -21,8 +21,3 @@ __pycache__/
 Dockerfile.wsl.tmp
 docker-compose.yml.tmp
 setup.cfg.tmp
-
-# Other YOLO weights (project default is tracked below)
-workspace/src/xiangqi_vision/models/*.pt
-!workspace/src/xiangqi_vision/models/xiangqi_kaggle_v1_best.pt
-workspace/models/

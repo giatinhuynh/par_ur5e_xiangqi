@@ -44,6 +44,27 @@ class BoardCalibration:
     # Taught in calibration_tool Step 1 (arm at scan pose, SPACE): base_link TCP, metres / rad.
     scan_pose: Optional[Dict[str, float]] = None
     initial_pose: Optional[Dict[str, float]] = None
+    # Joint positions recorded at Step 1 — used for deterministic joint-space homing.
+    scan_joint_positions: Optional[list] = None
+    scan_joint_names: Optional[list] = None
+    # Raw TCP positions at the 4 calibration corners (base_link, metres):
+    # order matches CALIBRATION_CORNERS: (0,0), (8,0), (8,9), (0,9).
+    # When present, grid_to_world uses bilinear interpolation (more accurate than rigid transform).
+    calibration_corners_base: Optional[list] = None
+    # Joint positions recorded at board level for each corner (Step 2 teach-in).
+    calibration_corners_joint_names: Optional[list] = None
+    calibration_corners_joints: Optional[list] = None  # 4 lists of float
+    # Joint configs at approach_height above each calibration corner (Step 3 teach-in).
+    cell_approach_joint_names: Optional[list] = None
+    cell_approach_joints: Optional[list] = None   # 4 lists of float
+    # Graveyard joint configs — one fixed centre position per zone.
+    graveyard_joint_names: Optional[list] = None
+    graveyard_red_y: Optional[float] = None          # reference y for zone detection
+    graveyard_red_approach_joints: Optional[list] = None   # single list of joint values
+    graveyard_red_grasp_joints: Optional[list] = None
+    graveyard_black_y: Optional[float] = None
+    graveyard_black_approach_joints: Optional[list] = None
+    graveyard_black_grasp_joints: Optional[list] = None
 
     @property
     def is_valid(self) -> bool:
@@ -66,6 +87,37 @@ class BoardCalibration:
             data['scan_pose'] = {k: float(v) for k, v in self.scan_pose.items()}
         if self.initial_pose is not None:
             data['initial_pose'] = {k: float(v) for k, v in self.initial_pose.items()}
+        if self.scan_joint_positions is not None:
+            data['scan_joint_positions'] = [float(v) for v in self.scan_joint_positions]
+        if self.scan_joint_names is not None:
+            data['scan_joint_names'] = list(self.scan_joint_names)
+        if self.calibration_corners_base is not None:
+            data['calibration_corners_base'] = [
+                [float(v) for v in corner] for corner in self.calibration_corners_base
+            ]
+        if self.calibration_corners_joint_names is not None:
+            data['calibration_corners_joint_names'] = list(self.calibration_corners_joint_names)
+        if self.calibration_corners_joints is not None:
+            data['calibration_corners_joints'] = [
+                [float(v) for v in row] for row in self.calibration_corners_joints
+            ]
+        if self.cell_approach_joint_names is not None:
+            data['cell_approach_joint_names'] = list(self.cell_approach_joint_names)
+        if self.cell_approach_joints is not None:
+            data['cell_approach_joints'] = [
+                [float(v) for v in row] for row in self.cell_approach_joints
+            ]
+        if self.graveyard_joint_names is not None:
+            data['graveyard_joint_names'] = list(self.graveyard_joint_names)
+        for side in ('red', 'black'):
+            y_val = getattr(self, f'graveyard_{side}_y')
+            if y_val is not None:
+                data[f'graveyard_{side}_y'] = float(y_val)
+            for jtype in ('approach', 'grasp'):
+                key = f'graveyard_{side}_{jtype}_joints'
+                val = getattr(self, key)
+                if val is not None:
+                    data[key] = [float(v) for v in val]
         parent = os.path.dirname(path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -89,6 +141,40 @@ class BoardCalibration:
             cal.scan_pose = {k: float(data['scan_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['scan_pose']}
         if isinstance(data.get('initial_pose'), dict):
             cal.initial_pose = {k: float(data['initial_pose'][k]) for k in ('x', 'y', 'z', 'yaw') if k in data['initial_pose']}
+        if isinstance(data.get('scan_joint_positions'), list):
+            cal.scan_joint_positions = [float(v) for v in data['scan_joint_positions']]
+        if isinstance(data.get('scan_joint_names'), list):
+            cal.scan_joint_names = list(data['scan_joint_names'])
+        if isinstance(data.get('calibration_corners_base'), list):
+            cal.calibration_corners_base = [
+                [float(v) for v in corner] for corner in data['calibration_corners_base']
+            ]
+        if isinstance(data.get('calibration_corners_joint_names'), list):
+            cal.calibration_corners_joint_names = list(data['calibration_corners_joint_names'])
+        if isinstance(data.get('calibration_corners_joints'), list):
+            cal.calibration_corners_joints = [
+                [float(v) for v in row] for row in data['calibration_corners_joints']
+            ]
+        if isinstance(data.get('cell_approach_joint_names'), list):
+            cal.cell_approach_joint_names = list(data['cell_approach_joint_names'])
+        if isinstance(data.get('cell_approach_joints'), list):
+            cal.cell_approach_joints = [
+                [float(v) for v in row] for row in data['cell_approach_joints']
+            ]
+        if isinstance(data.get('graveyard_joint_names'), list):
+            cal.graveyard_joint_names = list(data['graveyard_joint_names'])
+        for side in ('red', 'black'):
+            y_key = f'graveyard_{side}_y'
+            if y_key in data:
+                setattr(cal, y_key, float(data[y_key]))
+            for jtype in ('approach', 'grasp'):
+                key = f'graveyard_{side}_{jtype}_joints'
+                val = data.get(key)
+                if isinstance(val, list) and val:
+                    # Accept both flat list and legacy nested list
+                    if isinstance(val[0], list):
+                        val = val[0]
+                    setattr(cal, key, [float(v) for v in val])
         return cal
 
 
@@ -226,22 +312,26 @@ class BoardDetector:
     def grid_to_world(self, file_idx: int, rank_idx: int) -> np.ndarray:
         """
         Convert grid coordinates to robot world-frame position (metres).
-        Requires calibration.board_to_base_tf to be set.
-        Returns a 3-element XYZ array in metres.
+
+        Uses bilinear interpolation from the 4 measured corner TCP positions when available
+        (calibration_corners_base present in YAML). This is more accurate than the rigid-body
+        transform because it passes through all 4 measured corners exactly — no residual error.
+
+        Falls back to board_to_base_tf rigid transform when corners not stored (old calibrations).
         """
-        if self.calibration.board_to_base_tf is None:
+        cal = self.calibration
+        if cal.calibration_corners_base is not None and len(cal.calibration_corners_base) == 4:
+            # Bilinear interpolation: corners in order (0,0),(8,0),(8,9),(0,9)
+            C00, C80, C89, C09 = [np.array(c) for c in cal.calibration_corners_base]
+            u = file_idx / 8.0
+            v = rank_idx / 9.0
+            return (1 - u) * (1 - v) * C00 + u * (1 - v) * C80 + u * v * C89 + (1 - u) * v * C09
+
+        # Fallback: rigid-body transform (old calibration without corner data)
+        if cal.board_to_base_tf is None:
             raise RuntimeError("board_to_base_tf not set -- run calibration first")
-
-        spacing_m = self.calibration.grid_spacing_mm / 1000.0
-        ox, oy = self.calibration.board_origin_mm
-        ox_m, oy_m = ox / 1000.0, oy / 1000.0
-
-        # Board frame: X = file direction, Y = rank direction, Z = up
-        board_pos = np.array([
-            ox_m + file_idx * spacing_m,
-            oy_m + rank_idx * spacing_m,
-            0.0,
-            1.0,
-        ])
-        world_pos = self.calibration.board_to_base_tf @ board_pos
-        return world_pos[:3]
+        spacing_m = cal.grid_spacing_mm / 1000.0
+        ox_m = cal.board_origin_mm[0] / 1000.0
+        oy_m = cal.board_origin_mm[1] / 1000.0
+        board_pos = np.array([ox_m + file_idx * spacing_m, oy_m + rank_idx * spacing_m, 0.0, 1.0])
+        return (cal.board_to_base_tf @ board_pos)[:3]

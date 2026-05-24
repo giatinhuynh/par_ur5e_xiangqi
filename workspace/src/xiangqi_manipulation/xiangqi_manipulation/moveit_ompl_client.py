@@ -10,6 +10,7 @@ Requires moveit_config_driver (move_group) to be running.
 from __future__ import annotations
 
 import math
+import time
 import threading
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ from moveit_msgs.msg import (
     MotionPlanRequest,
     PlanningOptions,
     Constraints,
+    JointConstraint,
     PositionConstraint,
     OrientationConstraint,
     MoveItErrorCodes,
@@ -68,25 +70,21 @@ def moveit_error_name(code: int) -> str:
 
 
 def _wait_on_future(future: Any, timeout_sec: float) -> Any:
-    """Block without calling spin_until_future_complete (main executor must spin)."""
-    if future.done():
+    """Poll future.done() until resolved or timeout.
+
+    Does NOT use add_done_callback / executor tasks — works reliably from any thread
+    (executor thread or daemon thread) as long as the executor is spinning on other threads.
+    """
+    deadline = time.monotonic() + timeout_sec
+    while not future.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.05, remaining))
+    try:
         return future.result()
-    done = threading.Event()
-    holder: dict = {'value': None, 'error': None}
-
-    def _done_cb(fut: Any) -> None:
-        try:
-            holder['value'] = fut.result()
-        except Exception as exc:  # noqa: BLE001 — surface action errors
-            holder['error'] = exc
-        done.set()
-
-    future.add_done_callback(_done_cb)
-    if not done.wait(timeout_sec):
-        return None
-    if holder['error'] is not None:
-        raise holder['error']
-    return holder['value']
+    except Exception as exc:  # noqa: BLE001
+        raise exc
 
 
 def build_motion_plan_request(
@@ -245,6 +243,76 @@ class MoveGroupOmplClient:
                 return None
             return future.result()
         return _wait_on_future(future, timeout_sec)
+
+    def move_to_joints(
+        self,
+        joint_names: list,
+        joint_positions: list,
+        tolerance: float = 0.01,
+    ) -> bool:
+        """Plan and execute to a specific joint configuration (deterministic homing)."""
+        if not self.available:
+            return False
+        assert self._client is not None
+
+        constraints = Constraints()
+        for jname, jpos in zip(joint_names, joint_positions):
+            jc = JointConstraint()
+            jc.joint_name = jname
+            jc.position = float(jpos)
+            jc.tolerance_above = tolerance
+            jc.tolerance_below = tolerance
+            jc.weight = 1.0
+            constraints.joint_constraints.append(jc)
+
+        req = MotionPlanRequest()
+        req.group_name = self._group_name
+        req.planner_id = self._planner_id
+        req.pipeline_id = self._pipeline_id if self._pipeline_id else 'move_group'
+        req.num_planning_attempts = self._num_planning_attempts
+        req.allowed_planning_time = self._allowed_planning_time
+        req.max_velocity_scaling_factor = self._velocity_scaling
+        req.max_acceleration_scaling_factor = self._acceleration_scaling
+        req.goal_constraints = [constraints]
+        req.start_state = RobotState()
+        req.start_state.is_diff = True
+
+        goal = MoveGroup.Goal()
+        goal.request = req
+        goal.planning_options = PlanningOptions()
+        goal.planning_options.plan_only = False
+        goal.planning_options.replan = True
+        goal.planning_options.replan_attempts = 3
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+
+        self._node.get_logger().info(
+            f'Joint-space move → {dict(zip(joint_names, [round(p, 3) for p in joint_positions]))}'
+        )
+
+        send_future = self._client.send_goal_async(goal)
+        goal_handle = self._wait_future(send_future, timeout_sec=15.0)
+        if goal_handle is None:
+            self._node.get_logger().error('MoveGroup joint send_goal timed out')
+            return False
+        if not goal_handle.accepted:
+            self._node.get_logger().error('MoveGroup joint goal rejected')
+            return False
+
+        result_future = goal_handle.get_result_async()
+        wrapped = self._wait_future(result_future, timeout_sec=self._action_timeout_sec)
+        if wrapped is None:
+            self._node.get_logger().error('MoveGroup joint move timed out')
+            return False
+
+        code = wrapped.result.error_code.val
+        if code != MoveItErrorCodes.SUCCESS:
+            err = moveit_error_name(code)
+            self._node.get_logger().error(f'MoveGroup joint move failed: {err} (val={code})')
+            return False
+
+        self._node.get_logger().info('Joint-space move succeeded')
+        return True
 
     def move_to_pose(self, x: float, y: float, z: float, yaw: float = 0.0) -> bool:
         if not self.available:

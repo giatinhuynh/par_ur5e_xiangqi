@@ -23,6 +23,7 @@ fi
 _deps_satisfied() {
   docker exec "$CONTAINER" bash -c '
     source /opt/ros/humble/setup.bash
+    python3 -c "import numpy; assert numpy.__version__.startswith(\"1.\")" >/dev/null 2>&1 &&
     python3 -c "import ultralytics, py_trees, flask, pyffish" >/dev/null 2>&1 &&
     command -v fairy-stockfish >/dev/null
   ' 2>/dev/null

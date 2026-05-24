@@ -4,7 +4,7 @@
 #
 # YOLO: vision_config.yaml sets require_yolo_weights:=true for lab runs. For sim at home
 # without a .pt in the tree, this file defaults require_yolo_weights:=false so the stack
-# starts; set true and place xiangqi_kaggle_v1_best.pt under
+# starts; set true and place xiangqi_kaggle_v2_best.pt under
 # workspace/src/xiangqi_vision/models/ before colcon, or set yolo_download_url /
 # env XIANGQI_YOLO_DOWNLOAD_URL to fetch weights at startup.
 

@@ -6,6 +6,8 @@ Run AFTER arm_drivers + moveit_config_driver, pendant on Play (External Control)
 Does NOT require xiangqi_system.launch.py.
 
   ros2 run xiangqi_manipulation test_moveit_move --check
+  ros2 run xiangqi_manipulation test_moveit_move --joints                          # from calibration YAML
+  ros2 run xiangqi_manipulation test_moveit_move --joints -1.321 -0.452 -0.046 -1.983 0.302 2.282  # explicit values
   ros2 run xiangqi_manipulation test_moveit_move --ompl
   ros2 run xiangqi_manipulation test_moveit_move --ompl --x -0.042 --y 0.209 --z 0.829 --yaw -0.014
   ros2 run xiangqi_manipulation test_moveit_move --cartesian --x -0.042 --y 0.209 --z 0.829 --yaw -0.014
@@ -26,6 +28,8 @@ from rclpy.node import Node
 from moveit_msgs.action import MoveGroup
 
 from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient
+from xiangqi_manipulation.move_translator import BoardCalibration
+from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
 
 try:
     from par_interfaces.action import WaypointMove
@@ -114,6 +118,86 @@ def _get_current_pose(node: Node, timeout_sec: float = 8.0):
     return future.result().pose
 
 
+DEFAULT_CAL_PATH = '/home/rosuser/workspace/config/board_calibration.yaml'
+
+
+def _joint_names_from_topic(node: Node, timeout_sec: float = 4.0) -> list:
+    """Read joint names from /joint_states (executor already spinning in background thread)."""
+    from sensor_msgs.msg import JointState
+    holder: dict = {'names': None}
+
+    def cb(msg):
+        if msg.name and holder['names'] is None:
+            holder['names'] = list(msg.name)
+
+    sub = node.create_subscription(JointState, '/joint_states', cb, 1)
+    deadline = time.monotonic() + timeout_sec
+    while holder['names'] is None and time.monotonic() < deadline and rclpy.ok():
+        time.sleep(0.05)
+    node.destroy_subscription(sub)
+    return holder['names'] or []
+
+
+def _run_joints(node: Node, cal_path: str, explicit_positions: list) -> bool:
+    # Try to load calibration for joint names / saved positions
+    joint_names = []
+    joint_positions = []
+
+    resolved = resolve_manipulation_calibration_path(cal_path, node.get_logger())
+    try:
+        cal = BoardCalibration.load(resolved)
+        joint_names = cal.scan_joint_names or []
+        joint_positions = cal.scan_joint_positions or []
+    except Exception:
+        cal = None
+
+    if explicit_positions:
+        joint_positions = explicit_positions
+        if not joint_names:
+            node.get_logger().info(
+                'No joint names in calibration — reading from /joint_states ...'
+            )
+            joint_names = _joint_names_from_topic(node)
+            if not joint_names:
+                node.get_logger().error(
+                    'Could not get joint names from /joint_states — is arm_drivers running?'
+                )
+                return False
+        if len(explicit_positions) != len(joint_names):
+            node.get_logger().error(
+                f'Got {len(explicit_positions)} values but robot has '
+                f'{len(joint_names)} joints: {joint_names}'
+            )
+            return False
+        node.get_logger().info('Joint-space move to explicit values:')
+    else:
+        if not joint_names or not joint_positions:
+            node.get_logger().error(
+                f'No scan_joint_positions in {resolved} — '
+                'run calibration_tool Step 1 first, or pass values directly: --joints v1 v2 ...'
+            )
+            return False
+        node.get_logger().info(
+            f'Joint-space move to calibrated scan pose ({len(joint_positions)} joints from {resolved}):'
+        )
+
+    for name, pos in zip(joint_names, joint_positions):
+        node.get_logger().info(f'  {name}: {pos:.4f} rad')
+
+    client = MoveGroupOmplClient(
+        node,
+        velocity_scaling=0.05,
+        acceleration_scaling=0.05,
+        allowed_planning_time=10.0,
+        num_planning_attempts=10,
+        action_timeout_sec=120.0,
+        spin_node=False,
+    )
+    if not client.wait_for_server(timeout_sec=15.0):
+        return False
+    return client.move_to_joints(joint_names, joint_positions)
+
+
 def _run_ompl(node: Node, x: float, y: float, z: float, yaw: float) -> bool:
     client = MoveGroupOmplClient(
         node,
@@ -167,7 +251,14 @@ def _run_cartesian(node: Node, x: float, y: float, z: float, yaw: float) -> bool
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description='Test MoveIt arm motion on lab hardware')
     parser.add_argument('--check', action='store_true', help='Only verify MoveIt / actions')
+    parser.add_argument(
+        '--cal', default=DEFAULT_CAL_PATH, metavar='PATH',
+        help='board_calibration.yaml path (default: %(default)s)',
+    )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--joints', nargs='*', metavar='RAD',
+                      help='Joint-space move: no values = read from --cal YAML; '
+                           'or pass 6 values directly e.g. --joints -1.32 -0.45 -0.05 -1.98 0.30 2.28')
     mode.add_argument('--ompl', action='store_true', help='Test /move_action (OMPL, default)')
     mode.add_argument('--cartesian', action='store_true', help='Test /par_moveit/waypoint_move')
     parser.add_argument('--x', type=float, default=DEFAULT_X)
@@ -197,6 +288,16 @@ def main(argv=None) -> None:
         if args.check:
             node.get_logger().info('Prerequisites OK (--check only)')
             return
+
+        if args.joints is not None:
+            explicit = [float(v) for v in args.joints] if args.joints else []
+            ok = _run_joints(node, args.cal, explicit)
+            if ok:
+                _get_current_pose(node)
+                node.get_logger().info('TEST PASSED')
+                sys.exit(0)
+            node.get_logger().error('TEST FAILED')
+            sys.exit(1)
 
         x, y, z, yaw = args.x, args.y, args.z, args.yaw
         if args.nudge_z is not None:

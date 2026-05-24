@@ -35,9 +35,17 @@ apt-get install -y --no-install-recommends \
     pip3 install --no-cache-dir py-trees
   }
 
+# Uninstall shadowing user-site packages (e.g. pre-baked numpy 2.x and opencv 4.13)
+# that override global installations and crash ROS Humble cv_bridge.
+if id -u rosuser >/dev/null 2>&1; then
+  echo "Cleaning up conflicting user-level packages for rosuser..."
+  su rosuser -c "pip3 uninstall -y numpy opencv-python opencv-python-headless 2>/dev/null || true"
+fi
+pip3 uninstall -y numpy opencv-python opencv-python-headless 2>/dev/null || true
+
 pip3 install --no-cache-dir \
   pymodbus==2.5.3 ultralytics flask flask-cors flask-socketio eventlet scipy \
-  opencv-python-headless 'numpy>=1.23,<2'
+  'opencv-python>=4.6.0,<4.10.0' 'numpy>=1.23,<2'
 
 WS=/home/rosuser/workspace/src
 if ! python3 -c "import py_trees_ros" 2>/dev/null; then

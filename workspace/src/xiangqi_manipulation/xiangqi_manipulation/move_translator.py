@@ -54,7 +54,7 @@ class BoardCalibration:
     calibration_rank_mid_joint_names: Optional[list] = None
     calibration_rank_mid_joints: Optional[list] = None  # 3 lists of float
     cell_approach_rank_mid_joints: Optional[list] = None  # 3 lists of float
-    # Graveyard joint configs — one fixed centre position per zone.
+    # Graveyard joint configs - one fixed centre position per zone.
     graveyard_joint_names: Optional[list] = None
     graveyard_red_y: Optional[float] = None          # reference y for zone detection
     graveyard_red_approach_joints: Optional[list] = None   # single list of joint values
@@ -352,16 +352,21 @@ def _file_index(file_char: str) -> int:
 
 
 def _parse_move(move: str) -> Tuple[int, int, int, int]:
-    """Return (from_file, from_rank, to_file, to_rank).
+    """Return (from_file, from_rank, to_file, to_rank) as 0-indexed board coordinates.
 
-    Handles both 4-char (e.g. 'b3b9') and 5-char (e.g. 'b3b10') moves
-    where the destination rank can be two digits.
+    Accepts pyffish/UCI moves where ranks are 1–10 (1 = red/robot home row).
+    Handles both 4-char (e.g. 'b2b8') and 5-char (e.g. 'b1b10', 'a10b9') moves.
     """
-    from_file = _file_index(move[0])
-    from_rank = int(move[1])
-    to_file   = _file_index(move[2])
-    to_rank   = int(move[3:])   # 1 or 2 digits
-    return from_file, from_rank, to_file, to_rank
+    def _sq(s: str, i: int) -> Tuple[int, int, int]:
+        f = ord(s[i].lower()) - ord('a')
+        # Rank 10 (black home) is encoded as two digits '10'
+        if i + 2 < len(s) and s[i + 1] == '1' and s[i + 2] == '0':
+            return f, 9, i + 3        # UCI rank 10 → 0-indexed rank 9
+        return f, int(s[i + 1]) - 1, i + 2  # UCI rank 1–9 → 0-indexed 0–8
+
+    ff, fr, ni = _sq(move, 0)
+    tf, tr, _  = _sq(move, ni)
+    return ff, fr, tf, tr
 
 
 def _make_pose(x: float, y: float, z: float) -> Pose:

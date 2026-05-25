@@ -30,7 +30,7 @@ class TurnDetector:
     Designed to run inside the vision_node at ~3 Hz.
     """
 
-    def __init__(self, stability_frames: int = 8, change_threshold: int = 2):
+    def __init__(self, stability_frames: int = 8, change_threshold: int = 1):
         self._stability_frames = stability_frames
         self._change_threshold = change_threshold   # Min occupied cells that differ to count as a change
         self._state = TurnDetectorState.IDLE

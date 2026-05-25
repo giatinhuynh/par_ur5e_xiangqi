@@ -105,7 +105,7 @@ class PieceDetector:
         Returns:
             (detections, annotated_image)
         """
-        # Cap at 640 — YOLO resizes internally, and 640px is more than enough resolution
+        # Cap at 640 - YOLO resizes internally, and 640px is more than enough resolution
         # for a Xiangqi board (each grid square ~70px at this size). Passing the full
         # 890x800 warp to YOLO was causing ~2s/frame on CPU; 640 brings it to ~300-500ms.
         MAX_INFER_SIZE = 640

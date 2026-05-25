@@ -1,4 +1,4 @@
-# board_calibration_sim.yaml — safe defaults when no lab/workspace calibration exists.
+# board_calibration_sim.yaml - safe defaults when no lab/workspace calibration exists.
 # Same semantics as xiangqi_vision/config/board_calibration_sim.yaml (kept in sync for planner/manipulation).
 
 homography: null

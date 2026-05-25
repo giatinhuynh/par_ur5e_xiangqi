@@ -12,7 +12,7 @@ Tree structure:
           │     ├── SetupMoveCoordinates
           │     ├── CaptureSubtree (Selector)
           │     ├── PickPiece (PickAndPlace)
-          │     ├── GoToScanPose (FailureIsSuccess — arm to bird's-eye scan position)
+          │     ├── GoToScanPose (FailureIsSuccess - arm to bird's-eye scan position)
           │     ├── VerifyBestEffort (Retry verify; swallow failure → always finalize)
           │     └── FinalizeRobotMove (``/xiangqi/ai_execution_result``)
           └── AiMotionFailureFinalizer → ``/xiangqi/ai_execution_result`` if inner Sequence fails
@@ -58,6 +58,7 @@ class TaskPlannerNode(Node):
             '/home/workspace/config/board_calibration.yaml',
         )
         self.declare_parameter('robot_plays_red', True)
+        self.declare_parameter('verify_grid_tolerance', 6)
 
         self._bb = py_trees.blackboard.Blackboard()
         self._bb.set('ai_move', None)
@@ -67,7 +68,10 @@ class TaskPlannerNode(Node):
         self._bb.set('is_capture', False)
         self._bb.set('estop_active', False)
         self._bb.set('human_move_detected', False)
-        self._bb.set('verify_grid_tolerance', 0)
+        self._bb.set(
+            'verify_grid_tolerance',
+            int(self.get_parameter('verify_grid_tolerance').value),
+        )
         robot_red = self.get_parameter('robot_plays_red').value
         self._bb.set('robot_is_red', robot_red)
 
@@ -118,7 +122,7 @@ class TaskPlannerNode(Node):
         """Load board calibration and construct MoveTranslator for pose generation."""
         if not os.path.isfile(cal_path):
             self.get_logger().error(
-                f'Calibration file not found: {cal_path} — pick-and-place poses will fail '
+                f'Calibration file not found: {cal_path} - pick-and-place poses will fail '
                 'until board_calibration.yaml exists (run calibration_tool).'
             )
             self._bb.set('move_translator', None)
@@ -127,7 +131,7 @@ class TaskPlannerNode(Node):
             cal = BoardCalibration.load(cal_path)
             if cal.board_to_base_tf is None:
                 self.get_logger().error(
-                    'Calibration has no board_to_base_tf — complete calibration_tool teach-in.'
+                    'Calibration has no board_to_base_tf - complete calibration_tool teach-in.'
                 )
                 self._bb.set('move_translator', None)
                 return
@@ -225,7 +229,7 @@ class TaskPlannerNode(Node):
 
         verify = VerifyBoardState(self, name='VerifyBoard')
         retry_verify = py_trees.decorators.Retry(
-            name='RetryVerify', child=verify, num_failures=3
+            name='RetryVerify', child=verify, num_failures=5
         )
         # Always reach finalize: on mismatch, FinalizeRobotMoveAfterVerify publishes
         # ``board_verify_failed`` instead of ``robot_move_complete``.

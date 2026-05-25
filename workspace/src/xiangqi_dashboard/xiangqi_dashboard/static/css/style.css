@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────────────────────────
-   Xiangqi Dashboard — Style Sheet
+   Xiangqi Dashboard - Style Sheet
    White ground, red and black only.
    ───────────────────────────────────────────────────────────────── */
 
@@ -7,7 +7,7 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
-  /* Backgrounds — white */
+  /* Backgrounds - white */
   --bg-base:    #ffffff;
   --bg-surface: #f7f5f3;
   --bg-card:    #f0edea;
@@ -17,12 +17,12 @@
   --border:     rgba(0,0,0,.09);
   --border-hi:  rgba(0,0,0,.18);
 
-  /* Red — lacquer red (Xiangqi red pieces) */
+  /* Red - lacquer red (Xiangqi red pieces) */
   --red:        #c0392b;
   --red-dim:    #8b1a10;
   --red-bright: #d95444;
 
-  /* Black — Xiangqi black pieces */
+  /* Black - Xiangqi black pieces */
   --ink:        #1a1816;
   --ink-mid:    #4a4440;
   --ink-dim:    #9a908a;
@@ -254,7 +254,7 @@ body {
 .ctrl-btn:hover { background: var(--bg-card); color: var(--ink); }
 .ctrl-btn:disabled { opacity: .3; cursor: not-allowed; }
 
-/* Start — red (primary action) */
+/* Start - red (primary action) */
 .new-game-btn {
   background: var(--red);
   color: #fff;
@@ -263,7 +263,7 @@ body {
 .new-game-btn:hover { background: var(--red-dim); border-color: var(--red-dim); color: #fff; }
 .new-game-btn.is-loading { opacity: .7; cursor: wait; }
 
-/* Stop / Restart — black outline */
+/* Stop / Restart - black outline */
 .stop-game-btn, .reset-game-btn {
   color: var(--ink);
   border-color: var(--ink-mid);
@@ -274,7 +274,27 @@ body {
   border-color: var(--ink);
 }
 
-/* E-Stop — red outline, fills red when active */
+/* Confirm move - visible on hardware when it is your turn (same family as Stop/Restart) */
+.confirm-move-btn {
+  color: var(--ink);
+  border-color: var(--ink-mid);
+}
+.confirm-move-btn:hover:not(:disabled) {
+  background: var(--ink);
+  color: #fff;
+  border-color: var(--ink);
+}
+.confirm-move-btn:not(.hidden) {
+  border-color: var(--red);
+  color: var(--red);
+}
+.confirm-move-btn:not(.hidden):hover:not(:disabled) {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+
+/* E-Stop - red outline, fills red when active */
 .estop-btn {
   color: var(--red);
   border-color: var(--red);
@@ -474,6 +494,8 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   font-weight: 400;
+  margin-left: 4px;
+  flex-shrink: 0;
 }
 
 .last-move {
@@ -522,7 +544,12 @@ body {
 
 #panel-engines { border-top: 2px solid var(--red); }
 
-.engine-setup-hint { display: none; }
+#panel-engines.panel-locked .engine-config-panel,
+#panel-engines.panel-locked .engine-difficulty-row,
+#panel-engines.panel-locked .human-color-row {
+  opacity: 0.55;
+  pointer-events: none;
+}
 
 /* Human color picker */
 .human-color-row {
@@ -560,7 +587,11 @@ body {
   cursor: pointer;
   transition: background .15s, color .15s;
 }
-.human-color-btn:hover { background: var(--bg-card); color: var(--ink); }
+.human-color-btn:hover:not(:disabled) { background: var(--bg-card); color: var(--ink); }
+.human-color-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 #btn-play-red.active {
   background: var(--red);
   color: #fff;
@@ -578,15 +609,6 @@ body {
   font-size: 11px;
   color: var(--text-muted);
   font-style: italic;
-}
-
-.engine-setup-lock {
-  margin-left: auto;
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  color: var(--red);
-  letter-spacing: .05em;
 }
 
 .engine-config-panel {

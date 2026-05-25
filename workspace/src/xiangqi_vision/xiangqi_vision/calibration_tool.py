@@ -53,7 +53,7 @@ CALIBRATION_CORNERS = [
 
 # Reject readings closer than this to the previous corner (teach order spans ~0.5–0.9 m).
 MIN_CORNER_SEPARATION_M = 0.15
-# Step 2: min change in any joint (rad) vs last recorded corner — detects stale TF after Stop+Freedrive.
+# Step 2: min change in any joint (rad) vs last recorded corner - detects stale TF after Stop+Freedrive.
 MIN_JOINT_DELTA_RAD = 0.02
 # Corners must be at least this far from taught scan pose (scan is above the board).
 MIN_SCAN_POSE_SEPARATION_M = 0.05
@@ -200,7 +200,7 @@ class CalibrationTool(Node):
 
     @staticmethod
     def _lab_waypoint_yaw(qx: float, qy: float, qz: float, qw: float) -> float:
-        """Extract WaypointMove rotation (RZ) from quaternion — matches CurrentWaypointPose.rotation."""
+        """Extract WaypointMove rotation (RZ) from quaternion - matches CurrentWaypointPose.rotation."""
         siny_cosp = 2.0 * (qw * qz + qx * qy)
         cosy_cosp = 1.0 - 2.0 * (qy * qy + qz * qz)
         yaw = math.atan2(siny_cosp, cosy_cosp)
@@ -363,7 +363,7 @@ class CalibrationTool(Node):
             and self._max_joint_delta(joints_now, self._joints_at_last_tcp) < MIN_JOINT_DELTA_RAD
         ):
             print(
-                '  NOTE: /joint_states unchanged — ROS still has the pre-freedrive pose.\n'
+                '  NOTE: /joint_states unchanged - ROS still has the pre-freedrive pose.\n'
                 '  Use MoveIt/pendant jog with Play ON, or enter pendant TCP manually.'
             )
             manual = self._prompt_manual_tcp_xyz()
@@ -397,7 +397,7 @@ class CalibrationTool(Node):
             for n, p in zip(names, positions):
                 print(f'    {n}: {p:.4f} rad')
         else:
-            print('  WARN: No /joint_states received — joint-space homing will not be available.')
+            print('  WARN: No /joint_states received - joint-space homing will not be available.')
         self._write_manipulation_config_poses(pose)
         print(
             f'\n  Saved scan_pose & initial_pose (base_link, m / rad):\n'
@@ -409,7 +409,7 @@ class CalibrationTool(Node):
         path = MANIPULATION_CONFIG_OUTPUT
         if not os.path.isfile(path):
             self.get_logger().info(
-                f'No {path} — poses only in {CALIBRATION_OUTPUT} '
+                f'No {path} - poses only in {CALIBRATION_OUTPUT} '
                 '(manipulation_node loads them from calibration_file).'
             )
             return
@@ -478,10 +478,10 @@ class CalibrationTool(Node):
         print('\nStep 2: Record grasp position + approach height at each of the 4 corners.')
         print('For each corner:')
         print('  A) Jog TCP to PIECE GRASP HEIGHT at the corner (board level + piece equator).')
-        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        print('  B) Jog straight UP to approach height - tool shows live dZ guide.')
         if have_scan_joints:
             print('  The arm will auto-return to scan pose (joint-space) between corners.')
-        print('BEST: Keep Play ON — use pendant jog or MoveIt RViz.')
+        print('BEST: Keep Play ON - use pendant jog or MoveIt RViz.')
         print('AVOID Stop+Freedrive: joint_states freeze; TF stays at old pose.\n')
 
         self._step2_corners = True
@@ -497,10 +497,10 @@ class CalibrationTool(Node):
                 print('  Part A: Jog to PIECE GRASP HEIGHT (board + piece equator).')
                 tcp = None
                 while True:
-                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    input('  >>> TCP at grasp position, Play ON - ENTER... ')
                     tcp = self._record_tcp_position()
                     if tcp is None:
-                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        self.get_logger().warn('Could not read TCP - is Play ON?')
                         tcp = self._prompt_manual_tcp_xyz()
                         if tcp is None:
                             continue
@@ -513,7 +513,7 @@ class CalibrationTool(Node):
                         if sep_mm < MIN_CORNER_SEPARATION_M * 1000.0:
                             print(
                                 f'  REJECTED: too close to previous corner ({sep_mm:.1f} mm). '
-                                'ROS pose may not have updated — try entering pendant x y z manually.'
+                                'ROS pose may not have updated - try entering pendant x y z manually.'
                             )
                             manual = self._prompt_manual_tcp_xyz()
                             if manual is not None:
@@ -540,7 +540,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._corner_joints.append(None)
-                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+                    print('  WARN: /joint_states not available - grasp joints not recorded.')
 
                 # ---- Part B: approach height ----
                 cz  = float(tcp[2])
@@ -566,7 +566,7 @@ class CalibrationTool(Node):
                         print()
                         break
                 else:
-                    print('\n  Timed out — approach joints not recorded for this corner.')
+                    print('\n  Timed out - approach joints not recorded for this corner.')
                     self._approach_joints.append(None)
                     continue
 
@@ -580,7 +580,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._approach_joints.append(None)
-                    print('  WARN: /joint_states not available — approach joints not recorded.')
+                    print('  WARN: /joint_states not available - approach joints not recorded.')
 
                 # ---- Auto-return to scan pose between corners ----
                 if i < 3 and have_scan_joints:
@@ -589,8 +589,8 @@ class CalibrationTool(Node):
                         self._calibration.scan_joint_names,
                         self._calibration.scan_joint_positions,
                     )
-                    print('  At scan pose — jog to next corner.' if ok
-                          else '  Auto-return failed — jog to scan pose manually.')
+                    print('  At scan pose - jog to next corner.' if ok
+                          else '  Auto-return failed - jog to scan pose manually.')
 
         finally:
             self._step2_corners = False
@@ -629,7 +629,7 @@ class CalibrationTool(Node):
                 MotionPlanRequest, PlanningOptions, RobotState,
             )
         except ImportError:
-            print('  moveit_msgs not installed — cannot auto-drive (jog manually).')
+            print('  moveit_msgs not installed - cannot auto-drive (jog manually).')
             return False
 
         if not hasattr(self, '_move_action_client'):
@@ -637,7 +637,7 @@ class CalibrationTool(Node):
 
         client = self._move_action_client
         if not client.wait_for_server(timeout_sec=5.0):
-            print('  /move_action not available — is moveit_config_driver running?')
+            print('  /move_action not available - is moveit_config_driver running?')
             return False
 
         constraints = Constraints()
@@ -719,7 +719,7 @@ class CalibrationTool(Node):
         print('These halve the interpolation error at mid-board cells (~3 cm → ~0.75 cm).')
         print('For each midpoint:')
         print('  A) Jog TCP to PIECE GRASP HEIGHT at the cell centre.')
-        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        print('  B) Jog straight UP to approach height - tool shows live dZ guide.')
         if have_scan_joints:
             print('  Auto-return to scan pose between e0 and e9.')
         print()
@@ -736,10 +736,10 @@ class CalibrationTool(Node):
                 print('  Part A: Jog to PIECE GRASP HEIGHT at this cell.')
                 tcp = None
                 while True:
-                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    input('  >>> TCP at grasp position, Play ON - ENTER... ')
                     tcp = self._record_tcp_position()
                     if tcp is None:
-                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        self.get_logger().warn('Could not read TCP - is Play ON?')
                         tcp = self._prompt_manual_tcp_xyz()
                         if tcp is None:
                             continue
@@ -755,7 +755,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._midpoint_grasp_joints.append(None)
-                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+                    print('  WARN: /joint_states not available - grasp joints not recorded.')
 
                 # ---- Part B: approach height ----
                 cz = float(tcp[2])
@@ -781,7 +781,7 @@ class CalibrationTool(Node):
                         print()
                         break
                 else:
-                    print(f'\n  Timed out — approach joints not recorded for {label}.')
+                    print(f'\n  Timed out - approach joints not recorded for {label}.')
                     self._midpoint_approach_joints.append(None)
                     if mp_idx == 0 and have_scan_joints:
                         self._move_to_joint_config(
@@ -799,7 +799,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._midpoint_approach_joints.append(None)
-                    print('  WARN: /joint_states not available — approach joints not recorded.')
+                    print('  WARN: /joint_states not available - approach joints not recorded.')
 
                 # Auto-return to scan between midpoints
                 if mp_idx == 0 and have_scan_joints:
@@ -808,8 +808,8 @@ class CalibrationTool(Node):
                         self._calibration.scan_joint_names,
                         self._calibration.scan_joint_positions,
                     )
-                    print('  At scan pose — jog to e9.' if ok
-                          else '  Auto-return failed — jog to scan pose manually.')
+                    print('  At scan pose - jog to e9.' if ok
+                          else '  Auto-return failed - jog to scan pose manually.')
 
         finally:
             self._stop_background_spin()
@@ -824,10 +824,10 @@ class CalibrationTool(Node):
             self._calibration.calibration_midpoints_joints = [
                 list(j) for j in self._midpoint_grasp_joints
             ]
-            print('\nMidpoint grasp joints saved (e0, e9) — two-patch interpolation enabled.')
+            print('\nMidpoint grasp joints saved (e0, e9) - two-patch interpolation enabled.')
         else:
             print(f'  Only {len(valid_grasp)}/2 midpoint grasp joints recorded '
-                  '— falling back to 4-corner mode.')
+                  '- falling back to 4-corner mode.')
 
         if len(valid_approach) == 2 and jnames is not None:
             self._calibration.cell_approach_midpoints_joints = [
@@ -854,7 +854,7 @@ class CalibrationTool(Node):
         print('These correct rank-direction drift from the shoulder_pan arc (~1 grid per rank step).')
         print('For each position:')
         print('  A) Jog TCP to PIECE GRASP HEIGHT at the cell centre.')
-        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        print('  B) Jog straight UP to approach height - tool shows live dZ guide.')
         if have_scan_joints:
             print('  Auto-return to scan pose between positions.')
         print()
@@ -874,10 +874,10 @@ class CalibrationTool(Node):
                 print('  Part A: Jog to PIECE GRASP HEIGHT at this cell.')
                 tcp = None
                 while True:
-                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    input('  >>> TCP at grasp position, Play ON - ENTER... ')
                     tcp = self._record_tcp_position()
                     if tcp is None:
-                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        self.get_logger().warn('Could not read TCP - is Play ON?')
                         tcp = self._prompt_manual_tcp_xyz()
                         if tcp is None:
                             continue
@@ -892,7 +892,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._rank_mid_grasp_joints.append(None)
-                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+                    print('  WARN: /joint_states not available - grasp joints not recorded.')
 
                 # ---- Part B: approach height ----
                 cz = float(tcp[2])
@@ -918,7 +918,7 @@ class CalibrationTool(Node):
                         print()
                         break
                 else:
-                    print(f'\n  Timed out — approach joints not recorded for {label}.')
+                    print(f'\n  Timed out - approach joints not recorded for {label}.')
                     self._rank_mid_approach_joints.append(None)
                     if mp_idx < 2 and have_scan_joints:
                         self._move_to_joint_config(
@@ -936,7 +936,7 @@ class CalibrationTool(Node):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
                     self._rank_mid_approach_joints.append(None)
-                    print('  WARN: /joint_states not available — approach joints not recorded.')
+                    print('  WARN: /joint_states not available - approach joints not recorded.')
 
                 # Auto-return between positions
                 if mp_idx < 2 and have_scan_joints:
@@ -946,8 +946,8 @@ class CalibrationTool(Node):
                         self._calibration.scan_joint_names,
                         self._calibration.scan_joint_positions,
                     )
-                    print(f'  At scan pose — jog to {next_label}.' if ok
-                          else '  Auto-return failed — jog to scan pose manually.')
+                    print(f'  At scan pose - jog to {next_label}.' if ok
+                          else '  Auto-return failed - jog to scan pose manually.')
 
         finally:
             self._stop_background_spin()
@@ -963,10 +963,10 @@ class CalibrationTool(Node):
             self._calibration.calibration_rank_mid_joints = [
                 list(j) for j in self._rank_mid_grasp_joints
             ]
-            print(f'\nRank-midpoint grasp joints saved (a{rank_mid}, e{rank_mid}, i{rank_mid}) — 4-patch mode enabled.')
+            print(f'\nRank-midpoint grasp joints saved (a{rank_mid}, e{rank_mid}, i{rank_mid}) - 4-patch mode enabled.')
         else:
             print(f'  Only {len(valid_grasp)}/3 rank-midpoint grasp joints recorded '
-                  '— falling back to 2-patch (file-only) mode.')
+                  '- falling back to 2-patch (file-only) mode.')
 
         if len(valid_approach) == 3 and jnames is not None:
             self._calibration.cell_approach_rank_mid_joints = [
@@ -990,7 +990,7 @@ class CalibrationTool(Node):
         print('  BLACK zone: where black pieces are captured (robot drops red captures here).')
         print('For each zone:')
         print('  A) Jog TCP to PIECE GRASP HEIGHT at the drop centre.')
-        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        print('  B) Jog straight UP to approach height - tool shows live dZ guide.')
         if have_scan_joints:
             print('  The arm will auto-return to scan pose between zones.')
         print()
@@ -1004,10 +1004,10 @@ class CalibrationTool(Node):
                 print(f'  Part A: Jog to PIECE GRASP HEIGHT at the {zone} drop centre.')
                 tcp = None
                 while True:
-                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    input('  >>> TCP at grasp position, Play ON - ENTER... ')
                     tcp = self._record_tcp_position()
                     if tcp is None:
-                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        self.get_logger().warn('Could not read TCP - is Play ON?')
                         tcp = self._prompt_manual_tcp_xyz()
                         if tcp is None:
                             continue
@@ -1022,7 +1022,7 @@ class CalibrationTool(Node):
                     for jn, jv in zip(names_now, joints_now):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
-                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+                    print('  WARN: /joint_states not available - grasp joints not recorded.')
 
                 # ---- Part B: approach height ----
                 cz = float(tcp[2])
@@ -1048,7 +1048,7 @@ class CalibrationTool(Node):
                         print()
                         break
                 else:
-                    print(f'\n  Timed out — approach joints not recorded for {zone} zone.')
+                    print(f'\n  Timed out - approach joints not recorded for {zone} zone.')
                     continue
 
                 time.sleep(1.0)
@@ -1059,7 +1059,7 @@ class CalibrationTool(Node):
                     for jn, jv in zip(names_now, joints_now):
                         print(f'    {jn}: {jv:.4f} rad')
                 else:
-                    print('  WARN: /joint_states not available — approach joints not recorded.')
+                    print('  WARN: /joint_states not available - approach joints not recorded.')
 
                 # Auto-return to scan pose between zones
                 if zone_idx == 0 and have_scan_joints:
@@ -1068,7 +1068,7 @@ class CalibrationTool(Node):
                         self._calibration.scan_joint_names,
                         self._calibration.scan_joint_positions,
                     )
-                    print('  At scan pose.' if ok else '  Auto-return failed — jog manually.')
+                    print('  At scan pose.' if ok else '  Auto-return failed - jog manually.')
 
         finally:
             self._stop_background_spin()
@@ -1082,10 +1082,10 @@ class CalibrationTool(Node):
             a    = self._graveyard_approach_joints[zone][0]
 
             if tcp is None:
-                print(f'  WARN: No TCP recorded for {zone} graveyard — skipping.')
+                print(f'  WARN: No TCP recorded for {zone} graveyard - skipping.')
                 continue
             if g is None or a is None:
-                print(f'  WARN: Incomplete joint data for {zone} graveyard — skipping.')
+                print(f'  WARN: Incomplete joint data for {zone} graveyard - skipping.')
                 continue
 
             if jnames is not None and self._calibration.graveyard_joint_names is None:
@@ -1095,12 +1095,12 @@ class CalibrationTool(Node):
             setattr(self._calibration, f'graveyard_{zone}_grasp_joints',    list(g))
             setattr(self._calibration, f'graveyard_{zone}_approach_joints', list(a))
             print(
-                f'  {zone.upper()} graveyard: y={tcp[1]:.4f} m — joints saved.'
+                f'  {zone.upper()} graveyard: y={tcp[1]:.4f} m - joints saved.'
             )
             any_saved = True
 
         if not any_saved:
-            print('  No graveyard data saved — graveyard moves will use OMPL fallback.')
+            print('  No graveyard data saved - graveyard moves will use OMPL fallback.')
 
     def _compute_transform(self):
         """
@@ -1160,7 +1160,7 @@ class CalibrationTool(Node):
             self._calibration.cell_approach_joints = [list(j) for j in self._approach_joints]
             print('Approach joints saved for all 4 corners.')
         else:
-            print(f'  Only {len(valid_approach)}/4 approach joints recorded — '
+            print(f'  Only {len(valid_approach)}/4 approach joints recorded - '
                   'board moves will use OMPL fallback.')
 
         print(f'\nboard_to_base_tf:\n{tf}')

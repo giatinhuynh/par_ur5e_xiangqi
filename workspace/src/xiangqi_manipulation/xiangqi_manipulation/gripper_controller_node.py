@@ -40,7 +40,7 @@ except ImportError:
     RG2_OK = False
 
 
-# Default gripper widths (mm) — tune after physical testing
+# Default gripper widths (mm) - tune after physical testing
 OPEN_WIDTH    = 50.0   # Opening width to clear piece before descent
 GRASP_WIDTH   = 18.0   # Closing width to grip a ~20 mm Xiangqi piece
 RELEASE_WIDTH = 34.0   # Width to open when releasing piece at destination
@@ -145,7 +145,7 @@ class GripperControllerNode(Node):
 
         if self._rg2_client is None or not RG2_OK:
             self.get_logger().warn(
-                'RG2 driver not available — gripper command ignored'
+                'RG2 driver not available - gripper command ignored'
             )
             return
 

@@ -1,4 +1,4 @@
-# vision_config_sim.yaml — used by xiangqi_sim.launch.py (home / no lab files).
+# vision_config_sim.yaml - used by xiangqi_sim.launch.py (home / no lab files).
 #
 # Packaged board_calibration_sim.yaml is used when workspace calibration is missing.
 #

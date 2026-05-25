@@ -44,7 +44,7 @@ DEFAULT_STOCKFISH_SKILL = 20  # UCI Skill Level 1–20
 
 
 def fen_to_grid(fen: str) -> list:
-    """Parse FEN to flat int8[90] grid — always works without vision."""
+    """Parse FEN to flat int8[90] grid - always works without vision."""
     if not fen:
         return [0] * 90
     grid = [0] * 90
@@ -223,7 +223,7 @@ def api_new_game():
         if status not in ('idle', 'game_over'):
             return jsonify({
                 'ok': False,
-                'error': 'Game in progress — use Stop or Reset.',
+                'error': 'Game in progress - use Stop or Reset.',
             }), 409
         mode = _state.get('game_mode', 'ai_vs_human')
     _queue_new_game(mode)
@@ -272,6 +272,16 @@ def api_human_ready():
     pub = _ros_publishers.get('human_ready')
     if pub:
         pub.publish(Empty())
+    return jsonify({'ok': True})
+
+
+@_flask_app.route('/api/sync_board', methods=['POST'])
+def api_sync_board():
+    """Ask game_manager to adopt the latest camera grid as authoritative FEN."""
+    pub = _ros_publishers.get('resync')
+    if pub is None:
+        return jsonify({'ok': False, 'error': 'Resync not available'}), 503
+    pub.publish(Empty())
     return jsonify({'ok': True})
 
 
@@ -359,6 +369,11 @@ def api_set_human_color():
     color = (data.get('color') or '').strip().lower()
     if color not in ('red', 'black'):
         return jsonify({'ok': False, 'error': 'color must be red or black'}), 400
+    if not _mode_change_allowed():
+        return jsonify({
+            'ok': False,
+            'error': 'Cannot change side during a game. Stop or wait for game over.',
+        }), 409
     with _state_lock:
         _state['human_color'] = color
         _state['_dirty'] = True
@@ -647,7 +662,14 @@ class DashboardNode(Node):
         _publish_game_mode(mode)
         _publish_ai_engines()
         _apply_fairy_stockfish_skill()
-        self.get_logger().info(f'Synced game mode to game_manager: {mode}')
+        with _state_lock:
+            color = _state.get('human_color', 'red')
+        pub = _ros_publishers.get('human_color')
+        if pub:
+            msg = String()
+            msg.data = color
+            pub.publish(msg)
+        self.get_logger().info(f'Synced game mode to game_manager: {mode} (human={color})')
 
     # ------------------------------------------------------------------
     # Timers
@@ -688,7 +710,7 @@ class DashboardNode(Node):
             self.get_logger().info(f'[Dashboard] Human move submitted: {move}')
 
     # ------------------------------------------------------------------
-    # ROS callbacks — update shared state
+    # ROS callbacks - update shared state
     # ------------------------------------------------------------------
 
     def _board_state_cb(self, msg: BoardState) -> None:
@@ -704,6 +726,17 @@ class DashboardNode(Node):
             # is high enough to trust a single frame.
             new_grid = [int(x) for x in msg.grid]
             conf = float(msg.detection_confidence)
+            if not sim and conf >= 0.999:
+                # Authoritative logical board from game manager (post-move FEN).
+                _state['board_grid'] = new_grid
+                _state['board_source'] = 'game'
+                if msg.fen:
+                    _state['fen'] = msg.fen
+                _state['detection_confidence'] = conf
+                self._prev_board_grid = new_grid
+                self._board_grid_repeat = self._BOARD_GRID_HOLD
+                _state['_dirty'] = True
+                return
             if not sim:
                 if new_grid == self._prev_board_grid:
                     self._board_grid_repeat += 1
@@ -712,18 +745,18 @@ class DashboardNode(Node):
                     self._prev_board_grid = new_grid
                 # Suppress the UI update unless the grid is stable or high-confidence
                 if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
-                    # Still update non-grid metadata (confidence, turn) but not the grid
+                    # Still update non-grid metadata (confidence) but not the grid.
+                    # Do not copy is_red_turn from vision - BoardState from camera often
+                    # leaves it unset; game_status is authoritative for side to move.
                     _state['detection_confidence'] = conf
                     if msg.fen:
                         _state['fen'] = msg.fen
-                    _state['is_red_turn'] = msg.is_red_turn
                     _state['_dirty'] = True
                     return
             _state['board_grid'] = new_grid
             _state['board_source'] = 'vision'
             if msg.fen:
                 _state['fen'] = msg.fen
-            _state['is_red_turn'] = msg.is_red_turn
             _state['detection_confidence'] = conf
             _state['_dirty'] = True
 
@@ -739,7 +772,7 @@ class DashboardNode(Node):
                 if self._detecting_move_first_seen == 0.0:
                     self._detecting_move_first_seen = time.time()
                 if time.time() - self._detecting_move_first_seen < self._DETECTING_MOVE_DEBOUNCE:
-                    # Within debounce window — keep whatever was shown before
+                    # Within debounce window - keep whatever was shown before
                     new_status = _state.get('game_status', new_status)
             else:
                 self._detecting_move_first_seen = 0.0
@@ -762,10 +795,10 @@ class DashboardNode(Node):
             _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
             _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
             # Sim: logical FEN drives the board (no camera). Hardware: vision drives the grid;
-            # only update FEN here for game metadata — do not reset to STARTING_FEN on every status tick.
+            # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
                 _state['fen'] = msg.current_fen
-                if _state.get('simulation_mode', False):
+                if _state.get('simulation_mode', False) or msg.move_count > prev_moves:
                     _state['board_grid'] = fen_to_grid(msg.current_fen)
                     _state['board_source'] = 'fen'
             _state['_dirty'] = True

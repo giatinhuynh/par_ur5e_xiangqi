@@ -36,7 +36,7 @@ def resolve_calibration_path(primary: str, logger) -> str:
         )
         if os.path.isfile(fb):
             logger.warning(
-                f'Calibration file not found at {primary!r} — using packaged sim defaults: {fb}'
+                f'Calibration file not found at {primary!r} - using packaged sim defaults: {fb}'
             )
             return fb
     except Exception:

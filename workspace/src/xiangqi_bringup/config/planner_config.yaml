@@ -1,4 +1,6 @@
-# planner_config.yaml — task_planner_node (paths). robot_plays_red: robot_side.yaml
+# planner_config.yaml - task_planner_node (paths). robot_plays_red: robot_side.yaml
 task_planner_node:
   ros__parameters:
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
+    # YOLO may miss pieces; allow extra cell diffs after move squares match
+    verify_grid_tolerance: 6

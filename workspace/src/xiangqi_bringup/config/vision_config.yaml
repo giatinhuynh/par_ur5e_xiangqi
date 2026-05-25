@@ -6,6 +6,6 @@ vision_node:
     require_yolo_weights: true
     yolo_download_url: ""
     confidence_threshold: 0.5
-    stability_frames: 8           # Frames to confirm a stable board state (~2s at 4Hz)
+    stability_frames: 5           # Frames to confirm a stable human move (~1.2s at 4Hz)
     poll_rate_hz: 4.0
     camera_topic: "/camera/camera/color/image_raw"

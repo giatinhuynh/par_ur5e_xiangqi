@@ -5,14 +5,14 @@
 ## `manipulation_node`
 
 - **Action server** `/xiangqi/pick_and_place` (`xiangqi_msgs/PickAndPlace`).
-- **Hardware path**: All arm moves use OMPL joint-space planning via MoveIt **`/move_action`** (`moveit_msgs/action/MoveGroup`) — same as RViz Plan & Execute (pick/place, scan, homing). No Cartesian `waypoint_move`. Gripper: **`/rg2/set_width`** (`GripperSetWidth`).
+- **Hardware path**: All arm moves use OMPL joint-space planning via MoveIt **`/move_action`** (`moveit_msgs/action/MoveGroup`) - same as RViz Plan & Execute (pick/place, scan, homing). No Cartesian `waypoint_move`. Gripper: **`/rg2/set_width`** (`GripperSetWidth`).
 - **Simulation path** (`simulation_mode:=true`): skips real clients and sleeps briefly per phase so the BT can be tested without drivers.
 
 **Executed sequence** (8 logical phases): open gripper → approach above pick → descend to pick → close on piece → lift to transit → move above place → descend → open to release → lift clear. Orientation is fixed “gripper down” for round pieces.
 
 ## `test_moveit_move` (lab smoke test)
 
-Isolated MoveIt motion test — **does not** launch the full xiangqi stack. Requires `arm_drivers`, pendant **Play**, and `moveit_config_driver` first.
+Isolated MoveIt motion test - **does not** launch the full xiangqi stack. Requires `arm_drivers`, pendant **Play**, and `moveit_config_driver` first.
 
 ```bash
 source install/setup.bash
@@ -39,6 +39,6 @@ Pure geometry (no ROS node):
 - Parses 4-character coordinate moves (`h0g2` → file/rank indices).
 - Uses **`board_to_base_tf`** and **grid spacing** from calibration to map each intersection to **(x, y, z)** in `base_link`.
 - Builds five poses: approach pick, grasp, lift, approach place, place (fixed downward quaternion).
-- Maintains **graveyard slot** positions (defaults are placeholders in base frame—tune for your table layout).
+- Maintains **graveyard slot** positions (defaults are placeholders in base frame-tune for your table layout).
 
 Used by `xiangqi_planner`’s `SetupMoveCoordinates` when a `MoveTranslator` is supplied on the blackboard.

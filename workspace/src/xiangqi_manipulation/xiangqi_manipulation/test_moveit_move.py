@@ -66,7 +66,7 @@ def _gripper(node: Node, width: float, force: float, timeout_sec: float = 10.0) 
     goal = GripperSetWidth.Goal()
     goal.target_width = float(width)
     goal.target_force = float(force)
-    # Use _wait_on_future (polling) — rclpy.spin_until_future_complete is unsafe when a
+    # Use _wait_on_future (polling) - rclpy.spin_until_future_complete is unsafe when a
     # MultiThreadedExecutor is already spinning on another thread and corrupts action state.
     gh = _wait_on_future(ac.send_goal_async(goal), timeout_sec=8.0)
     if gh is None or not gh.accepted:
@@ -84,7 +84,7 @@ def _parse_square(node: Node, square: str):
     """Parse algebraic square (e.g. 'e5') to (file_idx, rank). Returns None on error."""
     sq = square.strip().lower()
     if len(sq) < 2 or sq[0] not in 'abcdefghi':
-        node.get_logger().error(f'Invalid square {square!r} — use file (a-i) + rank (0-9), e.g. e5')
+        node.get_logger().error(f'Invalid square {square!r} - use file (a-i) + rank (0-9), e.g. e5')
         return None
     try:
         rank = int(sq[1:])
@@ -107,7 +107,7 @@ def _cell_joints(node: Node, cal: BoardCalibration, square: str):
     grasp    = cal.interpolate_board_joints(float(file_idx), float(rank))
     if approach is None or grasp is None:
         node.get_logger().error(
-            'Board joint configs missing — run calibration_tool Step 2 first'
+            'Board joint configs missing - run calibration_tool Step 2 first'
         )
         return None, None
     return approach, grasp
@@ -143,7 +143,7 @@ def _check_prerequisites(node: Node) -> bool:
     if ompl_ac.wait_for_server(timeout_sec=5.0):
         node.get_logger().info('OK  action /move_action')
     else:
-        node.get_logger().error('Missing /move_action — run moveit_config_driver')
+        node.get_logger().error('Missing /move_action - run moveit_config_driver')
         ok = False
     ompl_ac.destroy()
 
@@ -161,7 +161,7 @@ def _check_prerequisites(node: Node) -> bool:
     elif ok:
         node.get_logger().info('OK  /move_action server (move_group node name not listed)')
     else:
-        node.get_logger().error('No /move_group — run moveit_config_driver')
+        node.get_logger().error('No /move_group - run moveit_config_driver')
         ok = False
 
     if '/controller_manager' in nodes or any('controller' in n for n in nodes):
@@ -174,7 +174,7 @@ def _check_prerequisites(node: Node) -> bool:
 
 def _get_current_pose(node: Node, timeout_sec: float = 8.0):
     if not PAR_INTERFACES_OK:
-        node.get_logger().warn('par_interfaces not available — skip current pose')
+        node.get_logger().warn('par_interfaces not available - skip current pose')
         return None
     client = node.create_client(CurrentPose, '/par_moveit/get_current_pose')
     if not client.wait_for_service(timeout_sec=timeout_sec):
@@ -229,12 +229,12 @@ def _run_joints(node: Node, cal_path: str, explicit_positions: list) -> bool:
         joint_positions = explicit_positions
         if not joint_names:
             node.get_logger().info(
-                'No joint names in calibration — reading from /joint_states ...'
+                'No joint names in calibration - reading from /joint_states ...'
             )
             joint_names = _joint_names_from_topic(node)
             if not joint_names:
                 node.get_logger().error(
-                    'Could not get joint names from /joint_states — is arm_drivers running?'
+                    'Could not get joint names from /joint_states - is arm_drivers running?'
                 )
                 return False
         if len(explicit_positions) != len(joint_names):
@@ -247,7 +247,7 @@ def _run_joints(node: Node, cal_path: str, explicit_positions: list) -> bool:
     else:
         if not joint_names or not joint_positions:
             node.get_logger().error(
-                f'No scan_joint_positions in {resolved} — '
+                f'No scan_joint_positions in {resolved} - '
                 'run calibration_tool Step 1 first, or pass values directly: --joints v1 v2 ...'
             )
             return False

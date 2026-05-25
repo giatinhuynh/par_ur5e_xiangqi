@@ -4,7 +4,7 @@ Normalised warp grid geometry for the 4×A3 portrait mat.
 Homography maps ArUco **sheet corners** to the outer margin quad in the 800×890
 warp. Intersections sit **inset** on the printed mat (graveyard strips, ArUco
 bands). Mapping detections with uniform margin spacing shifts ranks ~1 toward
-the centre — use the same layout as tools/generate_board_svg.py (LAYOUT_4XA3).
+the centre - use the same layout as tools/generate_board_svg.py (LAYOUT_4XA3).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ MARGIN = 44
 BOARD_FILES = 9
 BOARD_RANKS = 10
 
-# 4×A3 portrait mat (mm) — tools/generate_board_svg.py
+# 4×A3 portrait mat (mm) - tools/generate_board_svg.py
 PAGE_W_MM_4XA3 = 594.0
 PAGE_H_MM_4XA3 = 840.0
 
@@ -78,10 +78,10 @@ def _compute_4xa3_grid_mm() -> Tuple[object, object]:
 def _dst_quad_corners() -> Tuple[Tuple[float, float], ...]:
     """TL, TR, BR, BL in norm pixels (matches BoardDetector._dst_corners)."""
     return (
-        (MARGIN, NORM_H - MARGIN),          # ID 0 — file 0, rank 9
+        (MARGIN, NORM_H - MARGIN),          # ID 0 - file 0, rank 9
         (NORM_W - MARGIN, NORM_H - MARGIN),  # ID 1
-        (NORM_W - MARGIN, MARGIN),          # ID 2 — file 8, rank 0
-        (MARGIN, MARGIN),                   # ID 3 — file 0, rank 0
+        (NORM_W - MARGIN, MARGIN),          # ID 2 - file 8, rank 0
+        (MARGIN, MARGIN),                   # ID 3 - file 0, rank 0
     )
 
 

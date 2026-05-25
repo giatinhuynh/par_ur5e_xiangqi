@@ -23,4 +23,4 @@
 
 The node may expose engine switching through the web layer by calling the **`SetEngine`** service on `ai_engine_node` (see `dashboard_node.py` for routes and client setup).
 
-This package does **not** implement game rules or vision—it only reflects and triggers the running stack.
+This package does **not** implement game rules or vision-it only reflects and triggers the running stack.

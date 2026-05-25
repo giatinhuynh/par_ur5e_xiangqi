@@ -7,7 +7,7 @@ ArUco marker IDs (printed at **sheet corners** on the mat; tools/generate_board_
   ID 2 = bottom-right (file 8, rank 0  -- red/robot side)
   ID 3 = bottom-left  (file 0, rank 0)
 
-The grid is inset inside the marker quad — use board_geometry_*.yaml grid_spacing_mm and
+The grid is inset inside the marker quad - use board_geometry_*.yaml grid_spacing_mm and
 good calibration; pixel_to_grid uses board_layout (4×A3 mat geometry, not uniform margins).
 """
 
@@ -44,7 +44,7 @@ class BoardCalibration:
     # Taught in calibration_tool Step 1 (arm at scan pose, SPACE): base_link TCP, metres / rad.
     scan_pose: Optional[Dict[str, float]] = None
     initial_pose: Optional[Dict[str, float]] = None
-    # Joint positions recorded at Step 1 — used for deterministic joint-space homing.
+    # Joint positions recorded at Step 1 - used for deterministic joint-space homing.
     scan_joint_positions: Optional[list] = None
     scan_joint_names: Optional[list] = None
     # Raw TCP positions at the 4 calibration corners (base_link, metres):
@@ -68,7 +68,7 @@ class BoardCalibration:
     calibration_rank_mid_joint_names: Optional[list] = None
     calibration_rank_mid_joints: Optional[list] = None  # 3 lists of float
     cell_approach_rank_mid_joints: Optional[list] = None  # 3 lists of float
-    # Graveyard joint configs — one fixed centre position per zone.
+    # Graveyard joint configs - one fixed centre position per zone.
     graveyard_joint_names: Optional[list] = None
     graveyard_red_y: Optional[float] = None          # reference y for zone detection
     graveyard_red_approach_joints: Optional[list] = None   # single list of joint values
@@ -241,7 +241,7 @@ class BoardDetector:
         self.calibration = calibration or BoardCalibration()
         aruco_dict = cv2.aruco.getPredefinedDictionary(self.ARUCO_DICT)
         self._detector_params = cv2.aruco.DetectorParameters()
-        # Lab mats: markers can be small in frame, glare on white print — relax defaults.
+        # Lab mats: markers can be small in frame, glare on white print - relax defaults.
         self._detector_params.minMarkerPerimeterRate = 0.015
         self._detector_params.maxMarkerPerimeterRate = 4.0
         self._detector_params.adaptiveThreshWinSizeMin = 3
@@ -253,7 +253,7 @@ class BoardDetector:
         self._last_detect_diag = ''
 
         # Destination quad for ArUco sheet corners (800×890). Grid intersections
-        # are inset on the mat — pixel_to_grid uses board_layout anchors.
+        # are inset on the mat - pixel_to_grid uses board_layout anchors.
         self._norm_w = NORM_W
         self._norm_h = NORM_H
         self._margin = MARGIN
@@ -326,7 +326,7 @@ class BoardDetector:
             if missing:
                 hint += f' Missing ID(s): {missing}.'
             if len(all_ids) == 0:
-                hint += ' None detected — check print scale 100%, DICT_4X4_50, no glare.'
+                hint += ' None detected - check print scale 100%, DICT_4X4_50, no glare.'
             self._draw_status(debug, 'BOARD NOT FOUND', self._last_detect_diag + '\n' + hint, False)
             if corners is not None and ids is not None:
                 cv2.aruco.drawDetectedMarkers(debug, corners, ids)
@@ -368,7 +368,7 @@ class BoardDetector:
 
         Uses bilinear interpolation from the 4 measured corner TCP positions when available
         (calibration_corners_base present in YAML). This is more accurate than the rigid-body
-        transform because it passes through all 4 measured corners exactly — no residual error.
+        transform because it passes through all 4 measured corners exactly - no residual error.
 
         Falls back to board_to_base_tf rigid transform when corners not stored (old calibrations).
         """

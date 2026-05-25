@@ -35,18 +35,18 @@ manipulation_node:
     piece_diameter_mm:     20.0
     grid_spacing_mm:     61.25
     grasp_compression_mm:  2.0
-    # Gripper widths (mm) — sized for piece_diameter_mm
+    # Gripper widths (mm) - sized for piece_diameter_mm
     open_width:    50.0   # ~2.5× diameter (clearance)
     grasp_width:   18.0   # diameter − compression
     release_width: 34.0   # ~1.7× diameter
     grasp_force:   15.0   # Gripping force in Newtons
-    # Calibration file — used to derive scan pose from board centre when use_manual_scan_pose is false.
+    # Calibration file - used to derive scan pose from board centre when use_manual_scan_pose is false.
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     # Use the taught scan pose below (base_link, metres / radians) instead of board centre.
     use_manual_scan_pose: true
     # Rest / scan pose (2026-05-23 calibration_tool Step 1, CurrentWaypointPose). Same TCP.
     #   x=108.10 mm, y=183.45 mm, z=665.71 mm, yaw=-1.2335 rad
-    # Joint-space homing is preferred — loaded automatically from scan_joint_positions
+    # Joint-space homing is preferred - loaded automatically from scan_joint_positions
     # in board_calibration.yaml. These Cartesian values are the fallback only.
     initial_pose_x:    0.10810
     initial_pose_y:    0.18345

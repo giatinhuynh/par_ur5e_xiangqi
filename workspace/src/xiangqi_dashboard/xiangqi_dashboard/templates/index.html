@@ -32,7 +32,7 @@
       <span id="mode-lock-hint" class="mode-lock-hint hidden">Locked while playing</span>
     </div>
     <div id="hardware-play-banner" class="hardware-play-banner hidden">
-      Human vs AI — play on the physical board
+      Human vs AI - play on the physical board
     </div>
 
     <div id="flow-banner" class="flow-banner" role="status" aria-live="polite">
@@ -43,6 +43,10 @@
       <button type="button" class="ctrl-btn new-game-btn" id="btn-new-game" onclick="newGame()">Start</button>
       <button type="button" class="ctrl-btn stop-game-btn" id="btn-stop-game" onclick="stopGame()">Stop</button>
       <button type="button" class="ctrl-btn reset-game-btn" id="btn-reset-game" onclick="resetGame()">Restart</button>
+      <button type="button" class="ctrl-btn confirm-move-btn hidden" id="btn-confirm-move"
+              onclick="confirmHumanMove()" title="Tell the robot you finished your move on the board">
+        Confirm move
+      </button>
       <button type="button" class="ctrl-btn estop-btn" id="btn-estop" onclick="toggleEstop()">E-Stop</button>
     </div>
   </div>
@@ -54,7 +58,7 @@
         <span id="game-result-detail" class="game-result-detail"></span>
       </div>
       <div id="estop-banner" class="estop-banner hidden" role="alert">
-        E-STOP active — Release E-Stop, then New Game to continue
+        E-STOP active - Release E-Stop, then New Game to continue
       </div>
       <div id="board-wrapper">
         <div id="board-loading" class="board-loading hidden" aria-live="polite">
@@ -87,7 +91,6 @@
         <div class="panel-header">
           <span class="panel-glyph">将</span>
           Engine Setup
-          <span id="engine-setup-lock" class="engine-setup-lock hidden">Locked</span>
         </div>
         <div id="human-color-row" class="human-color-row hidden">
           <span class="human-color-label">You play as</span>
@@ -205,6 +208,13 @@
           <div class="info-item">
             <label>E-Stop</label>
             <span id="sys-estop" class="status-ok">OK</span>
+          </div>
+          <div class="info-item info-item-wide">
+            <label>Camera sync</label>
+            <button type="button" class="ctrl-btn reset-game-btn sync-board-btn" id="btn-sync-board"
+                    onclick="syncBoardFromCamera()" title="Update game position from camera; does not clear move history">
+              Sync board
+            </button>
           </div>
         </div>
       </div>

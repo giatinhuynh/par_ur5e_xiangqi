@@ -25,10 +25,10 @@ The **playing grid** (lines and river) sits **inside** the quadrilateral formed 
 
 ### 2. Finding the board in the camera image (each frame)
 
-1. **ArUco detection** — OpenCV’s `ArucoDetector` scans the RGB frame for markers with IDs 0–3.
-2. **Need all four** — If fewer than four are found (occlusion, glare, motion blur, mat too small in frame), `BoardDetector.detect()` **fails** for that frame: no homography, no YOLO input, `BoardState` is not updated from that tick.
-3. **Homography** — For each visible marker, the detector uses the marker’s centre in **image pixels** as a corner sample. Those four source points are matched to four **fixed destination corners** in a synthetic “top-down” bitmap of size **800×890** with a **44 px margin** (`board_detector.py`). `cv2.findHomography(..., RANSAC)` estimates the 3×3 matrix **H** that maps the slanted view → flat board plane.
-4. **Warp** — `cv2.warpPerspective` applies **H** to the full image, producing a **normalized board image**: as if the camera looked straight down at the board. YOLO always runs on this warp, so piece appearance is consistent and cells line up with the internal grid math.
+1. **ArUco detection** - OpenCV’s `ArucoDetector` scans the RGB frame for markers with IDs 0–3.
+2. **Need all four** - If fewer than four are found (occlusion, glare, motion blur, mat too small in frame), `BoardDetector.detect()` **fails** for that frame: no homography, no YOLO input, `BoardState` is not updated from that tick.
+3. **Homography** - For each visible marker, the detector uses the marker’s centre in **image pixels** as a corner sample. Those four source points are matched to four **fixed destination corners** in a synthetic “top-down” bitmap of size **800×890** with a **44 px margin** (`board_detector.py`). `cv2.findHomography(..., RANSAC)` estimates the 3×3 matrix **H** that maps the slanted view → flat board plane.
+4. **Warp** - `cv2.warpPerspective` applies **H** to the full image, producing a **normalized board image**: as if the camera looked straight down at the board. YOLO always runs on this warp, so piece appearance is consistent and cells line up with the internal grid math.
 
 So: **the board is “known” because the four ArUco corners anchor a geometric transform**; the grid is not searched blindly in the raw image.
 
@@ -66,15 +66,15 @@ With a wrist camera, the manager requests `/xiangqi/move_to_scan_pose` before pu
 
 - It does **not** parse the SVG or “see” river/palace lines as semantic features for motion.
 - Motion planning assumes a **uniform rectangular lattice**: every intersection is a point separated by **`grid_spacing_mm`** along two axes in a **board frame**, then rotated/translated into **`base_link`** via **`board_to_base_tf`** (`calibration_tool.py`, Kabsch-style fit from four corners).
-- **Palace diagonals** and the **river** matter for **pyffish** (legal moves) but are **not** extra geometry in `MoveTranslator`—only **which square index** is being targeted.
+- **Palace diagonals** and the **river** matter for **pyffish** (legal moves) but are **not** extra geometry in `MoveTranslator`-only **which square index** is being targeted.
 
 So the “board structure” the robot knows is **the discrete grid**, aligned with the **same indices** as chess software, not a CAD clone of the printed artwork.
 
 ### Chain that must stay consistent
 
-1. **Rules / AI** — `pyffish` + FEN use standard Xiangqi layout; `game_manager_node._fen_to_grid` builds the same `int8[90]` layout as vision’s `BoardState.grid` for move inference.
-2. **Vision** — ArUco warp maps the **physical sheet** to an image where **small y ≈ rank 0 (Red)** and **large y ≈ rank 9 (Black)**, matching the marker→destination corner pairing in `BoardDetector` (see §1). YOLO cells map to **file 0…8, rank 0…9** with that orientation.
-3. **Manipulation** — `MoveTranslator` turns coordinate moves into **(file, rank)** indices, then **`grid_to_world`** using **`board_to_base_tf`** and **`grid_spacing_mm`**. The four teach-in corners must be the **actual** intersections **`(0,0), (8,0), (8,9), (0,9)`** in the same coordinate sense as the code (`calibration_tool.CALIBRATION_CORNERS`), in **order**.
+1. **Rules / AI** - `pyffish` + FEN use standard Xiangqi layout; `game_manager_node._fen_to_grid` builds the same `int8[90]` layout as vision’s `BoardState.grid` for move inference.
+2. **Vision** - ArUco warp maps the **physical sheet** to an image where **small y ≈ rank 0 (Red)** and **large y ≈ rank 9 (Black)**, matching the marker→destination corner pairing in `BoardDetector` (see §1). YOLO cells map to **file 0…8, rank 0…9** with that orientation.
+3. **Manipulation** - `MoveTranslator` turns coordinate moves into **(file, rank)** indices, then **`grid_to_world`** using **`board_to_base_tf`** and **`grid_spacing_mm`**. The four teach-in corners must be the **actual** intersections **`(0,0), (8,0), (8,9), (0,9)`** in the same coordinate sense as the code (`calibration_tool.CALIBRATION_CORNERS`), in **order**.
 
 ### What you must get right in the lab
 
@@ -88,7 +88,7 @@ If any of these drift, you can still have **legal moves in software** while the 
 
 ---
 
-## `vision_node` — main loop
+## `vision_node` - main loop
 
 1. **Subscribe** to camera RGB (`camera_topic`, default `/camera/color/image_raw`) with a sensor-style QoS.
 2. **Timer** fires at `poll_rate_hz` (default ~3 Hz). On each tick, copy the latest frame and run `_process_image`.
@@ -96,8 +96,8 @@ If any of these drift, you can still have **legal moves in software** while the 
    - **`BoardDetector.detect`**: ArUco → **H** → on success, **`warp_board`**.
    - **`PieceDetector`** (Ultralytics YOLO): run on the **warped** image; map each box to `(file, rank)`; build **`int8[90]`**.
    - Publish **`BoardState`** on `/xiangqi/board_state` and debug BGR on `/xiangqi/debug_image`.
-4. **Turn detection** — `TurnDetector.update` after each new grid (see above).
-5. **`GetBoardState`** (`get_board_state`) — returns latest cached state or forces a fresh `_process_image` when `force_rescan` is true.
+4. **Turn detection** - `TurnDetector.update` after each new grid (see above).
+5. **`GetBoardState`** (`get_board_state`) - returns latest cached state or forces a fresh `_process_image` when `force_rescan` is true.
 
 In the full stack, move verification is also scan-pose gated: the planner runs `GoToScanPose` (best-effort) before calling board verification, so `GetBoardState(force_rescan=true)` is requested after arm reposition whenever possible.
 
@@ -107,9 +107,9 @@ If calibration or model files are missing, the node logs warnings; without ArUco
 
 ## `BoardDetector` / `BoardCalibration` (summary)
 
-- **`detect(image)`** — ArUco IDs 0–3 → homography **H** + debug overlay.
-- **`warp_board(image, H)`** — Top-down 800×890 view for detection.
-- **`BoardCalibration`** — Load/save YAML: optional stored **H**, **`board_to_base_tf`**, spacing, origin (see `board_detector.py`).
+- **`detect(image)`** - ArUco IDs 0–3 → homography **H** + debug overlay.
+- **`warp_board(image, H)`** - Top-down 800×890 view for detection.
+- **`BoardCalibration`** - Load/save YAML: optional stored **H**, **`board_to_base_tf`**, spacing, origin (see `board_detector.py`).
 
 ---
 

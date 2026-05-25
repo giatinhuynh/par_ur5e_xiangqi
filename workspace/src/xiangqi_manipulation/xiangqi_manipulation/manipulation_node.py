@@ -3,8 +3,8 @@ manipulation_node: Pick-and-place action server for Xiangqi pieces.
 
 Arm motion (hardware):
     Homing:           joint-space via /move_action (deterministic, joints from calibration).
-    Transit/approach: OMPL via /move_action — large moves where any path is acceptable.
-    Descend/lift:     Cartesian via /par_moveit/waypoint_move — straight-line vertical
+    Transit/approach: OMPL via /move_action - large moves where any path is acceptable.
+    Descend/lift:     Cartesian via /par_moveit/waypoint_move - straight-line vertical
                       motion over pieces to avoid lateral sweep knocking neighbours.
 
 The RG2 gripper is controlled via (from onrobot_rg2_driver):
@@ -47,7 +47,7 @@ from std_srvs.srv import Trigger
 from xiangqi_msgs.action import PickAndPlace
 from xiangqi_manipulation.move_translator import BoardCalibration
 from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
-from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient
+from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient, _wait_on_future
 
 try:
     from onrobot_rg2_msgs.action import GripperSetWidth
@@ -66,8 +66,8 @@ except ImportError:
 OPEN_WIDTH    = 50.0   # Clearance width before descending onto piece
 GRASP_WIDTH   = 18.0   # Grip width for ~20 mm diameter Xiangqi piece
 RELEASE_WIDTH = 34.0   # Width after releasing piece at destination
-GRASP_FORCE   = 15.0   # Newtons — firm grip without crushing
-OPEN_FORCE    = 10.0   # Newtons — gentle open
+GRASP_FORCE   = 15.0   # Newtons - firm grip without crushing
+OPEN_FORCE    = 10.0   # Newtons - gentle open
 
 
 class ManipulationNode(Node):
@@ -154,7 +154,7 @@ class ManipulationNode(Node):
                 )
             else:
                 self.get_logger().warn(
-                    'par_interfaces not found — Cartesian descend/lift will fall back to OMPL'
+                    'par_interfaces not found - Cartesian descend/lift will fall back to OMPL'
                 )
             if RG2_OK:
                 self._rg2_client = ActionClient(
@@ -163,7 +163,7 @@ class ManipulationNode(Node):
                 )
             else:
                 self.get_logger().warn(
-                    'onrobot_rg2_msgs not found — gripper motion will be simulated'
+                    'onrobot_rg2_msgs not found - gripper motion will be simulated'
                 )
 
         # --- Action server for the rest of the xiangqi stack ---
@@ -314,7 +314,7 @@ class ManipulationNode(Node):
 
         if not self._ompl_client.available:
             self.get_logger().error(
-                'move_group /move_action not available — run moveit_config_driver first'
+                'move_group /move_action not available - run moveit_config_driver first'
             )
 
     # ------------------------------------------------------------------
@@ -352,7 +352,7 @@ class ManipulationNode(Node):
                 goal_handle.abort()
                 return False
 
-        # Resolve joint configs — board cells first, graveyard fallback for off-board positions
+        # Resolve joint configs - board cells first, graveyard fallback for off-board positions
         pick_approach_j,  pick_grasp_j  = self._get_cell_joints(pick_x,  pick_y,  pick_z)
         if pick_approach_j is None:
             pick_approach_j, pick_grasp_j = self._get_graveyard_joints(pick_y)
@@ -374,7 +374,7 @@ class ManipulationNode(Node):
 
         if use_joint_space:
             # ----------------------------------------------------------
-            # All-joint-space path — no OMPL, no Cartesian IK
+            # All-joint-space path - no OMPL, no Cartesian IK
             # Sequence: scan → pick_approach → pick_grasp → grasp →
             #           pick_approach → place_approach → place_grasp →
             #           release → place_approach → scan
@@ -414,10 +414,10 @@ class ManipulationNode(Node):
 
         else:
             # ----------------------------------------------------------
-            # OMPL fallback — used for graveyard moves or missing calibration
+            # OMPL fallback - used for graveyard moves or missing calibration
             # ----------------------------------------------------------
             self.get_logger().info(
-                'Joint configs not available for this move — using OMPL+Cartesian fallback'
+                'Joint configs not available for this move - using OMPL+Cartesian fallback'
             )
             approach_h = req.approach_height
             transit_h  = req.transit_height
@@ -511,17 +511,17 @@ class ManipulationNode(Node):
         has_grasp    = cal.calibration_corners_joints is not None
         if has_approach and has_grasp:
             self.get_logger().info(
-                'Full joint-space calibration loaded — all board moves will use '
+                'Full joint-space calibration loaded - all board moves will use '
                 'bilinear joint interpolation (no OMPL)'
             )
         elif has_approach or has_grasp:
             self.get_logger().warn(
-                f'Partial joint calibration: approach={has_approach} grasp={has_grasp} — '
+                f'Partial joint calibration: approach={has_approach} grasp={has_grasp} - '
                 'board moves will fall back to OMPL (re-run calibration_tool)'
             )
         else:
             self.get_logger().info(
-                'No board joint configs in calibration — board moves will use OMPL '
+                'No board joint configs in calibration - board moves will use OMPL '
                 '(run calibration_tool to enable joint-space interpolation)'
             )
 
@@ -548,7 +548,7 @@ class ManipulationNode(Node):
         )
         if not os.path.exists(cal_file):
             self.get_logger().info(
-                f'No calibration file at {cal_file} — using manual scan_pose_x/y params'
+                f'No calibration file at {cal_file} - using manual scan_pose_x/y params'
             )
             return fallback_x, fallback_y, z
 
@@ -556,7 +556,7 @@ class ManipulationNode(Node):
             cal = BoardCalibration.load(cal_file)
             if cal.board_to_base_tf is None:
                 self.get_logger().warn(
-                    'Calibration loaded but board_to_base_tf missing — using manual scan_pose params'
+                    'Calibration loaded but board_to_base_tf missing - using manual scan_pose params'
                 )
                 return fallback_x, fallback_y, z
 
@@ -576,7 +576,7 @@ class ManipulationNode(Node):
 
         except Exception as e:
             self.get_logger().warn(
-                f'Failed to derive scan pose from calibration ({e}) — using manual params'
+                f'Failed to derive scan pose from calibration ({e}) - using manual params'
             )
             return fallback_x, fallback_y, z
 
@@ -605,7 +605,7 @@ class ManipulationNode(Node):
             if not self._ompl_client.wait_for_server(timeout_sec=wait_s):
                 self.get_logger().warn(
                     f'Startup: {self.get_parameter("move_group_action").value} '
-                    'not ready — start moveit_config_driver, then call '
+                    'not ready - start moveit_config_driver, then call '
                     '/xiangqi/move_to_initial_pose'
                 )
                 return
@@ -637,7 +637,7 @@ class ManipulationNode(Node):
             self.get_logger().info('Startup: reached initial pose')
         else:
             self.get_logger().warn(
-                'Startup: initial pose move failed — check arm_drivers, '
+                'Startup: initial pose move failed - check arm_drivers, '
                 'moveit_config_driver, pendant Play (External Control), and '
                 'board_calibration.yaml initial_pose'
             )
@@ -687,7 +687,7 @@ class ManipulationNode(Node):
     # ------------------------------------------------------------------
 
     def _move_joints(self, joint_names: list, joint_positions: list) -> bool:
-        """Move to a specific joint configuration (deterministic — no IK ambiguity).
+        """Move to a specific joint configuration (deterministic - no IK ambiguity).
 
         Calls move_to_joints directly (uses spin_until_future_complete, same as _gripper).
         Safe to call from an executor thread OR from a daemon thread.
@@ -726,7 +726,7 @@ class ManipulationNode(Node):
             return True
 
         if self._waypoint_client is None:
-            self.get_logger().warn('WaypointMove not available — falling back to OMPL')
+            self.get_logger().warn('WaypointMove not available - falling back to OMPL')
             return self._move(x, y, z, yaw)
 
         with self._move_lock:
@@ -817,23 +817,21 @@ class ManipulationNode(Node):
         goal.target_force = target_force
 
         send_future = self._rg2_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, send_future, timeout_sec=5.0)
+        goal_handle = _wait_on_future(send_future, timeout_sec=5.0)
 
-        goal_handle = send_future.result()
         if goal_handle is None or not goal_handle.accepted:
             self.get_logger().error('GripperSetWidth goal rejected')
             return False
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=10.0)
+        wrapped = _wait_on_future(result_future, timeout_sec=10.0)
 
-        result = result_future.result()
-        if result is None:
+        if wrapped is None:
             self.get_logger().error('GripperSetWidth timed out')
             return False
 
         self.get_logger().info(
-            f'RG2 at {result.result.final_width:.1f} mm'
+            f'RG2 at {wrapped.result.final_width:.1f} mm'
         )
         return True
 

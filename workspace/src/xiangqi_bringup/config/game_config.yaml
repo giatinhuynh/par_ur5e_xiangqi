@@ -4,8 +4,12 @@ game_manager_node:
     engine_type: "fairystockfish"    # "fairystockfish" | "minimax"
     # robot_plays_red: see robot_side.yaml (single source with task_planner_node)
     ai_time_limit: 5.0               # Seconds per AI move
-    sim_ai_time_limit: 3.0           # Sim cap (was 1s — too weak for Stockfish)
+    sim_ai_time_limit: 3.0           # Sim cap (was 1s - too weak for Stockfish)
     ai_depth: 0                      # 0 = use time limit instead
+    # YOLO often misses pieces; allow fuzzy grid match when inferring human moves
+    human_move_grid_tolerance: 12
+    # After robot motion, commit AI move even if vision verify fails (hardware)
+    trust_robot_move_after_verify_fail: true
 
 ai_engine_node:
   ros__parameters:

@@ -14,7 +14,7 @@ Architecture (threading):
   _run_detection_loop (daemon thread)  ←  consumes queue, runs ArUco+YOLO, writes _pending_*
   _detection_tick (timer, executor thread)  →  reads _pending_*, publishes to ROS topics
 
-  The camera callback and timer callback are both trivially fast — no blocking anywhere on the
+  The camera callback and timer callback are both trivially fast - no blocking anywhere on the
   executor thread. Heavy computation is entirely in the dedicated detection thread.
 """
 
@@ -33,6 +33,7 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 
 from xiangqi_msgs.msg import BoardState, PieceDetection
+from xiangqi_vision.fen_util import grid_to_fen
 from xiangqi_msgs.srv import GetBoardState
 
 from .board_detector import BoardDetector, BoardCalibration
@@ -51,14 +52,14 @@ class GridStabilizer:
     genuine piece placements/removals are committed after a short delay
     (~smooth_frames / poll_rate_hz seconds).
 
-    With smooth_frames=3 at 3 Hz the delay is ~1 s — short enough to feel
+    With smooth_frames=3 at 3 Hz the delay is ~1 s - short enough to feel
     immediate to the human, long enough to absorb YOLO glitches.
     Setting smooth_frames=1 disables smoothing entirely.
     """
 
     def __init__(self, smooth_frames: int = 3, n_cells: int = 90):
         self._n = max(1, smooth_frames)
-        # Last committed (output) grid — starts all-empty
+        # Last committed (output) grid - starts all-empty
         self._committed = np.zeros(n_cells, dtype=np.int8)
         # Candidate value per cell (what we are counting towards)
         self._candidate = np.zeros(n_cells, dtype=np.int8)
@@ -145,7 +146,7 @@ class VisionNode(Node):
             )
         else:
             self.get_logger().warn(
-                'YOLO weights not found — piece detection disabled (require_yolo_weights:=false)'
+                'YOLO weights not found - piece detection disabled (require_yolo_weights:=false)'
             )
 
         self._turn_detector = TurnDetector(stability_frames=stability)
@@ -154,6 +155,7 @@ class VisionNode(Node):
 
         # --- State ---
         self._latest_board_state: BoardState | None = None
+        self._last_camera_image: np.ndarray | None = None
         self._lock = threading.Lock()
 
         # Frame queue: camera callback always puts the latest frame here (maxsize=1 = always fresh).
@@ -169,7 +171,7 @@ class VisionNode(Node):
         self._detection_runs: int = 0
 
         # --- QoS ---
-        # Camera publishes RELIABLE — subscription must match or Fast DDS stops delivering
+        # Camera publishes RELIABLE - subscription must match or Fast DDS stops delivering
         # after a few frames despite showing the subscription as connected.
         camera_qos = QoSProfile(
             reliability=ReliabilityPolicy.RELIABLE,
@@ -219,20 +221,21 @@ class VisionNode(Node):
         )
         self._detection_thread.start()
 
-        # --- Publish timer (executor thread only — no heavy work here) ---
+        # --- Publish timer (executor thread only - no heavy work here) ---
         period = 1.0 / self._poll_rate
         self._timer = self.create_timer(period, self._publish_tick)
 
         self.get_logger().info('vision_node started')
 
     # ------------------------------------------------------------------
-    # Camera callback — must be trivially fast, no blocking
+    # Camera callback - must be trivially fast, no blocking
     # ------------------------------------------------------------------
 
     def _image_callback(self, msg: Image) -> None:
         try:
             # .copy() guarantees we own the buffer (cv_bridge may return a view into DDS memory)
             img = self._bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8').copy()
+            self._last_camera_image = img
             self._camera_frames_received += 1
             self.get_logger().info(
                 f'Camera frame #{self._camera_frames_received} received '
@@ -252,12 +255,16 @@ class VisionNode(Node):
             self.get_logger().error(f'Image conversion error: {e}')
 
     # ------------------------------------------------------------------
-    # Other callbacks — all fast, no YOLO/ArUco here
+    # Other callbacks - all fast, no YOLO/ArUco here
     # ------------------------------------------------------------------
 
     def _human_ready_callback(self, _: Empty) -> None:
-        self.get_logger().info('Keyboard fallback triggered -- forcing move detection')
+        self.get_logger().info('human_ready - forcing move detection notify')
         self._turn_detector.trigger_keyboard_fallback()
+        if self._turn_detector.state != TurnDetectorState.IDLE:
+            msg = Bool()
+            msg.data = True
+            self._move_detected_pub.publish(msg)
 
     def _start_watching_callback(self, msg: Bool) -> None:
         if msg.data:
@@ -267,13 +274,24 @@ class VisionNode(Node):
                 self._turn_detector.start_watching(np.array(state.grid, dtype=np.int8))
                 self.get_logger().info('Turn detection: now watching for human move')
             else:
-                self.get_logger().warn('start_watching: no board state yet — using empty baseline')
+                self.get_logger().warn('start_watching: no board state yet - using empty baseline')
                 self._turn_detector.start_watching(np.zeros(90, dtype=np.int8))
         else:
             self._turn_detector.stop_watching()
 
     def _get_board_state_callback(self, request, response):
-        # Non-blocking — always returns the cached result from the detection thread
+        if request.force_rescan and self._last_camera_image is not None:
+            board_state, _, _ = self._process_frame(
+                self._last_camera_image.copy(), run_turn_detector=False
+            )
+            if board_state is not None:
+                with self._lock:
+                    self._latest_board_state = board_state
+                response.board_state = board_state
+                response.success = True
+                response.message = 'OK (force rescan)'
+                return response
+
         with self._lock:
             state = self._latest_board_state
         if state is not None:
@@ -286,7 +304,7 @@ class VisionNode(Node):
         return response
 
     # ------------------------------------------------------------------
-    # Publish tick — runs on executor thread, trivially fast
+    # Publish tick - runs on executor thread, trivially fast
     # ------------------------------------------------------------------
 
     def _publish_tick(self) -> None:
@@ -315,7 +333,7 @@ class VisionNode(Node):
             self._move_detected_pub.publish(msg)
 
     # ------------------------------------------------------------------
-    # Dedicated detection loop — permanent daemon thread, never on executor
+    # Dedicated detection loop - permanent daemon thread, never on executor
     # ------------------------------------------------------------------
 
     def _run_detection_loop(self) -> None:
@@ -351,11 +369,11 @@ class VisionNode(Node):
         self.get_logger().info('Detection loop thread exiting')
 
     # ------------------------------------------------------------------
-    # Core frame processing — pure computation, called only from detection thread
+    # Core frame processing - pure computation, called only from detection thread
     # ------------------------------------------------------------------
 
     def _process_frame(
-        self, image: np.ndarray
+        self, image: np.ndarray, run_turn_detector: bool = True
     ) -> tuple[BoardState | None, np.ndarray | None, bool]:
         ok, H, debug = self._board_detector.detect(image)
 
@@ -375,7 +393,7 @@ class VisionNode(Node):
         if self._piece_detector is not None:
             detections, annotated = self._piece_detector.detect(warped)
             raw_grid = self._piece_detector.detections_to_grid(detections)
-            # Apply per-cell temporal smoothing — a cell value only commits
+            # Apply per-cell temporal smoothing - a cell value only commits
             # after `grid_smooth_frames` consecutive agreeing detections.
             grid = self._grid_stabilizer.update(raw_grid)
             mean_conf = self._piece_detector.mean_confidence(detections)
@@ -389,15 +407,18 @@ class VisionNode(Node):
         msg.header.frame_id = 'camera_color_optical_frame'
         msg.grid = grid.tolist()
         msg.detection_confidence = mean_conf
+        msg.fen = grid_to_fen(msg.grid)
 
-        grid_arr = np.array(msg.grid, dtype=np.int8)
-        _, confirmed = self._turn_detector.update(grid_arr)
-        move_detected = bool(confirmed)
+        move_detected = False
+        if run_turn_detector:
+            grid_arr = np.array(msg.grid, dtype=np.int8)
+            _, confirmed = self._turn_detector.update(grid_arr)
+            move_detected = bool(confirmed)
 
         return msg, debug_out, move_detected
 
     # ------------------------------------------------------------------
-    # Debug image publishing — called from executor thread (_publish_tick)
+    # Debug image publishing - called from executor thread (_publish_tick)
     # ------------------------------------------------------------------
 
     def _publish_debug(self, image: np.ndarray) -> None:
@@ -429,7 +450,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = VisionNode()
     try:
-        rclpy.spin(node)   # SingleThreadedExecutor — all callbacks are fast, no blocking
+        rclpy.spin(node)   # SingleThreadedExecutor - all callbacks are fast, no blocking
     except KeyboardInterrupt:
         pass
     finally:

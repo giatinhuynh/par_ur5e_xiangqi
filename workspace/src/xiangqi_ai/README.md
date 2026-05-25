@@ -20,7 +20,7 @@ Central **finite-state machine** over `GameState` (`IDLE`, `WAITING_HUMAN`, `DET
 ## `ai_engine_node`
 
 - Exposes **`get_best_move`** and **`set_engine`** services.
-- Holds two backends: `FairyStockfishEngine` (subprocess UCI, Xiangqi variant, skill level) and `MinimaxEngine` (custom search—see below).
+- Holds two backends: `FairyStockfishEngine` (subprocess UCI, Xiangqi variant, skill level) and `MinimaxEngine` (custom search-see below).
 - `GetBestMove` request chooses depth- vs time-bounded search; publishes `EngineInfo` for the UI.
 
 ## `minimax_engine.py` + `evaluation.py`

@@ -50,6 +50,23 @@ def parse_move(move: str) -> tuple[tuple[str, int], tuple[str, int]] | None:
     return from_sq, to_sq
 
 
+def square_to_index(file_ch: str, rank_1based: int) -> int:
+    """Board grid index (rank 0 = UCI rank 1)."""
+    return (rank_1based - 1) * 9 + (ord(file_ch) - 97)
+
+
+def move_critical_indices(move: str) -> set[int]:
+    """Grid indices for from/to squares of a coordinate move."""
+    parsed = parse_move(move)
+    if not parsed:
+        return set()
+    (from_sq, to_sq) = parsed
+    return {
+        square_to_index(from_sq[0], from_sq[1]),
+        square_to_index(to_sq[0], to_sq[1]),
+    }
+
+
 def resolve_to_legal_move(
     fen: str,
     proposed: str,
@@ -59,7 +76,7 @@ def resolve_to_legal_move(
     Map an engine move onto a pyffish-legal move.
 
     Returns:
-        (resolved_move, was_exact) — was_exact True if proposed was already legal.
+        (resolved_move, was_exact) - was_exact True if proposed was already legal.
     """
     if not PYFFISH_OK:
         return proposed, True

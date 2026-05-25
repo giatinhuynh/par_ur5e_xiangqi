@@ -1,7 +1,7 @@
 """
 OMPL / joint-space arm motions for the UR5e (6-DOF) via move_group.
 
-Uses /move_action (moveit_msgs/action/MoveGroup) — the same pipeline as RViz Plan & Execute.
+Uses /move_action (moveit_msgs/action/MoveGroup) - the same pipeline as RViz Plan & Execute.
 MoveIt chooses joint trajectories; we only specify the end-effector goal pose.
 
 Requires moveit_config_driver (move_group) to be running.
@@ -72,7 +72,7 @@ def moveit_error_name(code: int) -> str:
 def _wait_on_future(future: Any, timeout_sec: float) -> Any:
     """Poll future.done() until resolved or timeout.
 
-    Does NOT use add_done_callback / executor tasks — works reliably from any thread
+    Does NOT use add_done_callback / executor tasks - works reliably from any thread
     (executor thread or daemon thread) as long as the executor is spinning on other threads.
     """
     deadline = time.monotonic() + timeout_sec
@@ -143,7 +143,7 @@ def build_motion_plan_request(
     req = MotionPlanRequest()
     req.group_name = group_name
     req.planner_id = planner_id
-    # pipeline_id must be non-empty — rclpy empty string has a CDR null-terminator bug
+    # pipeline_id must be non-empty - rclpy empty string has a CDR null-terminator bug
     # that can corrupt the DDS stream.  When no planning_pipelines param is set, move_group
     # falls back to "move_group" as the pipeline name (see move_group.cpp main()).
     req.pipeline_id = pipeline_id if pipeline_id else 'move_group'
@@ -344,7 +344,7 @@ class MoveGroupOmplClient:
         goal.planning_options.replan = True
         goal.planning_options.replan_attempts = 3
         # Required: tell move_group the planning scene diff is relative to current state
-        # (matches MoveGroupInterface::move() in C++ — see constructGoal / move())
+        # (matches MoveGroupInterface::move() in C++ - see constructGoal / move())
         goal.planning_options.planning_scene_diff.is_diff = True
         goal.planning_options.planning_scene_diff.robot_state.is_diff = True
 
@@ -375,7 +375,7 @@ class MoveGroupOmplClient:
             hints = []
             if code == MoveItErrorCodes.FAILURE:
                 hints.append(
-                    'generic FAILURE — check pendant Play (External Control), '
+                    'generic FAILURE - check pendant Play (External Control), '
                     'arm_drivers, and scaled_joint_trajectory_controller'
                 )
             elif code == MoveItErrorCodes.PLANNING_FAILED:

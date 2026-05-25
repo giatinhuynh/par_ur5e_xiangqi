@@ -229,12 +229,32 @@ class MinimaxEngine:
         scored.sort(key=lambda x: -x[0])
         return [m for _, m in scored]
 
+    @staticmethod
+    def _parse_to_sq(move: str) -> tuple | None:
+        """Return (to_file_0idx, to_rank_0idx) from a UCI move string, or None on error."""
+        try:
+            # Determine where to-square starts: from-rank is '10' (2 chars) or 1 digit
+            from_rank_len = 3 if (len(move) > 2 and move[1] == '1' and move[2] == '0') else 2
+            i = from_rank_len
+            to_file = ord(move[i].lower()) - ord('a')
+            if i + 2 < len(move) and move[i + 1] == '1' and move[i + 2] == '0':
+                to_rank = 9  # UCI rank 10 → 0-indexed rank 9
+            else:
+                to_rank = int(move[i + 1]) - 1  # UCI rank 1-9 → 0-indexed 0-8
+            if not (0 <= to_file < 9 and 0 <= to_rank < 10):
+                return None
+            return to_file, to_rank
+        except Exception:
+            return None
+
     def _is_capture(self, move: str, fen: str, moves_so_far: List[str]) -> bool:
         """Check if a move captures an opponent piece."""
         try:
+            sq = self._parse_to_sq(move)
+            if sq is None:
+                return False
+            to_file, to_rank = sq
             grid = self._fen_to_grid(fen)
-            to_file = ord(move[2]) - ord('a')
-            to_rank = int(move[3])
             idx = to_rank * 9 + to_file
             target = grid[idx] if idx < len(grid) else 0
             return target != 0
@@ -244,9 +264,11 @@ class MinimaxEngine:
     def _capture_gain(self, move: str, fen: str) -> int:
         """Estimate material gain from a capture (for move ordering)."""
         try:
+            sq = self._parse_to_sq(move)
+            if sq is None:
+                return 0
+            to_file, to_rank = sq
             grid = self._fen_to_grid(fen)
-            to_file = ord(move[2]) - ord('a')
-            to_rank = int(move[3])
             idx = to_rank * 9 + to_file
             target = abs(grid[idx]) if idx < len(grid) else 0
             return MATERIAL.get(target, 0)

@@ -1,28 +1,27 @@
-# board_calibration.yaml — VXLab calibration (2026-05-24 calibration_tool teach-in)
+# board_calibration.yaml — VXLab calibration (2026-05-25 calibration_tool teach-in, full re-teach #2)
 # Used as install template: tools/lab_calibration_test.sh copy-config
 # Runtime path: /home/rosuser/workspace/config/board_calibration.yaml
-# Residuals at teach-in: [5.21, 8.72, 8.02, 6.12] mm per corner.
+# Residuals at teach-in: [11.40, 11.60, 10.06, 13.13] mm per corner.
 # grid_to_world uses bilinear interpolation from calibration_corners_base (not the rigid tf).
-# Joint-space pick-and-place uses bilinear interpolation of calibration_corners_joints /
-# cell_approach_joints — no OMPL or Cartesian IK for board moves.
-# NOTE: i9 approach recorded at z=0.0892 (34 mm below 120 mm target) — re-teach if arm clips.
+# Joint-space pick-and-place uses 4-patch (2x2) bilinear interpolation of
+# calibration_corners_joints / cell_approach_joints + e-file midpoints + rank-5 midpoints.
 
 homography:
-  - [-0.034684049293094446, -2.257089422768313, 986.7793915765003]
-  - [-1.805104362265766, 0.33206136347950155, 1006.2990214906088]
-  - [-3.821257025004253e-05, 0.0006338260554098821, 1.0]
+  - [-0.009789008088917597, -2.58199883748801,  1112.1179678893484]
+  - [-2.013532929994996,     0.3051290162530907, 1045.1886518840604]
+  - [7.350213366917556e-05,  6.887611833739167e-04, 1.0]
 board_to_base_tf:
-  - [0.01493238, -0.99988768, 0.00128657, 0.24916190]
-  - [0.99978810,  0.01491264, -0.01419037, 0.36810922]
-  - [0.01416959,  0.00149819,  0.99989848, -0.00337807]
-  - [0.0, 0.0, 0.0, 1.0]
+  - [ 0.01068059, -0.99994286, -0.00045938,  0.24928155]
+  - [ 0.99990866,  0.01068403, -0.00827768,  0.36626374]
+  - [ 0.00828212, -0.00037092,  0.99996563,  0.00321341]
+  - [ 0.0,         0.0,         0.0,          1.0]
 # Raw TCP positions at calibration corners (base_link, metres).
 # Order: (file=0,rank=0)=a0, (file=8,rank=0)=i0, (file=8,rank=9)=i9, (file=0,rank=9)=a9.
 calibration_corners_base:
-  - [ 0.24425475,  0.36661852, -0.00428528]   # a0
-  - [ 0.24784011,  0.85879778,  0.00447976]   # i0
-  - [-0.28703958,  0.86838378,  0.00351929]   # i9
-  - [-0.29615012,  0.37487033, -0.00168809]   # a9
+  - [ 0.23846923,  0.36986785,  0.00333945]   # a0
+  - [ 0.24383750,  0.85168109,  0.00712800]   # i0
+  - [-0.28742489,  0.85821163,  0.00714036]   # i9
+  - [-0.28972568,  0.37698402,  0.00295336]   # a9
 grid_spacing_mm: 61.25
 piece_diameter_mm: 20.0
 grasp_height_mm: 10.0
@@ -32,15 +31,15 @@ board_origin_mm: [0.0, 0.0]
 image_width: 640
 image_height: 480
 scan_pose:
-  x: 0.10415
-  y: 0.18623
-  z: 0.67068
-  yaw: -1.23933
+  x: 0.04814
+  y: 0.26131
+  z: 0.67747
+  yaw: 1.54380
 initial_pose:
-  x: 0.10415
-  y: 0.18623
-  z: 0.67068
-  yaw: -1.23933
+  x: 0.04814
+  y: 0.26131
+  z: 0.67747
+  yaw: 1.54380
 # Joint positions recorded at Step 1 — used for deterministic joint-space homing.
 scan_joint_names:
   - shoulder_lift_joint
@@ -50,12 +49,12 @@ scan_joint_names:
   - wrist_3_joint
   - shoulder_pan_joint
 scan_joint_positions:
-  - -1.2271
-  - -0.6573
-  - -2.4409
-  - -4.5511
-  - -0.4307
-  -  4.5762
+  - -1.3555
+  - -0.4061
+  - -2.6749
+  -  1.3677
+  -  0.6815
+  - -0.8842
 # Board-level (grasp height) joint configs at the 4 calibration corners.
 # Order matches calibration_corners_base: a0, i0, i9, a9.
 calibration_corners_joint_names:
@@ -66,10 +65,10 @@ calibration_corners_joint_names:
   - wrist_3_joint
   - shoulder_pan_joint
 calibration_corners_joints:
-  - [-1.6394, -2.2119, -0.8971, -4.7635, -0.2277,  4.4744]   # a0
-  - [-2.3693, -1.5576, -0.0541, -4.6651, -0.1424,  4.5627]   # i0
-  - [-2.4080, -1.4907, -0.1546, -5.1433,  0.4825,  5.3398]   # i9
-  - [-1.7633, -2.0522, -0.9581, -4.6279,  0.9231,  5.6008]   # a9
+  - [-1.6126, -2.2191, -0.9148,  1.4802, -0.1926, -1.7602]   # a0
+  - [-2.4821, -0.9364, -1.1177,  1.4984, -0.0661, -1.6701]   # i0
+  - [-2.6890, -0.4935, -1.4657,  1.5814,  0.4502, -1.1039]   # i9
+  - [-1.7164, -2.1011, -0.9204,  1.5924,  0.9351, -0.6476]   # a9
 # Approach-height joint configs (~120 mm above board) at the 4 calibration corners.
 cell_approach_joint_names:
   - shoulder_lift_joint
@@ -79,10 +78,43 @@ cell_approach_joint_names:
   - wrist_3_joint
   - shoulder_pan_joint
 cell_approach_joints:
-  - [-1.4427, -2.1697, -1.0242, -4.7526, -0.2282,  4.4744]   # a0
-  - [-2.2551, -1.5584, -0.0988, -4.6413, -0.1426,  4.5492]   # i0
-  - [-2.3111, -1.4904, -0.1537, -5.1433,  0.4825,  5.3399]   # i9  (recorded at z=0.089, ~34 mm low)
-  - [-1.6014, -1.9821, -1.1310, -4.6502,  1.0207,  5.6227]   # a9
+  - [-1.1981, -2.1474, -1.1277,  1.4940, -0.1926, -1.7603]   # a0
+  - [-2.2683, -0.9355, -1.1306,  1.4984, -0.0662, -1.6691]   # i0
+  - [-2.4994, -0.4932, -1.5168,  1.5788,  0.4500, -1.1038]   # i9
+  - [-1.4767, -1.7595, -1.4344,  1.5711,  0.9344, -0.6471]   # a9
+# E-file midpoints (file=4, rank 0 and 9): taught 2026-05-25.
+# Two-patch bilinear splits board at file e, halving mid-board interpolation error.
+calibration_midpoints_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+calibration_midpoints_joints:
+  - [-1.9990, -1.7600, -0.8054,  1.5592, -0.1453, -1.7417]   # e0
+  - [-2.1034, -1.5571, -1.0201,  1.5477,  0.6712, -0.9163]   # e9
+cell_approach_midpoints_joints:
+  - [-1.7154, -1.7593, -0.8943,  1.5438, -0.1453, -1.7417]   # e0
+  - [-1.8632, -1.5172, -1.1503,  1.5146,  0.6711, -0.9099]   # e9
+# Rank-midpoints at rank=5 (a5, e5, i5): taught 2026-05-25.
+# Together with e-file midpoints, enables 4-patch (2x2) bilinear interpolation.
+rank_mid_idx: 5
+calibration_rank_mid_joint_names:
+  - shoulder_lift_joint
+  - elbow_joint
+  - wrist_1_joint
+  - wrist_2_joint
+  - wrist_3_joint
+  - shoulder_pan_joint
+calibration_rank_mid_joints:
+  - [-1.4686, -2.3580, -0.9317,  1.5203,  0.5983, -1.0155]   # a5
+  - [-2.0082, -1.6873, -1.0514,  1.5854,  0.3187, -1.2773]   # e5
+  - [-2.2967, -1.4278, -0.5717,  1.3863,  0.2982, -1.2796]   # i5
+cell_approach_rank_mid_joints:
+  - [-1.2095, -2.0558, -1.4002,  1.4776,  0.5980, -1.0155]   # a5
+  - [-1.6973, -1.6621, -1.1532,  1.5854,  0.3187, -1.2773]   # e5
+  - [-2.0687, -1.4277, -0.5896,  1.3809,  0.2968, -1.2790]   # i5
 # Graveyard joint configs — one fixed centre position per zone.
 graveyard_joint_names:
   - shoulder_lift_joint
@@ -91,9 +123,9 @@ graveyard_joint_names:
   - wrist_2_joint
   - wrist_3_joint
   - shoulder_pan_joint
-graveyard_red_y: 0.6107
-graveyard_red_grasp_joints:    [-1.9952, -1.9380, -0.4012, -4.6660, -0.2261,  4.4282]
-graveyard_red_approach_joints: [-1.8286, -1.9380, -0.4650, -4.6656, -0.2272,  4.4282]
-graveyard_black_y: 0.6253
-graveyard_black_grasp_joints:    [-2.0527, -1.9012, -0.4538, -5.1433,  0.8441,  5.6116]
-graveyard_black_approach_joints: [-1.9540, -1.9009, -0.4660, -5.1729,  0.8426,  5.6227]
+graveyard_red_y: 0.6180
+graveyard_red_grasp_joints:    [-2.0837, -1.5910, -0.9591,  1.5578, -0.2221, -1.8204]
+graveyard_red_approach_joints: [-1.8556, -1.5906, -0.9992,  1.5578, -0.2222, -1.8195]
+graveyard_black_y: 0.6113
+graveyard_black_grasp_joints:    [-2.1249, -1.5236, -1.0206,  1.4631,  0.7613, -0.8117]
+graveyard_black_approach_joints: [-1.8855, -1.5221, -1.0746,  1.4351,  0.7610, -0.8117]

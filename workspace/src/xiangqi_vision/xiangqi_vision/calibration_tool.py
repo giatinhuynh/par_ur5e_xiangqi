@@ -106,6 +106,12 @@ class CalibrationTool(Node):
             f'else TF {self._base_frame} -> {self._tcp_frame} '
             f'(lab arm_drivers does not publish /tool_pose by default)'
         )
+        # E-file midpoint teach-in storage: [e0, e9]
+        self._midpoint_grasp_joints = []
+        self._midpoint_approach_joints = []
+        # Rank-midpoint teach-in storage: [a_mid, e_mid, i_mid]
+        self._rank_mid_grasp_joints = []
+        self._rank_mid_approach_joints = []
         # Graveyard teach-in storage: one centre position per zone
         self._graveyard_tcp = {'red': [None], 'black': [None]}
         self._graveyard_grasp_joints = {'red': [None], 'black': [None]}
@@ -593,6 +599,12 @@ class CalibrationTool(Node):
         # Compute board_to_base_tf and save all joint configs
         self._compute_transform()
 
+        # Step 2.5: Teach e-file midpoints (e0, e9) for two-patch interpolation
+        self._run_midpoint_step()
+
+        # Step 2.6: Teach rank-midpoints (a5, e5, i5) for 4-patch interpolation
+        self._run_rank_midpoint_step()
+
         # Step 3: Teach graveyard drop-zone reference positions
         self._run_graveyard_step()
 
@@ -690,6 +702,279 @@ class CalibrationTool(Node):
             print('  Joint-space move timed out.')
             return False
         return result_holder['ok']
+
+    def _run_midpoint_step(self) -> None:
+        """Step 2.5: Teach e-file midpoints (file=4, ranks 0 and 9) for two-patch interpolation.
+
+        These split the board into left (a–e) and right (e–i) halves, reducing the peak
+        joint-space interpolation error from ~3 cm to ~0.75 cm at mid-board cells.
+        """
+        approach_h_m = getattr(self._calibration, 'approach_height_mm', 120.0) / 1000.0
+        have_scan_joints = bool(
+            self._calibration.scan_joint_positions
+            and self._calibration.scan_joint_names
+        )
+
+        print('\nStep 2.5: Teach e-file midpoints (e0 and e9) for two-patch interpolation.')
+        print('These halve the interpolation error at mid-board cells (~3 cm → ~0.75 cm).')
+        print('For each midpoint:')
+        print('  A) Jog TCP to PIECE GRASP HEIGHT at the cell centre.')
+        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        if have_scan_joints:
+            print('  Auto-return to scan pose between e0 and e9.')
+        print()
+
+        MIDPOINTS = [(4, 0, 'e0'), (4, 9, 'e9')]
+        midpoint_tcp = []
+
+        self._start_background_spin()
+        try:
+            for mp_idx, (file_idx, rank_idx, label) in enumerate(MIDPOINTS):
+                print(f'\n--- Midpoint {mp_idx+1}/2: {label} (file={file_idx}, rank={rank_idx}) ---')
+
+                # ---- Part A: grasp height ----
+                print('  Part A: Jog to PIECE GRASP HEIGHT at this cell.')
+                tcp = None
+                while True:
+                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    tcp = self._record_tcp_position()
+                    if tcp is None:
+                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        tcp = self._prompt_manual_tcp_xyz()
+                        if tcp is None:
+                            continue
+                    break
+
+                midpoint_tcp.append(tcp)
+                joints_now = self._latest_joint_positions
+                names_now  = self._latest_joint_names
+                if joints_now is not None and names_now is not None:
+                    self._midpoint_grasp_joints.append(list(joints_now))
+                    print(f'  Grasp joints at {label}:')
+                    for jn, jv in zip(names_now, joints_now):
+                        print(f'    {jn}: {jv:.4f} rad')
+                else:
+                    self._midpoint_grasp_joints.append(None)
+                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+
+                # ---- Part B: approach height ----
+                cz = float(tcp[2])
+                tz = cz + approach_h_m
+                print(f'\n  Part B: Jog straight UP to approach height.')
+                print(f'    Grasp z:  {cz:.4f} m')
+                print(f'    Target z: {tz:.4f} m  (+{approach_h_m*1000:.0f} mm)')
+                print('    Press ENTER when at target (live dZ below):\n')
+
+                last_shown = None
+                deadline = time.monotonic() + 180.0
+                while time.monotonic() < deadline:
+                    pose = self._tcp_transform_from_tf(max_wait_s=0.3)
+                    if pose is not None:
+                        dz  = pose['z'] - tz
+                        line = (f'    z={pose["z"]:.4f}  |  dZ from target: {dz*1000:+.1f} mm   \r')
+                        if line != last_shown:
+                            print(line, end='', flush=True)
+                            last_shown = line
+                    r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                    if r:
+                        sys.stdin.readline()
+                        print()
+                        break
+                else:
+                    print(f'\n  Timed out — approach joints not recorded for {label}.')
+                    self._midpoint_approach_joints.append(None)
+                    if mp_idx == 0 and have_scan_joints:
+                        self._move_to_joint_config(
+                            self._calibration.scan_joint_names,
+                            self._calibration.scan_joint_positions,
+                        )
+                    continue
+
+                time.sleep(1.0)
+                joints_now = self._latest_joint_positions
+                if joints_now is not None and names_now is not None:
+                    self._midpoint_approach_joints.append(list(joints_now))
+                    print(f'  Approach joints at {label}:')
+                    for jn, jv in zip(names_now, joints_now):
+                        print(f'    {jn}: {jv:.4f} rad')
+                else:
+                    self._midpoint_approach_joints.append(None)
+                    print('  WARN: /joint_states not available — approach joints not recorded.')
+
+                # Auto-return to scan between midpoints
+                if mp_idx == 0 and have_scan_joints:
+                    print('\n  Returning to scan pose before e9…')
+                    ok = self._move_to_joint_config(
+                        self._calibration.scan_joint_names,
+                        self._calibration.scan_joint_positions,
+                    )
+                    print('  At scan pose — jog to e9.' if ok
+                          else '  Auto-return failed — jog to scan pose manually.')
+
+        finally:
+            self._stop_background_spin()
+
+        # Save to calibration
+        jnames = self._latest_joint_names
+        valid_grasp = [j for j in self._midpoint_grasp_joints if j is not None]
+        valid_approach = [j for j in self._midpoint_approach_joints if j is not None]
+
+        if len(valid_grasp) == 2 and jnames is not None:
+            self._calibration.calibration_midpoints_joint_names = list(jnames)
+            self._calibration.calibration_midpoints_joints = [
+                list(j) for j in self._midpoint_grasp_joints
+            ]
+            print('\nMidpoint grasp joints saved (e0, e9) — two-patch interpolation enabled.')
+        else:
+            print(f'  Only {len(valid_grasp)}/2 midpoint grasp joints recorded '
+                  '— falling back to 4-corner mode.')
+
+        if len(valid_approach) == 2 and jnames is not None:
+            self._calibration.cell_approach_midpoints_joints = [
+                list(j) for j in self._midpoint_approach_joints
+            ]
+            print('Midpoint approach joints saved.')
+        else:
+            print(f'  Only {len(valid_approach)}/2 midpoint approach joints recorded.')
+
+    def _run_rank_midpoint_step(self) -> None:
+        """Step 2.6: Teach rank-midpoints (a5, e5, i5) for 4-patch (2×2) interpolation.
+
+        These split the board into top/bottom halves, correcting rank-direction drift caused
+        by the large shoulder_pan rotation across the a-file and i-file.
+        """
+        approach_h_m = getattr(self._calibration, 'approach_height_mm', 120.0) / 1000.0
+        rank_mid = getattr(self._calibration, 'rank_mid_idx', 5)
+        have_scan_joints = bool(
+            self._calibration.scan_joint_positions
+            and self._calibration.scan_joint_names
+        )
+
+        print(f'\nStep 2.6: Teach rank-midpoints (a{rank_mid}, e{rank_mid}, i{rank_mid}) for 4-patch interpolation.')
+        print('These correct rank-direction drift from the shoulder_pan arc (~1 grid per rank step).')
+        print('For each position:')
+        print('  A) Jog TCP to PIECE GRASP HEIGHT at the cell centre.')
+        print('  B) Jog straight UP to approach height — tool shows live dZ guide.')
+        if have_scan_joints:
+            print('  Auto-return to scan pose between positions.')
+        print()
+
+        RANK_MIDPOINTS = [
+            (0,       rank_mid, f'a{rank_mid}'),
+            (4,       rank_mid, f'e{rank_mid}'),
+            (8,       rank_mid, f'i{rank_mid}'),
+        ]
+
+        self._start_background_spin()
+        try:
+            for mp_idx, (file_idx, rank_idx, label) in enumerate(RANK_MIDPOINTS):
+                print(f'\n--- Rank-midpoint {mp_idx+1}/3: {label} (file={file_idx}, rank={rank_idx}) ---')
+
+                # ---- Part A: grasp height ----
+                print('  Part A: Jog to PIECE GRASP HEIGHT at this cell.')
+                tcp = None
+                while True:
+                    input('  >>> TCP at grasp position, Play ON — ENTER... ')
+                    tcp = self._record_tcp_position()
+                    if tcp is None:
+                        self.get_logger().warn('Could not read TCP — is Play ON?')
+                        tcp = self._prompt_manual_tcp_xyz()
+                        if tcp is None:
+                            continue
+                    break
+
+                joints_now = self._latest_joint_positions
+                names_now  = self._latest_joint_names
+                if joints_now is not None and names_now is not None:
+                    self._rank_mid_grasp_joints.append(list(joints_now))
+                    print(f'  Grasp joints at {label}:')
+                    for jn, jv in zip(names_now, joints_now):
+                        print(f'    {jn}: {jv:.4f} rad')
+                else:
+                    self._rank_mid_grasp_joints.append(None)
+                    print('  WARN: /joint_states not available — grasp joints not recorded.')
+
+                # ---- Part B: approach height ----
+                cz = float(tcp[2])
+                tz = cz + approach_h_m
+                print(f'\n  Part B: Jog straight UP to approach height.')
+                print(f'    Grasp z:  {cz:.4f} m')
+                print(f'    Target z: {tz:.4f} m  (+{approach_h_m*1000:.0f} mm)')
+                print('    Press ENTER when at target (live dZ below):\n')
+
+                last_shown = None
+                deadline = time.monotonic() + 180.0
+                while time.monotonic() < deadline:
+                    pose = self._tcp_transform_from_tf(max_wait_s=0.3)
+                    if pose is not None:
+                        dz  = pose['z'] - tz
+                        line = (f'    z={pose["z"]:.4f}  |  dZ from target: {dz*1000:+.1f} mm   \r')
+                        if line != last_shown:
+                            print(line, end='', flush=True)
+                            last_shown = line
+                    r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                    if r:
+                        sys.stdin.readline()
+                        print()
+                        break
+                else:
+                    print(f'\n  Timed out — approach joints not recorded for {label}.')
+                    self._rank_mid_approach_joints.append(None)
+                    if mp_idx < 2 and have_scan_joints:
+                        self._move_to_joint_config(
+                            self._calibration.scan_joint_names,
+                            self._calibration.scan_joint_positions,
+                        )
+                    continue
+
+                time.sleep(1.0)
+                joints_now = self._latest_joint_positions
+                if joints_now is not None and names_now is not None:
+                    self._rank_mid_approach_joints.append(list(joints_now))
+                    print(f'  Approach joints at {label}:')
+                    for jn, jv in zip(names_now, joints_now):
+                        print(f'    {jn}: {jv:.4f} rad')
+                else:
+                    self._rank_mid_approach_joints.append(None)
+                    print('  WARN: /joint_states not available — approach joints not recorded.')
+
+                # Auto-return between positions
+                if mp_idx < 2 and have_scan_joints:
+                    next_label = RANK_MIDPOINTS[mp_idx + 1][2]
+                    print(f'\n  Returning to scan pose before {next_label}…')
+                    ok = self._move_to_joint_config(
+                        self._calibration.scan_joint_names,
+                        self._calibration.scan_joint_positions,
+                    )
+                    print(f'  At scan pose — jog to {next_label}.' if ok
+                          else '  Auto-return failed — jog to scan pose manually.')
+
+        finally:
+            self._stop_background_spin()
+
+        # Save to calibration
+        jnames = self._latest_joint_names
+        valid_grasp    = [j for j in self._rank_mid_grasp_joints    if j is not None]
+        valid_approach = [j for j in self._rank_mid_approach_joints if j is not None]
+
+        if len(valid_grasp) == 3 and jnames is not None:
+            self._calibration.rank_mid_idx = rank_mid
+            self._calibration.calibration_rank_mid_joint_names = list(jnames)
+            self._calibration.calibration_rank_mid_joints = [
+                list(j) for j in self._rank_mid_grasp_joints
+            ]
+            print(f'\nRank-midpoint grasp joints saved (a{rank_mid}, e{rank_mid}, i{rank_mid}) — 4-patch mode enabled.')
+        else:
+            print(f'  Only {len(valid_grasp)}/3 rank-midpoint grasp joints recorded '
+                  '— falling back to 2-patch (file-only) mode.')
+
+        if len(valid_approach) == 3 and jnames is not None:
+            self._calibration.cell_approach_rank_mid_joints = [
+                list(j) for j in self._rank_mid_approach_joints
+            ]
+            print('Rank-midpoint approach joints saved.')
+        else:
+            print(f'  Only {len(valid_approach)}/3 rank-midpoint approach joints recorded.')
 
     def _run_graveyard_step(self) -> None:
         """Step 3: Teach 1 centre position per graveyard zone (red + black)."""

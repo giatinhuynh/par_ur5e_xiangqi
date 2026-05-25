@@ -43,6 +43,17 @@ class BoardCalibration:
     # Same corner order. Used for bilinear joint interpolation for board approach moves.
     cell_approach_joint_names: Optional[list] = None
     cell_approach_joints: Optional[list] = None   # 4 lists of float (one per corner)
+    # E-file (file=4) midpoint joint configs for two-patch bilinear interpolation.
+    # Order: [e0 (rank=0), e9 (rank=9)]. Absent = fall back to 4-corner mode.
+    calibration_midpoints_joint_names: Optional[list] = None
+    calibration_midpoints_joints: Optional[list] = None  # 2 lists of float
+    cell_approach_midpoints_joints: Optional[list] = None  # 2 lists of float
+    # Rank-midpoint joint configs at files a, e, i for 4-patch (2×2) interpolation.
+    # Order: [a_mid, e_mid, i_mid]. rank_mid_idx is the rank row that was taught (default 5).
+    rank_mid_idx: int = 5
+    calibration_rank_mid_joint_names: Optional[list] = None
+    calibration_rank_mid_joints: Optional[list] = None  # 3 lists of float
+    cell_approach_rank_mid_joints: Optional[list] = None  # 3 lists of float
     # Graveyard joint configs — one fixed centre position per zone.
     graveyard_joint_names: Optional[list] = None
     graveyard_red_y: Optional[float] = None          # reference y for zone detection
@@ -93,6 +104,27 @@ class BoardCalibration:
             cal.cell_approach_joints = [
                 [float(v) for v in row] for row in data['cell_approach_joints']
             ]
+        if isinstance(data.get('calibration_midpoints_joint_names'), list):
+            cal.calibration_midpoints_joint_names = list(data['calibration_midpoints_joint_names'])
+        if isinstance(data.get('calibration_midpoints_joints'), list):
+            cal.calibration_midpoints_joints = [
+                [float(v) for v in row] for row in data['calibration_midpoints_joints']
+            ]
+        if isinstance(data.get('cell_approach_midpoints_joints'), list):
+            cal.cell_approach_midpoints_joints = [
+                [float(v) for v in row] for row in data['cell_approach_midpoints_joints']
+            ]
+        cal.rank_mid_idx = int(data.get('rank_mid_idx', 5))
+        if isinstance(data.get('calibration_rank_mid_joint_names'), list):
+            cal.calibration_rank_mid_joint_names = list(data['calibration_rank_mid_joint_names'])
+        if isinstance(data.get('calibration_rank_mid_joints'), list):
+            cal.calibration_rank_mid_joints = [
+                [float(v) for v in row] for row in data['calibration_rank_mid_joints']
+            ]
+        if isinstance(data.get('cell_approach_rank_mid_joints'), list):
+            cal.cell_approach_rank_mid_joints = [
+                [float(v) for v in row] for row in data['cell_approach_rank_mid_joints']
+            ]
         if isinstance(data.get('graveyard_joint_names'), list):
             cal.graveyard_joint_names = list(data['graveyard_joint_names'])
         for side in ('red', 'black'):
@@ -109,10 +141,43 @@ class BoardCalibration:
                     setattr(cal, key, [float(v) for v in val])
         return cal
 
+    def _interp_joints_4patch(
+        self,
+        file_f: float, rank_f: float,
+        J_a0, J_e0, J_i0,
+        J_a5, J_e5, J_i5,
+        J_a9, J_e9, J_i9,
+    ) -> np.ndarray:
+        """4-patch (2×2) bilinear interpolation over the 3×3 reference grid.
+
+        File split at 4, rank split at rank_mid_idx.  Each patch is bilinear
+        in its local (u, v) coordinates so all 9 anchor points are hit exactly.
+        """
+        rm = float(self.rank_mid_idx)
+        if rank_f <= rm:
+            v = rank_f / rm
+            if file_f <= 4.0:
+                u = file_f / 4.0
+                return (1-u)*(1-v)*J_a0 + u*(1-v)*J_e0 + u*v*J_e5 + (1-u)*v*J_a5
+            else:
+                u = (file_f - 4.0) / 4.0
+                return (1-u)*(1-v)*J_e0 + u*(1-v)*J_i0 + u*v*J_i5 + (1-u)*v*J_e5
+        else:
+            v = (rank_f - rm) / (9.0 - rm)
+            if file_f <= 4.0:
+                u = file_f / 4.0
+                return (1-u)*(1-v)*J_a5 + u*(1-v)*J_e5 + u*v*J_e9 + (1-u)*v*J_a9
+            else:
+                u = (file_f - 4.0) / 4.0
+                return (1-u)*(1-v)*J_e5 + u*(1-v)*J_i5 + u*v*J_i9 + (1-u)*v*J_e9
+
     def interpolate_approach_joints(
         self, file_f: float, rank_f: float
     ) -> Optional[Tuple[list, list]]:
         """Bilinear interpolation of joint angles for any board cell approach position.
+
+        Uses 4-patch (2×2) mode when both file and rank midpoints are available.
+        Falls back to 2-patch (file only) or 4-corner bilinear as midpoints allow.
 
         file_f / rank_f are continuous floats (0.0–8.0 / 0.0–9.0).
         Returns (joint_names, joint_positions) or None if approach joints not calibrated.
@@ -123,19 +188,53 @@ class BoardCalibration:
             or self.cell_approach_joint_names is None
         ):
             return None
-        J00 = np.array(self.cell_approach_joints[0])
-        J80 = np.array(self.cell_approach_joints[1])
-        J89 = np.array(self.cell_approach_joints[2])
-        J09 = np.array(self.cell_approach_joints[3])
-        u = file_f / 8.0
-        v = rank_f / 9.0
-        joints = (1-u)*(1-v)*J00 + u*(1-v)*J80 + u*v*J89 + (1-u)*v*J09
+        J_a0 = np.array(self.cell_approach_joints[0])
+        J_i0 = np.array(self.cell_approach_joints[1])
+        J_i9 = np.array(self.cell_approach_joints[2])
+        J_a9 = np.array(self.cell_approach_joints[3])
+        has_file_mid = (
+            self.cell_approach_midpoints_joints is not None
+            and len(self.cell_approach_midpoints_joints) == 2
+        )
+        has_rank_mid = (
+            self.cell_approach_rank_mid_joints is not None
+            and len(self.cell_approach_rank_mid_joints) == 3
+        )
+        if has_file_mid and has_rank_mid:
+            J_e0 = np.array(self.cell_approach_midpoints_joints[0])
+            J_e9 = np.array(self.cell_approach_midpoints_joints[1])
+            J_a5 = np.array(self.cell_approach_rank_mid_joints[0])
+            J_e5 = np.array(self.cell_approach_rank_mid_joints[1])
+            J_i5 = np.array(self.cell_approach_rank_mid_joints[2])
+            joints = self._interp_joints_4patch(
+                file_f, rank_f,
+                J_a0, J_e0, J_i0,
+                J_a5, J_e5, J_i5,
+                J_a9, J_e9, J_i9,
+            )
+        elif has_file_mid:
+            J_e0 = np.array(self.cell_approach_midpoints_joints[0])
+            J_e9 = np.array(self.cell_approach_midpoints_joints[1])
+            v = rank_f / 9.0
+            if file_f <= 4.0:
+                u = file_f / 4.0
+                joints = (1-u)*(1-v)*J_a0 + u*(1-v)*J_e0 + u*v*J_e9 + (1-u)*v*J_a9
+            else:
+                u = (file_f - 4.0) / 4.0
+                joints = (1-u)*(1-v)*J_e0 + u*(1-v)*J_i0 + u*v*J_i9 + (1-u)*v*J_e9
+        else:
+            u = file_f / 8.0
+            v = rank_f / 9.0
+            joints = (1-u)*(1-v)*J_a0 + u*(1-v)*J_i0 + u*v*J_i9 + (1-u)*v*J_a9
         return self.cell_approach_joint_names, joints.tolist()
 
     def interpolate_board_joints(
         self, file_f: float, rank_f: float
     ) -> Optional[Tuple[list, list]]:
         """Bilinear interpolation of joint angles for any board cell grasp position.
+
+        Uses 4-patch (2×2) mode when both file and rank midpoints are available.
+        Falls back to 2-patch (file only) or 4-corner bilinear as midpoints allow.
 
         file_f / rank_f are continuous floats (0.0–8.0 / 0.0–9.0).
         Returns (joint_names, joint_positions) or None if board joints not calibrated.
@@ -146,13 +245,44 @@ class BoardCalibration:
             or self.calibration_corners_joint_names is None
         ):
             return None
-        J00 = np.array(self.calibration_corners_joints[0])
-        J80 = np.array(self.calibration_corners_joints[1])
-        J89 = np.array(self.calibration_corners_joints[2])
-        J09 = np.array(self.calibration_corners_joints[3])
-        u = file_f / 8.0
-        v = rank_f / 9.0
-        joints = (1-u)*(1-v)*J00 + u*(1-v)*J80 + u*v*J89 + (1-u)*v*J09
+        J_a0 = np.array(self.calibration_corners_joints[0])
+        J_i0 = np.array(self.calibration_corners_joints[1])
+        J_i9 = np.array(self.calibration_corners_joints[2])
+        J_a9 = np.array(self.calibration_corners_joints[3])
+        has_file_mid = (
+            self.calibration_midpoints_joints is not None
+            and len(self.calibration_midpoints_joints) == 2
+        )
+        has_rank_mid = (
+            self.calibration_rank_mid_joints is not None
+            and len(self.calibration_rank_mid_joints) == 3
+        )
+        if has_file_mid and has_rank_mid:
+            J_e0 = np.array(self.calibration_midpoints_joints[0])
+            J_e9 = np.array(self.calibration_midpoints_joints[1])
+            J_a5 = np.array(self.calibration_rank_mid_joints[0])
+            J_e5 = np.array(self.calibration_rank_mid_joints[1])
+            J_i5 = np.array(self.calibration_rank_mid_joints[2])
+            joints = self._interp_joints_4patch(
+                file_f, rank_f,
+                J_a0, J_e0, J_i0,
+                J_a5, J_e5, J_i5,
+                J_a9, J_e9, J_i9,
+            )
+        elif has_file_mid:
+            J_e0 = np.array(self.calibration_midpoints_joints[0])
+            J_e9 = np.array(self.calibration_midpoints_joints[1])
+            v = rank_f / 9.0
+            if file_f <= 4.0:
+                u = file_f / 4.0
+                joints = (1-u)*(1-v)*J_a0 + u*(1-v)*J_e0 + u*v*J_e9 + (1-u)*v*J_a9
+            else:
+                u = (file_f - 4.0) / 4.0
+                joints = (1-u)*(1-v)*J_e0 + u*(1-v)*J_i0 + u*v*J_i9 + (1-u)*v*J_e9
+        else:
+            u = file_f / 8.0
+            v = rank_f / 9.0
+            joints = (1-u)*(1-v)*J_a0 + u*(1-v)*J_i0 + u*v*J_i9 + (1-u)*v*J_a9
         return self.calibration_corners_joint_names, joints.tolist()
 
     def get_graveyard_joints(

@@ -624,6 +624,20 @@ class DashboardNode(Node):
         self._mode_sync_timer = self.create_timer(1.0, self._sync_game_mode_once)
         self._mode_synced = False
 
+        # --- Glitch-filter state (hardware mode) ---
+        # Board grid hold: only push a new grid to the UI after it has been
+        # seen in N consecutive vision messages (or confidence is high).
+        self._prev_board_grid: list | None = None
+        self._board_grid_repeat: int = 0
+        self._BOARD_GRID_HOLD = 2        # consecutive identical msgs before UI update
+        self._BOARD_CONF_BYPASS = 0.65   # high-confidence frames skip the hold
+
+        # Detecting-move debounce: suppress the 'detecting_move' label until
+        # it has been the reported state for >= N seconds.  This hides the
+        # flicker caused by false human-move triggers.
+        self._detecting_move_first_seen: float = 0.0
+        self._DETECTING_MOVE_DEBOUNCE = 0.4  # seconds
+
     def _sync_game_mode_once(self) -> None:
         if self._mode_synced:
             return
@@ -685,20 +699,52 @@ class DashboardNode(Node):
             # publishes the logical board from FEN after each move.
             if sim and piece_count < 8:
                 return
-            # On hardware, show exactly what vision detected (even 1–2 pieces).
-            # Empty frames (piece_count == 0) are still passed through so the board
-            # clears when all pieces are removed.
-            _state['board_grid'] = [int(x) for x in msg.grid]
+            # On hardware, apply a hold filter: only update the displayed grid
+            # when the same grid arrives in N consecutive messages OR confidence
+            # is high enough to trust a single frame.
+            new_grid = [int(x) for x in msg.grid]
+            conf = float(msg.detection_confidence)
+            if not sim:
+                if new_grid == self._prev_board_grid:
+                    self._board_grid_repeat += 1
+                else:
+                    self._board_grid_repeat = 0
+                    self._prev_board_grid = new_grid
+                # Suppress the UI update unless the grid is stable or high-confidence
+                if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
+                    # Still update non-grid metadata (confidence, turn) but not the grid
+                    _state['detection_confidence'] = conf
+                    if msg.fen:
+                        _state['fen'] = msg.fen
+                    _state['is_red_turn'] = msg.is_red_turn
+                    _state['_dirty'] = True
+                    return
+            _state['board_grid'] = new_grid
             _state['board_source'] = 'vision'
             if msg.fen:
                 _state['fen'] = msg.fen
             _state['is_red_turn'] = msg.is_red_turn
-            _state['detection_confidence'] = float(msg.detection_confidence)
+            _state['detection_confidence'] = conf
             _state['_dirty'] = True
 
     def _game_status_cb(self, msg: GameStatus) -> None:
         with _state_lock:
-            _state['game_status'] = msg.status
+            new_status = msg.status
+
+            # Debounce 'detecting_move': only show this transient label after
+            # it has been the reported state for long enough.  False detections
+            # from vision glitches typically flip in and out in < 0.2 s, so
+            # they are invisible to the user.
+            if new_status == 'detecting_move':
+                if self._detecting_move_first_seen == 0.0:
+                    self._detecting_move_first_seen = time.time()
+                if time.time() - self._detecting_move_first_seen < self._DETECTING_MOVE_DEBOUNCE:
+                    # Within debounce window — keep whatever was shown before
+                    new_status = _state.get('game_status', new_status)
+            else:
+                self._detecting_move_first_seen = 0.0
+
+            _state['game_status'] = new_status
             _state['is_red_turn'] = msg.is_red_turn
             prev_moves = _state.get('move_count', 0)
             _state['move_count'] = msg.move_count

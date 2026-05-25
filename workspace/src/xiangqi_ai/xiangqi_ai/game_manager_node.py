@@ -582,7 +582,88 @@ class GameManagerNode(Node):
         if self._simulation_mode:
             self._apply_dashboard_mode(self._dashboard_mode)
             self._publish_logical_board_state()
+            self._kick_off_game()
+            return
 
+        # ── Hardware mode ────────────────────────────────────────────────
+        # Scan the physical board so the AI operates on what is *actually*
+        # placed on the table, not the standard starting position.
+        if self._get_board_state_cli.service_is_ready():
+            self.get_logger().info(
+                'New game (hardware): scanning physical board for starting position…'
+            )
+            self._startup_scan_retries = 0
+            self._do_startup_scan()
+        else:
+            self.get_logger().warn(
+                'Vision service not ready — starting from STARTING_FEN (place pieces first)'
+            )
+            self._kick_off_game()
+
+    def _do_startup_scan(self):
+        req = GetBoardState.Request()
+        req.force_rescan = True
+        future = self._get_board_state_cli.call_async(req)
+        future.add_done_callback(self._on_startup_board_scan_done)
+
+    def _retry_startup_scan(self):
+        if hasattr(self, '_startup_retry_timer') and self._startup_retry_timer:
+            self.destroy_timer(self._startup_retry_timer)
+            self._startup_retry_timer = None
+        self._do_startup_scan()
+
+    def _on_startup_board_scan_done(self, future) -> None:
+        """Apply the vision-scanned FEN and begin game play.
+
+        Even if the scanned board is incomplete (missing kings, wrong
+        piece count due to YOLO glitching), we repair it to be minimally
+        legal rather than falling back to STARTING_FEN.  This way the AI
+        always operates on what is *actually* on the table.
+        """
+        try:
+            resp = future.result()
+        except Exception as e:
+            self.get_logger().warn(
+                f'Startup board scan failed ({e}) — using STARTING_FEN'
+            )
+            self._kick_off_game()
+        else:
+            if resp is not None and resp.success:
+                # vision_node publishes grid, not fen, so we construct it
+                raw_fen = resp.board_state.fen
+                if not raw_fen:
+                    raw_fen = GameManagerNode._grid_to_fen(resp.board_state.grid, self.STARTING_FEN)
+                
+                repaired_fen = self._sanitize_fen_for_engine(raw_fen)
+                if repaired_fen != raw_fen:
+                    self.get_logger().warn(
+                        f'Vision FEN was incomplete (missing king(s)) — '
+                        f'repaired for engine.  Raw: {raw_fen}  '
+                        f'Repaired: {repaired_fen}'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'Board scan OK — game starting from: {repaired_fen}'
+                    )
+                self._current_fen = repaired_fen
+                self._move_history = []
+                self._move_count = 0
+                self._kick_off_game()
+            else:
+                if self._startup_scan_retries < 6:
+                    self._startup_scan_retries += 1
+                    self.get_logger().info(
+                        f'Vision not ready, retrying ({self._startup_scan_retries}/6) in 0.5s...'
+                    )
+                    self._startup_retry_timer = self.create_timer(0.5, self._retry_startup_scan)
+                else:
+                    self.get_logger().warn(
+                        'Board scan failed after retries — using STARTING_FEN'
+                    )
+                    self._kick_off_game()
+
+    def _kick_off_game(self) -> None:
+        """Transition into the first game state and begin play."""
         if self._robot_is_red or self._self_play:
             self._game_state = GameState.COMPUTING_AI
             self._publish_status()
@@ -1221,6 +1302,85 @@ class GameManagerNode(Node):
                         grid[idx] = code if ch.isupper() else -code
                     file_idx += 1
         return grid
+
+    @staticmethod
+    def _grid_to_fen(grid: list, original_fen: str) -> str:
+        """Reconstruct a FEN string from a flat int8[90] grid.
+
+        The board part is rebuilt from the grid; the metadata tail (side to
+        move, castling, en-passant, move counters) is preserved unchanged from
+        `original_fen`.
+        """
+        PIECE_CHARS = {1: 'K', 2: 'A', 3: 'B', 4: 'N', 5: 'R', 6: 'C', 7: 'P'}
+        rows = []
+        for rank in range(9, -1, -1):   # FEN: rank 9 (black home) → rank 0 (red home)
+            row = ''
+            empty = 0
+            for file in range(9):
+                val = grid[rank * 9 + file]
+                if val == 0:
+                    empty += 1
+                else:
+                    if empty:
+                        row += str(empty)
+                        empty = 0
+                    ch = PIECE_CHARS.get(abs(val), '?')
+                    row += ch if val > 0 else ch.lower()
+            if empty:
+                row += str(empty)
+            rows.append(row)
+        board_part = '/'.join(rows)
+        parts = original_fen.split()
+        parts[0] = board_part
+        return ' '.join(parts)
+
+    @staticmethod
+    def _sanitize_fen_for_engine(fen: str) -> str:
+        """Ensure a vision-scanned FEN is legally playable.
+
+        The YOLO detector may miss pieces (especially in glitchy conditions).
+        If either king is absent, we insert it at its standard starting square
+        (e0 for Red = index 4, e9 for Black = index 85) or, if that square is
+        already occupied, at the first empty cell in the home row.
+
+        This means the AI always receives a FEN that pyffish can parse, even
+        when the physical board is partially set up or detection is imperfect.
+        No pieces are *removed* — we only add the missing king(s).
+        """
+        try:
+            grid = list(GameManagerNode._fen_to_grid(fen))
+            has_red_king   = any(v ==  1 for v in grid)
+            has_black_king = any(v == -1 for v in grid)
+
+            if has_red_king and has_black_king:
+                return fen  # already fully legal — fast path
+
+            if not has_red_king:
+                # Red king default: e0 → rank 0, file 4 → index 4
+                preferred = 0 * 9 + 4
+                if grid[preferred] == 0:
+                    grid[preferred] = 1
+                else:
+                    for f in range(9):
+                        if grid[f] == 0:
+                            grid[f] = 1
+                            break
+
+            if not has_black_king:
+                # Black king default: e9 → rank 9, file 4 → index 85
+                preferred = 9 * 9 + 4
+                if grid[preferred] == 0:
+                    grid[preferred] = -1
+                else:
+                    for f in range(9):
+                        idx = 9 * 9 + f
+                        if grid[idx] == 0:
+                            grid[idx] = -1
+                            break
+
+            return GameManagerNode._grid_to_fen(grid, fen)
+        except Exception:
+            return fen  # if anything goes wrong, pass through unchanged
 
     @staticmethod
     def _grids_match(a: list, b: list, tolerance: int = 0) -> bool:

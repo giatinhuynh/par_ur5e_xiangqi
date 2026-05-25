@@ -57,6 +57,17 @@ class BoardCalibration:
     # Joint configs at approach_height above each calibration corner (Step 3 teach-in).
     cell_approach_joint_names: Optional[list] = None
     cell_approach_joints: Optional[list] = None   # 4 lists of float
+    # E-file (file=4) midpoint joint configs for two-patch bilinear interpolation.
+    # Order: [e0 (rank=0), e9 (rank=9)]. Absent = fall back to 4-corner mode.
+    calibration_midpoints_joint_names: Optional[list] = None
+    calibration_midpoints_joints: Optional[list] = None  # 2 lists of float
+    cell_approach_midpoints_joints: Optional[list] = None  # 2 lists of float
+    # Rank-midpoint joint configs at files a, e, i for 4-patch (2×2) interpolation.
+    # Order: [a_mid, e_mid, i_mid]. rank_mid_idx is the rank row that was taught (default 5).
+    rank_mid_idx: int = 5
+    calibration_rank_mid_joint_names: Optional[list] = None
+    calibration_rank_mid_joints: Optional[list] = None  # 3 lists of float
+    cell_approach_rank_mid_joints: Optional[list] = None  # 3 lists of float
     # Graveyard joint configs — one fixed centre position per zone.
     graveyard_joint_names: Optional[list] = None
     graveyard_red_y: Optional[float] = None          # reference y for zone detection
@@ -106,6 +117,27 @@ class BoardCalibration:
         if self.cell_approach_joints is not None:
             data['cell_approach_joints'] = [
                 [float(v) for v in row] for row in self.cell_approach_joints
+            ]
+        if self.calibration_midpoints_joint_names is not None:
+            data['calibration_midpoints_joint_names'] = list(self.calibration_midpoints_joint_names)
+        if self.calibration_midpoints_joints is not None:
+            data['calibration_midpoints_joints'] = [
+                [float(v) for v in row] for row in self.calibration_midpoints_joints
+            ]
+        if self.cell_approach_midpoints_joints is not None:
+            data['cell_approach_midpoints_joints'] = [
+                [float(v) for v in row] for row in self.cell_approach_midpoints_joints
+            ]
+        data['rank_mid_idx'] = int(self.rank_mid_idx)
+        if self.calibration_rank_mid_joint_names is not None:
+            data['calibration_rank_mid_joint_names'] = list(self.calibration_rank_mid_joint_names)
+        if self.calibration_rank_mid_joints is not None:
+            data['calibration_rank_mid_joints'] = [
+                [float(v) for v in row] for row in self.calibration_rank_mid_joints
+            ]
+        if self.cell_approach_rank_mid_joints is not None:
+            data['cell_approach_rank_mid_joints'] = [
+                [float(v) for v in row] for row in self.cell_approach_rank_mid_joints
             ]
         if self.graveyard_joint_names is not None:
             data['graveyard_joint_names'] = list(self.graveyard_joint_names)
@@ -160,6 +192,27 @@ class BoardCalibration:
         if isinstance(data.get('cell_approach_joints'), list):
             cal.cell_approach_joints = [
                 [float(v) for v in row] for row in data['cell_approach_joints']
+            ]
+        if isinstance(data.get('calibration_midpoints_joint_names'), list):
+            cal.calibration_midpoints_joint_names = list(data['calibration_midpoints_joint_names'])
+        if isinstance(data.get('calibration_midpoints_joints'), list):
+            cal.calibration_midpoints_joints = [
+                [float(v) for v in row] for row in data['calibration_midpoints_joints']
+            ]
+        if isinstance(data.get('cell_approach_midpoints_joints'), list):
+            cal.cell_approach_midpoints_joints = [
+                [float(v) for v in row] for row in data['cell_approach_midpoints_joints']
+            ]
+        cal.rank_mid_idx = int(data.get('rank_mid_idx', 5))
+        if isinstance(data.get('calibration_rank_mid_joint_names'), list):
+            cal.calibration_rank_mid_joint_names = list(data['calibration_rank_mid_joint_names'])
+        if isinstance(data.get('calibration_rank_mid_joints'), list):
+            cal.calibration_rank_mid_joints = [
+                [float(v) for v in row] for row in data['calibration_rank_mid_joints']
+            ]
+        if isinstance(data.get('cell_approach_rank_mid_joints'), list):
+            cal.cell_approach_rank_mid_joints = [
+                [float(v) for v in row] for row in data['cell_approach_rank_mid_joints']
             ]
         if isinstance(data.get('graveyard_joint_names'), list):
             cal.graveyard_joint_names = list(data['graveyard_joint_names'])

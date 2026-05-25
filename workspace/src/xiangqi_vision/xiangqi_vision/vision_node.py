@@ -41,6 +41,50 @@ from .turn_detector import TurnDetector, TurnDetectorState
 from .weights_util import resolve_calibration_path, resolve_yolo_model_path
 
 
+class GridStabilizer:
+    """
+    Per-cell temporal smoothing for the raw YOLO detection grid.
+
+    Each of the 90 board cells only changes its committed value after the
+    *same* value has been observed in `smooth_frames` consecutive raw
+    detection frames.  A single flickering frame is silently ignored;
+    genuine piece placements/removals are committed after a short delay
+    (~smooth_frames / poll_rate_hz seconds).
+
+    With smooth_frames=3 at 3 Hz the delay is ~1 s — short enough to feel
+    immediate to the human, long enough to absorb YOLO glitches.
+    Setting smooth_frames=1 disables smoothing entirely.
+    """
+
+    def __init__(self, smooth_frames: int = 3, n_cells: int = 90):
+        self._n = max(1, smooth_frames)
+        # Last committed (output) grid — starts all-empty
+        self._committed = np.zeros(n_cells, dtype=np.int8)
+        # Candidate value per cell (what we are counting towards)
+        self._candidate = np.zeros(n_cells, dtype=np.int8)
+        # Consecutive-frame streak per cell for the current candidate
+        self._streak = np.zeros(n_cells, dtype=np.int32)
+
+    def update(self, raw: np.ndarray) -> np.ndarray:
+        """Feed a raw detection grid; return the smoothed committed grid."""
+        same = raw == self._candidate
+        self._streak[same] += 1
+        # New value for a cell → restart candidate and streak
+        changed = ~same
+        self._candidate[changed] = raw[changed]
+        self._streak[changed] = 1
+        # Commit cells whose streak has reached the threshold
+        ready = self._streak >= self._n
+        self._committed[ready] = self._candidate[ready]
+        return self._committed.copy()
+
+    def reset(self) -> None:
+        """Clear all history (call when the game resets or camera is repositioned)."""
+        self._committed[:] = 0
+        self._candidate[:] = 0
+        self._streak[:] = 0
+
+
 class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
@@ -52,6 +96,7 @@ class VisionNode(Node):
         self.declare_parameter('yolo_download_url', '')
         self.declare_parameter('confidence_threshold', 0.5)
         self.declare_parameter('stability_frames', 8)
+        self.declare_parameter('grid_smooth_frames', 3)
         self.declare_parameter('poll_rate_hz', 3.0)
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
 
@@ -59,6 +104,7 @@ class VisionNode(Node):
         cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
         conf_thresh = self.get_parameter('confidence_threshold').value
         stability = self.get_parameter('stability_frames').value
+        grid_smooth = int(self.get_parameter('grid_smooth_frames').value)
         self._poll_rate = self.get_parameter('poll_rate_hz').value
         require_yolo = bool(self.get_parameter('require_yolo_weights').value)
         yolo_url = str(self.get_parameter('yolo_download_url').value or '')
@@ -103,6 +149,7 @@ class VisionNode(Node):
             )
 
         self._turn_detector = TurnDetector(stability_frames=stability)
+        self._grid_stabilizer = GridStabilizer(smooth_frames=grid_smooth)
         self._bridge = CvBridge()
 
         # --- State ---
@@ -327,7 +374,10 @@ class VisionNode(Node):
 
         if self._piece_detector is not None:
             detections, annotated = self._piece_detector.detect(warped)
-            grid = self._piece_detector.detections_to_grid(detections)
+            raw_grid = self._piece_detector.detections_to_grid(detections)
+            # Apply per-cell temporal smoothing — a cell value only commits
+            # after `grid_smooth_frames` consecutive agreeing detections.
+            grid = self._grid_stabilizer.update(raw_grid)
             mean_conf = self._piece_detector.mean_confidence(detections)
             debug_out = annotated
         else:

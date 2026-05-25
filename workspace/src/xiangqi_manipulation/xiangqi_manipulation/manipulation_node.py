@@ -376,7 +376,7 @@ class ManipulationNode(Node):
             # ----------------------------------------------------------
             # All-joint-space path — no OMPL, no Cartesian IK
             # Sequence: scan → pick_approach → pick_grasp → grasp →
-            #           pick_approach → scan → place_approach → place_grasp →
+            #           pick_approach → place_approach → place_grasp →
             #           release → place_approach → scan
             # ----------------------------------------------------------
             self.get_logger().info(
@@ -400,8 +400,6 @@ class ManipulationNode(Node):
                                               self._grasp_force)):           return result
             if not step('lifting',
                         lambda: self._move_joints(ap_n, ap_p)):              return result
-            if not step('transiting',
-                        lambda: self._move_joints(scan_n, scan_p)):          return result
             if not step('approaching_place',
                         lambda: self._move_joints(dp_n, dp_p)):              return result
             if not step('descending_to_place',

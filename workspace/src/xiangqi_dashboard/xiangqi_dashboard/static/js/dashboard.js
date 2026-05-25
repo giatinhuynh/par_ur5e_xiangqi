@@ -816,7 +816,7 @@ function updateEngineSelectors() {
 
   const sim = !!state.simulation_mode;
   const humanMode = state.game_mode === 'ai_vs_human';
-  const locked = sim && (!canChangeMode() || isGameStarting() || isGameInProgress());
+  const locked = !canChangeMode() || isGameStarting() || isGameInProgress();
   const humanIsRed = humanColor === 'red';
   const redVal = selRed.value;
   const blackVal = selBlack.value;
@@ -824,7 +824,7 @@ function updateEngineSelectors() {
     ? engineUsesStockfish(humanIsRed ? blackVal : redVal, humanIsRed ? blackVal : redVal)
     : engineUsesStockfish(redVal, blackVal);
 
-  if (panel) panel.classList.toggle('hidden', !sim);
+  if (panel) panel.classList.remove('hidden');
 
   // Color picker — only in human mode
   const colorRow = document.getElementById('human-color-row');

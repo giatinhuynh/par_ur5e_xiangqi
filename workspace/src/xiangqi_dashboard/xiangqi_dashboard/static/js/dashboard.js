@@ -606,10 +606,19 @@ function updateConfirmMoveButton() {
   btn.disabled = !show;
 }
 
+function updateHardwareModeHint() {
+  const el = document.getElementById('hardware-mode-hint');
+  if (!el) return;
+  const sim = !!state.simulation_mode;
+  el.classList.toggle('hidden', sim);
+  if (sim) return;
+  el.textContent = state.game_mode === 'ai_vs_ai'
+    ? 'Robot plays both sides on the physical board'
+    : 'You move pieces on the physical board';
+}
+
 function updateModeBar() {
   const sim = !!state.simulation_mode;
-  const modeBarSim = document.getElementById('mode-bar-sim');
-  const hwBanner = document.getElementById('hardware-play-banner');
   const lockHint = document.getElementById('mode-lock-hint');
   const btnAiAi = document.getElementById('btn-ai-vs-ai');
   const btnHuman = document.getElementById('btn-ai-vs-human');
@@ -620,14 +629,9 @@ function updateModeBar() {
   const starting = isGameStarting();
   const busy = starting || inProgress;
 
-  if (modeBarSim) modeBarSim.classList.toggle('hidden', !sim);
-  if (hwBanner) hwBanner.classList.toggle('hidden', sim);
+  updateHardwareModeHint();
 
-  if (!sim && state.game_mode === 'ai_vs_ai') {
-    state.game_mode = 'ai_vs_human';
-  }
-
-  const modeLocked = sim && (!canChangeMode() || starting);
+  const modeLocked = !canChangeMode() || starting;
   if (lockHint) {
     lockHint.classList.toggle('hidden', !modeLocked);
     lockHint.textContent = starting ? 'Starting…' : 'Locked while playing';
@@ -748,7 +752,9 @@ function updateFlowBanner() {
   if (phase === 'setup') {
     textEl.textContent = simHint()
       ? `1) ${mode}  2) Engine Setup (right)  3) Start Game`
-      : 'Press Start Game (human vs AI on physical board)';
+      : state.game_mode === 'ai_vs_ai'
+        ? `1) ${mode}  2) Engine Setup (right)  3) Start Game`
+        : `1) ${mode}  2) Engine Setup - choose your color  3) Start Game`;
     return;
   }
   if (phase === 'over') {
@@ -771,7 +777,9 @@ function updateFlowBanner() {
     const humanSide = humanColor === 'red' ? 'Red' : 'Black';
     textEl.textContent = `${mode}: your turn - click a ${humanSide} piece on the board`;
   } else if (gs === 'executing_move') {
-    textEl.textContent = `${mode}: robot executing move…`;
+    textEl.textContent = state.game_mode === 'ai_vs_ai'
+      ? `${mode}: robot moving pieces…`
+      : `${mode}: robot executing move…`;
   } else {
     textEl.textContent = `${mode}: ${formatActivity(gs)}`;
   }
@@ -1261,10 +1269,6 @@ function onEngineChange() {
 function setMode(mode) {
   if (!canChangeMode()) {
     showToast('Mode is locked during a game. Wait for game over or finish the current game.');
-    return;
-  }
-  if (!state.simulation_mode && mode === 'ai_vs_ai') {
-    showToast('AI vs AI is only available in simulation mode');
     return;
   }
   fetch('/api/set_mode', {

@@ -93,7 +93,7 @@ _state = {
     'game_result': 'ongoing',
     'game_result_reason': '',
     'simulation_mode': True,
-    'game_mode': 'ai_vs_human',   # 'ai_vs_ai' (sim only) | 'ai_vs_human'
+    'game_mode': 'ai_vs_human',   # 'ai_vs_ai' | 'ai_vs_human'
     'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
     '_dirty': False,
@@ -462,7 +462,7 @@ def _mode_change_allowed() -> bool:
 
 @_flask_app.route('/api/set_mode', methods=['POST'])
 def api_set_mode():
-    """Switch game mode (simulation only). Hardware is always human vs AI on the physical board."""
+    """Switch game mode before Start or after game over (sim and hardware)."""
     data = request.json or {}
     mode = data.get('mode', 'ai_vs_human')
     if mode not in ('ai_vs_ai', 'ai_vs_human'):
@@ -472,15 +472,6 @@ def api_set_mode():
             'ok': False,
             'error': 'Cannot change mode during a game. Finish the game or press New Game after game over.',
         }), 409
-    with _state_lock:
-        sim = _state.get('simulation_mode', False)
-    if not sim:
-        if mode == 'ai_vs_ai':
-            return jsonify({
-                'ok': False,
-                'error': 'AI vs AI is only available in simulation. On hardware, play on the physical board.',
-            }), 403
-        mode = 'ai_vs_human'
     with _state_lock:
         _state['game_mode'] = mode
         _state['_dirty'] = True

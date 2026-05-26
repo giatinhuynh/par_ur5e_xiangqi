@@ -55,6 +55,15 @@ def square_to_index(file_ch: str, rank_1based: int) -> int:
     return (rank_1based - 1) * 9 + (ord(file_ch) - 97)
 
 
+def origin_grid_index(move: str) -> int | None:
+    """Grid index of the move origin square, or None if unparsable."""
+    parsed = parse_move(move)
+    if not parsed:
+        return None
+    from_sq, _ = parsed
+    return square_to_index(from_sq[0], from_sq[1])
+
+
 def move_critical_indices(move: str) -> set[int]:
     """Grid indices for from/to squares of a coordinate move."""
     parsed = parse_move(move)

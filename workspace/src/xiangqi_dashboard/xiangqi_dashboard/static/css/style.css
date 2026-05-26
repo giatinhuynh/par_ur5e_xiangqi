@@ -179,7 +179,7 @@ body {
   pointer-events: none;
 }
 
-.mode-bar-sim {
+.mode-bar-toggle {
   display: flex;
   align-items: center;
   gap: 12px;

@@ -25,6 +25,7 @@ from .move_resolver import (
     resolve_to_legal_move,
     parse_move as _resolver_parse_move,
     move_critical_indices,
+    origin_grid_index,
 )
 
 try:
@@ -72,9 +73,12 @@ class GameManagerNode(Node):
         self._robot_is_red = self.get_parameter('robot_plays_red').value
         self._self_play = self.get_parameter('self_play').value
         self._simulation_mode = self.get_parameter('simulation_mode').value
+        self._delayed_ai_timers: list = []
+        self._dashboard_mode = 'ai_vs_human'
+        self._human_color = 'red'   # which color the human plays in ai_vs_human
         if not self._simulation_mode:
-            # Hardware: human vs AI only; human moves come from vision on the physical board.
-            self._self_play = False
+            # Hardware: default human vs AI until dashboard publishes game_mode.
+            self._apply_dashboard_mode(self._dashboard_mode)
         self._ai_time_limit = float(self.get_parameter('ai_time_limit').value)
         self._ai_depth = self.get_parameter('ai_depth').value
         if self._simulation_mode:
@@ -83,10 +87,6 @@ class GameManagerNode(Node):
             if not self._self_play:
                 # Dashboard sim: human plays Red; AI plays Black.
                 self._robot_is_red = False
-
-        self._delayed_ai_timers: list = []
-        self._dashboard_mode = 'ai_vs_human'
-        self._human_color = 'red'   # which color the human plays in ai_vs_human
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
 
@@ -310,17 +310,11 @@ class GameManagerNode(Node):
         )
 
     def _game_mode_cb(self, msg: String) -> None:
-        """Dashboard sim-only: ai_vs_ai enables self-play; ai_vs_human uses board clicks or vision."""
+        """Dashboard: ai_vs_ai = robot plays both sides; ai_vs_human = vision or sim clicks."""
         mode = (msg.data or '').strip()
         if mode not in ('ai_vs_ai', 'ai_vs_human'):
             return
         self._dashboard_mode = mode
-        if not self._simulation_mode:
-            if mode == 'ai_vs_ai':
-                self.get_logger().warn(
-                    'AI vs AI is simulation-only - ignoring (hardware uses human vs AI on the physical board)'
-                )
-            return
         if self._game_state not in (GameState.IDLE, GameState.GAME_OVER):
             self.get_logger().warn(
                 f'Ignoring game mode change during active game (state={self._game_state.name})'
@@ -410,8 +404,20 @@ class GameManagerNode(Node):
             return
         self._begin_human_move_detection()
 
+    @staticmethod
+    def _move_origin_matches_human(move: str, grid: list, human_red: bool) -> bool:
+        """True if reference grid shows a human piece on the move's from-square."""
+        idx = origin_grid_index(move)
+        if idx is None or idx < 0 or idx >= len(grid):
+            return False
+        val = grid[idx]
+        if val == 0:
+            return False
+        return val > 0 if human_red else val < 0
+
     def _begin_human_move_detection(self) -> None:
         """Transition to DETECTING_MOVE and refresh vision before move inference."""
+        self._tell_vision_to_watch(False)
         self._game_state = GameState.DETECTING_MOVE
         self._publish_status()
         if self._simulation_mode:
@@ -635,30 +641,55 @@ class GameManagerNode(Node):
         alert = String()
         alert.data = alert_text
         self._illegal_move_pub.publish(alert)
-        self._game_state = GameState.WAITING_HUMAN
-        self._tell_vision_to_watch(True)
-        self._publish_status()
+        if self._self_play:
+            self._game_state = GameState.COMPUTING_AI
+            self._publish_status()
+            self._compute_and_emit_ai_move()
+        else:
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            self._publish_status()
 
     def _estop_cb(self, msg: Bool) -> None:
         """E-stop during motion or while waiting on the AI engine."""
         if not msg.data:
             return
         if self._game_state == GameState.EXECUTING_MOVE:
-            self._discard_pending_ai_after_planner_abort(
-                'E-stop asserted during robot AI move - pending move discarded (FEN unchanged)',
-                'E-stop: robot move cancelled in software - confirm physical board matches UI',
-            )
+            if self._self_play:
+                self._pending_ai_move = None
+                self._active_dispatch_id = None
+                self._clear_planner_ack_timer()
+                self._game_state = GameState.IDLE
+                alert = String()
+                alert.data = (
+                    'E-stop during AI vs AI move - confirm board matches UI, then Start'
+                )
+                self._illegal_move_pub.publish(alert)
+                self._publish_status()
+            else:
+                self._discard_pending_ai_after_planner_abort(
+                    'E-stop asserted during robot AI move - pending move discarded (FEN unchanged)',
+                    'E-stop: robot move cancelled in software - confirm physical board matches UI',
+                )
             return
         if self._game_state == GameState.COMPUTING_AI:
             self._abort_ai_computation = True
             self._cancel_ai_rpc_in_flight()
             self._active_ai_request_token = None
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
-            alert = String()
-            alert.data = (
-                'E-stop during AI thinking - cancelled engine request; make a move or New Game'
-            )
+            if self._self_play:
+                self._game_state = GameState.IDLE
+                alert = String()
+                alert.data = (
+                    'E-stop during AI vs AI - cancelled engine request; press Start to resume'
+                )
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                alert = String()
+                alert.data = (
+                    'E-stop during AI thinking - cancelled engine request; '
+                    'make a move or New Game'
+                )
             self._illegal_move_pub.publish(alert)
             self._publish_status()
             return
@@ -752,6 +783,15 @@ class GameManagerNode(Node):
         # ── Hardware mode ────────────────────────────────────────────────
         # Scan the physical board so the AI operates on what is *actually*
         # placed on the table, not the standard starting position.
+        self._apply_dashboard_mode(self._dashboard_mode)
+        # Leave idle immediately so the dashboard clears "Starting game…" while
+        # the camera scan runs (status stays idle until kick_off otherwise).
+        if self._self_play:
+            self._game_state = GameState.COMPUTING_AI
+        else:
+            self._game_state = GameState.WAITING_HUMAN
+        self._publish_status()
+
         if self._get_board_state_cli.service_is_ready():
             self.get_logger().info(
                 'New game (hardware): scanning physical board for starting position…'
@@ -828,6 +868,7 @@ class GameManagerNode(Node):
 
     def _kick_off_game(self) -> None:
         """Transition into the first game state and begin play."""
+        self._apply_dashboard_mode(self._dashboard_mode)
         if self._robot_is_red or self._self_play:
             self._game_state = GameState.COMPUTING_AI
             self._align_fen_side_to_play()
@@ -888,10 +929,15 @@ class GameManagerNode(Node):
                 return
 
             self._current_fen = self._sanitize_fen_for_engine(fen)
-            self._game_state = GameState.WAITING_HUMAN
             self._align_fen_side_to_play()
-            self._tell_vision_to_watch(True)
-            self._publish_status()
+            if self._self_play:
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                self._compute_and_emit_ai_move()
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                self._publish_status()
             ok = String()
             ok.data = (
                 'Board synced from camera. Move history kept - use Restart if the '
@@ -939,11 +985,13 @@ class GameManagerNode(Node):
         grid = list(self._latest_board_state.grid)
         base_tol = int(self.get_parameter('human_move_grid_tolerance').value)
         ref_grid = self._human_watch_reference_grid
+        ref_for_side = ref_grid if ref_grid is not None else self._fen_to_grid(self._current_fen)
         detected_move = self._infer_move_from_board(
             self._current_fen,
             grid,
             tolerance=base_tol,
             reference_grid=ref_grid,
+            human_red=human_red,
         )
         if detected_move is None and base_tol < 16:
             detected_move = self._infer_move_from_board(
@@ -951,7 +999,17 @@ class GameManagerNode(Node):
                 grid,
                 tolerance=16,
                 reference_grid=ref_grid,
+                human_red=human_red,
             )
+
+        if detected_move is not None and not self._move_origin_matches_human(
+            detected_move, ref_for_side, human_red
+        ):
+            self.get_logger().warn(
+                f'Rejecting inferred human move {detected_move}: no '
+                f'{self._human_color} piece on from-square in reference grid'
+            )
+            detected_move = None
 
         if detected_move is None:
             self.get_logger().warn(
@@ -1227,8 +1285,8 @@ class GameManagerNode(Node):
             if not PYFFISH_OK:
                 raise RuntimeError('pyffish unavailable')
             fen_before = self._current_fen
-            side_before = fen_before.split()[1] if fen_before else 'w'
-            is_red_move = 'w' in side_before
+            parsed_red = self._fen_active_is_red(fen_before)
+            is_red_move = parsed_red if parsed_red is not None else True
 
             self._current_fen = sf.get_fen(VARIANT, self._current_fen, [move])
             self._move_history.append(move)
@@ -1400,6 +1458,7 @@ class GameManagerNode(Node):
         new_grid: list,
         tolerance: int = 0,
         reference_grid: list | None = None,
+        human_red: bool | None = None,
     ) -> str | None:
         """
         Pick the legal move whose post-move grid best matches the observation.
@@ -1430,6 +1489,15 @@ class GameManagerNode(Node):
                         touched = both_ends
                 if touched:
                     pool = touched
+
+            if human_red is not None:
+                pool = [
+                    m
+                    for m in pool
+                    if self._move_origin_matches_human(m, ref, human_red)
+                ]
+                if not pool:
+                    return None
 
             best_move: str | None = None
             best_mismatches = 91
@@ -1463,6 +1531,13 @@ class GameManagerNode(Node):
         start_watching is published once the arm confirms it has arrived
         (or immediately if the service is unavailable, to degrade gracefully).
         """
+        if self._self_play:
+            if not watch:
+                self._human_watch_reference_grid = None
+                msg = Bool()
+                msg.data = False
+                self._start_watching_pub.publish(msg)
+            return
         if not watch:
             self._human_watch_reference_grid = None
             msg = Bool()
@@ -1494,7 +1569,10 @@ class GameManagerNode(Node):
         self._publish_start_watching()
 
     def _publish_start_watching(self) -> None:
-        if self._current_fen:
+        # Prefer the latest camera grid so inference matches vision's turn detector.
+        if self._latest_board_state is not None:
+            self._human_watch_reference_grid = list(self._latest_board_state.grid)
+        elif self._current_fen:
             self._human_watch_reference_grid = self._fen_to_grid(self._current_fen)
         msg = Bool()
         msg.data = True

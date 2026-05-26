@@ -23,17 +23,15 @@
   </header>
 
   <div id="mode-bar">
-    <div id="mode-bar-sim" class="mode-bar-sim">
+    <div id="mode-bar-toggle" class="mode-bar-toggle">
       <span class="mode-label">Mode</span>
       <div class="mode-toggle" id="mode-toggle">
-        <button type="button" id="btn-ai-vs-ai" class="mode-btn active" onclick="setMode('ai_vs_ai')">AI vs AI</button>
-        <button type="button" id="btn-ai-vs-human" class="mode-btn" onclick="setMode('ai_vs_human')">AI vs Human</button>
+        <button type="button" id="btn-ai-vs-ai" class="mode-btn" onclick="setMode('ai_vs_ai')">AI vs AI</button>
+        <button type="button" id="btn-ai-vs-human" class="mode-btn active" onclick="setMode('ai_vs_human')">AI vs Human</button>
       </div>
       <span id="mode-lock-hint" class="mode-lock-hint hidden">Locked while playing</span>
     </div>
-    <div id="hardware-play-banner" class="hardware-play-banner hidden">
-      Human vs AI - play on the physical board
-    </div>
+    <div id="hardware-mode-hint" class="hardware-play-banner hidden" aria-live="polite"></div>
 
     <div id="flow-banner" class="flow-banner" role="status" aria-live="polite">
       <span id="flow-banner-text">Choose mode and engines, then Start Game</span>

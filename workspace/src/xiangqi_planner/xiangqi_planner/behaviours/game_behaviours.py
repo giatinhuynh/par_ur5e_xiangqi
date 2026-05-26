@@ -246,9 +246,11 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             is_capture = _bb_get(self._bb, 'is_capture', False)
             if is_capture:
                 self._bb.set('capture_pick_pose', place)  # The destination has the capturable piece
-                graveyard = translator.graveyard_pose(
-                    is_red_piece=not _bb_get(self._bb, 'robot_is_red', True)
-                )
+                # Post-move FEN: if Red to move next, Black just captured a Red piece (and vice versa).
+                expected_fen = _bb_get(self._bb, 'expected_board_fen', '') or ''
+                parts = expected_fen.split()
+                captured_is_red = len(parts) > 1 and parts[1].strip().lower() == 'w'
+                graveyard = translator.graveyard_pose(is_red_piece=captured_is_red)
                 self._bb.set('graveyard_pose', graveyard)
 
             return py_trees.common.Status.SUCCESS

@@ -441,6 +441,29 @@ body {
 }
 #board-canvas.selectable { cursor: pointer; }
 
+.fen-board-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+.fen-board-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+#fen-board-canvas {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  opacity: 0.92;
+}
+
 /* Coordinate labels */
 #coord-files {
   display: flex;

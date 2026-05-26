@@ -8,7 +8,7 @@ without changing the main vision_node pipeline.
 Example (lab, with stack + camera running):
 
   ros2 run xiangqi_vision vision_preprocess_experiment --ros-args \\
-    -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v3_best.pt \\
+    -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v5_best.pt \\
     -p calibration_file:=/home/rosuser/workspace/config/board_calibration.yaml \\
     -p compare_presets:="['none','clahe','lab_default','high_contrast']"
 

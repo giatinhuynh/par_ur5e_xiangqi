@@ -285,10 +285,34 @@ function formatGameResult(result, reason) {
   return { title, detail: detail || 'Game over', css };
 }
 
+// ── FEN helpers ───────────────────────────────────────────────────
+
+const _FEN_CODES = { K:1, A:2, B:3, N:4, R:5, C:6, P:7 };
+
+function fenToGrid(fen) {
+  const grid = new Array(90).fill(0);
+  if (!fen) return grid;
+  const ranks = fen.split(' ')[0].split('/');
+  for (let ri = 0; ri < ranks.length; ri++) {
+    const boardRank = 9 - ri;
+    let fi = 0;
+    for (const ch of ranks[ri]) {
+      if (ch >= '1' && ch <= '9') { fi += parseInt(ch, 10); continue; }
+      const code = _FEN_CODES[ch.toUpperCase()] || 0;
+      if (code) grid[boardRank * 9 + fi] = ch === ch.toUpperCase() ? code : -code;
+      fi++;
+    }
+  }
+  return grid;
+}
+
 // ── Canvas ────────────────────────────────────────────────────────
 
 const canvas = document.getElementById('board-canvas');
 const ctx    = canvas.getContext('2d');
+
+const fenCanvas = document.getElementById('fen-board-canvas');
+const fenCtx    = fenCanvas.getContext('2d');
 
 // Convert board pixel → grid index
 function pixelToGridIdx(px, py) {
@@ -446,6 +470,46 @@ function drawBoard() {
   }
 }
 
+function drawFenBoard() {
+  const c = fenCtx;
+  c.clearRect(0, 0, W, H);
+
+  // Same wood background
+  const woodGrad = c.createLinearGradient(0, 0, W, H);
+  woodGrad.addColorStop(0,   '#c8822a');
+  woodGrad.addColorStop(0.5, '#d4923a');
+  woodGrad.addColorStop(1,   '#c8822a');
+  c.fillStyle = woodGrad;
+  c.fillRect(0, 0, W, H);
+
+  // Grid lines
+  c.strokeStyle = 'rgba(80,40,5,.7)';
+  c.lineWidth = 1;
+  for (let f = 0; f < COLS; f++) {
+    const x = MARGIN_X + f * CELL_W;
+    c.beginPath(); c.moveTo(x, MARGIN_Y); c.lineTo(x, H - MARGIN_Y); c.stroke();
+  }
+  for (let r = 0; r < ROWS; r++) {
+    const y = MARGIN_Y + r * CELL_H;
+    c.beginPath(); c.moveTo(MARGIN_X, y); c.lineTo(W - MARGIN_X, y); c.stroke();
+  }
+  // River
+  c.fillStyle = 'rgba(0,0,0,.08)';
+  c.fillRect(MARGIN_X, MARGIN_Y + 4 * CELL_H, W - 2 * MARGIN_X, CELL_H);
+
+  // Pieces from FEN
+  const grid = fenToGrid(state.game_fen || state.fen);
+  for (let i = 0; i < 90; i++) {
+    const code = grid[i];
+    if (code === 0) continue;
+    const isRed = code > 0;
+    const { x, y } = gridIdxToPixel(i);
+    const abs = Math.abs(code);
+    const label = PIECE_LABELS[abs] ? (isRed ? PIECE_LABELS[abs].r : PIECE_LABELS[abs].b) : '?';
+    drawPiece(c, x, y, label, isRed, false);
+  }
+}
+
 function drawPiece(ctx, x, y, label, isRed, isSelected) {
   // Outer ring (shadow)
   ctx.beginPath();
@@ -552,6 +616,7 @@ function renderAll() {
     legalDestsRequestId += 1;
   }
   drawBoard();
+  drawFenBoard();
   updateHeader();
   updateBoardLoading();
   updateModeBar();

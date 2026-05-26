@@ -92,7 +92,7 @@ class VisionNode(Node):
         super().__init__('vision_node')
 
         # --- Parameters ---
-        self.declare_parameter('model_path', '/home/rosuser/workspace/models/xiangqi_kaggle_v3_best.pt')
+        self.declare_parameter('model_path', '/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt')
         self.declare_parameter('calibration_file', '/home/rosuser/workspace/config/board_calibration.yaml')
         self.declare_parameter('require_yolo_weights', True)
         self.declare_parameter('yolo_download_url', '')
@@ -155,7 +155,7 @@ class VisionNode(Node):
         elif require_yolo:
             raise RuntimeError(
                 'require_yolo_weights is true but no weights file was found. '
-                'Install xiangqi_kaggle_v3_best.pt into workspace/models/ or share/xiangqi_vision/models/, '
+                'Install xiangqi_kaggle_v4_best.pt into workspace/models/ or share/xiangqi_vision/models/, '
                 'point model_path at your .pt, or set yolo_download_url / XIANGQI_YOLO_DOWNLOAD_URL.'
             )
         else:

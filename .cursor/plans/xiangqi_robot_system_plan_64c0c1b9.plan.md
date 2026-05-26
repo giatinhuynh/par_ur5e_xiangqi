@@ -1,12 +1,12 @@
 ---
 name: Xiangqi Robot System Plan
-overview: Complete system plan for an autonomous Xiangqi-playing UR5e cobot, covering three-tier robot software architecture in ROS 2 Humble, computer vision for board/piece recognition, Fairy-Stockfish AI integration, and MoveIt2 pick-and-place manipulation -- all mapped to the VXLab Docker+UR5e environment.
+overview: Living system plan for the autonomous Xiangqi UR5e cobot — three-tier ROS 2 Humble architecture, vision/AI/manipulation interfaces (topics, services, actions), behaviour-tree sequencing, and VXLab deployment. Updated to match the implemented codebase (May 2026).
 todos:
   - id: docker-env
     content: "Extend VXLab Docker environment: add Fairy-Stockfish build, ultralytics, pyffish to Dockerfile"
     status: completed
   - id: ros2-packages
-    content: Create all 6 ROS 2 packages (xiangqi_msgs, xiangqi_vision, xiangqi_ai, xiangqi_manipulation, xiangqi_planner, xiangqi_bringup) with skeleton nodes
+    content: Create all 7 ROS 2 packages (xiangqi_msgs, xiangqi_vision, xiangqi_ai, xiangqi_manipulation, xiangqi_planner, xiangqi_dashboard, xiangqi_bringup) with skeleton nodes
     status: completed
   - id: custom-msgs
     content: Define custom messages, services, and actions in xiangqi_msgs
@@ -58,6 +58,8 @@ isProject: false
 
 # Autonomous Xiangqi-Playing UR5e Cobot -- Full System Plan
 
+> **Runbook / setup:** see repository [`README.md`](../../README.md). **Interface source of truth:** `workspace/src/xiangqi_msgs/` and §4e below.
+
 ## 1. Lab Environment and Constraints
 
 The VXLab provides the following hardware, per [ur5evxlabdoc.md](ur5evxlabdoc.md):
@@ -74,46 +76,57 @@ All code lives inside the Docker container at `~/workspace/src/`. Build with `bu
 
 ## 2. Robot Software Architecture: Three-Tier Hierarchical
 
-The assignment requires an explicit, justified Robot Software Architecture. A **Three-Tier Architecture** (Deliberative / Sequencing / Reactive) maps cleanly to this Xiangqi task:
+The assignment requires an explicit, justified Robot Software Architecture. A **Three-Tier Architecture** (Deliberative / Sequencing / Reactive) maps cleanly to this Xiangqi task.
+
+**Important implementation notes (vs early design sketches):**
+
+- **`move_translator` is not a ROS node** — it is a Python library (`xiangqi_manipulation/move_translator.py`) used by `task_planner_node` (BT `SetupMoveCoordinates`) and loaded from the same `board_calibration.yaml` as vision.
+- **Human move detection and pyffish validation live in `game_manager_node`**, not in the behaviour tree. The BT runs **only after** an `AiMoveCommand` is published (robot move execution + verify).
+- **Hardware drivers are outside this launch file** — start VXLab `arm_drivers` and `moveit_config_driver` before `xiangqi_system.launch.py`.
 
 ```mermaid
 graph TB
-  subgraph deliberative [Tier 3 -- Deliberative Layer]
-    GameManager["Game Manager Node"]
-    AIEngine["AI Engine Node<br/>Fairy-Stockfish OR Minimax"]
+  subgraph deliberative [Tier 3 Deliberative]
+    GameManager["game_manager_node<br/>FEN, human inference, dispatch"]
+    AIEngine["ai_engine_node<br/>Fairy-Stockfish or minimax"]
   end
 
-  subgraph sequencing [Tier 2 -- Sequencing Layer]
-    TaskPlanner["Task Planner Node<br/>Behavior Tree via py_trees_ros"]
-    MoveTranslator["Move Translator Node"]
+  subgraph sequencing [Tier 2 Sequencing]
+    TaskPlanner["task_planner_node<br/>py_trees BT @ 10 Hz"]
+    MoveTranslator["move_translator.py<br/>grid to poses / graveyard"]
   end
 
-  subgraph reactive [Tier 1 -- Reactive Layer]
-    VisionNode["Vision Node<br/>Board Perception + Turn Detection"]
-    ManipNode["Manipulation Node<br/>MoveIt2 Pick-Place"]
-    GripperNode["Gripper Controller Node"]
-    SafetyNode["Safety Monitor Node"]
+  subgraph reactive [Tier 1 Reactive]
+    VisionNode["vision_node"]
+    ManipNode["manipulation_node"]
+    GripperNode["gripper_controller_node"]
+    SafetyNode["safety_monitor_node"]
   end
 
-  subgraph crosscutting [Cross-Cutting]
-    Dashboard["Web Dashboard<br/>Flask + WebSocket"]
+  subgraph crosscutting [Cross-cutting]
+    Dashboard["dashboard_node<br/>Flask :5000 + SocketIO"]
   end
 
-  GameManager -->|"best_move"| TaskPlanner
-  AIEngine -->|"engine_response"| GameManager
-  GameManager -->|"position_fen"| AIEngine
-  TaskPlanner -->|"pick_place_goal"| ManipNode
-  TaskPlanner -->|"gripper_cmd"| GripperNode
-  VisionNode -->|"board_state"| GameManager
-  VisionNode -->|"human_move_detected"| GameManager
-  TaskPlanner -->|"request_scan"| VisionNode
-  MoveTranslator -->|"world_coords"| TaskPlanner
-  SafetyNode -.->|"e_stop"| ManipNode
-  GameManager -.->|"all topics"| Dashboard
-  VisionNode -.->|"all topics"| Dashboard
+  GameManager -->|"AiMoveCommand"| TaskPlanner
+  TaskPlanner -->|"AiCommandAck"| GameManager
+  TaskPlanner -->|"AiExecutionResult"| GameManager
+  GameManager -->|"Trigger move_to_scan_pose"| ManipNode
+  GameManager -->|"start_watching"| VisionNode
+  AIEngine -->|"GetBestMove srv"| GameManager
+  GameManager -->|"FEN in GetBestMove req"| AIEngine
+  VisionNode -->|"BoardState, human_move_detected"| GameManager
+  TaskPlanner -->|"PickAndPlace action"| ManipNode
+  TaskPlanner -->|"get_board_state srv"| VisionNode
+  TaskPlanner --> MoveTranslator
+  SafetyNode -->|"/xiangqi/estop"| TaskPlanner
+  SafetyNode -.->|"/xiangqi/estop"| GameManager
+  GameManager -.->|"GameStatus, MoveHistory"| Dashboard
+  VisionNode -.->|"board_state, debug_image"| Dashboard
 ```
 
-**Justification (for report):** The three-tier architecture separates concerns cleanly: the Deliberative layer handles game intelligence (no real-time constraints), the Sequencing layer orchestrates multi-step pick-and-place sequences, and the Reactive layer provides fast sensor-motor loops. This is superior to SPA (which lacks planning) or pure Subsumption (which cannot handle the complex deliberation needed for chess AI).
+**Justification (for report):** The three-tier architecture separates concerns cleanly: the Deliberative layer holds authoritative game state and AI (no hard real-time constraints), the Sequencing layer runs a behaviour tree for multi-step motion with capture and verification, and the Reactive layer performs perception and actuator commands. This is superior to SPA (which lacks explicit task structure) or pure Subsumption (which cannot host chess-scale deliberation).
+
+**Launched by `xiangqi_system.launch.py`:** `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`.
 
 ---
 
@@ -123,34 +136,177 @@ All packages go under `~/workspace/src/` inside the Docker container.
 
 ```
 workspace/src/
-  xiangqi_bringup/         # Launch files, system-level config
-  xiangqi_msgs/            # Custom message/service/action definitions
-  xiangqi_vision/          # Board detection, piece recognition, board state, turn detection
-  xiangqi_ai/              # Fairy-Stockfish wrapper, custom minimax engine, game logic
-  xiangqi_manipulation/    # MoveIt2 pick-place, coord transforms, gripper
-  xiangqi_planner/         # Task planner Behavior Tree, move sequencing
-  xiangqi_dashboard/       # Flask web dashboard for monitoring, debugging, demo
+  xiangqi_bringup/         # Launch files, config YAML (vision, game, manipulation, planner)
+  xiangqi_msgs/            # Custom messages, services, actions (see §4)
+  xiangqi_vision/          # vision_node, calibration_tool, YOLO + ArUco pipeline
+  xiangqi_ai/              # game_manager_node, ai_engine_node, minimax + FSF wrapper
+  xiangqi_manipulation/    # manipulation_node, gripper_controller_node, safety_monitor_node, move_translator
+  xiangqi_planner/         # task_planner_node + py_trees behaviours
+  xiangqi_dashboard/       # dashboard_node (Flask + SocketIO bridge)
 ```
+
+Runtime calibration output (not in git): `workspace/config/board_calibration.yaml` after `calibration_tool`.
 
 ---
 
-## 4. Custom Messages and Services (`xiangqi_msgs`)
+## 4. Custom interfaces (`xiangqi_msgs`)
 
+Authoritative field definitions are in `workspace/src/xiangqi_msgs/`. Summary:
+
+### 4a. Messages
+
+| Message | Purpose |
+|---------|---------|
+| `BoardState` | `int8[90]` grid (rank×9+file; ±1…±7 piece types), optional `fen`, `last_move`, `is_red_turn`, mean YOLO confidence |
+| `GameStatus` | FSM string (`idle`, `waiting_human`, `detecting_move`, `computing_ai`, `executing_move`, `game_over`), `current_fen`, `engine_type`, `game_result` / `game_result_reason` |
+| `MoveHistory` | One log line: UCI-style move, side, engine metadata (depth, cp, time) |
+| `EngineInfo` | Live AI telemetry for dashboard (engine name, depth, eval, ponder) |
+| `PieceDetection` | Single detection record (optional per-piece telemetry) |
+| `AiMoveCommand` | **`dispatch_id`**, **`move`**, **`is_capture`**, **`expected_fen`** — atomic robot dispatch from game manager to planner |
+| `AiCommandAck` | Planner ACK/NACK: **`dispatch_id`**, **`accepted`**, **`reason`** |
+| `AiExecutionResult` | Planner result: **`dispatch_id`**, **`status`** (`ROBOT_MOVE_COMPLETE` \| `BOARD_VERIFY_FAILED` \| `AI_MOTION_FAILED`), **`message`** |
+
+### 4b. Services
+
+| Service | Server node | Purpose |
+|---------|-------------|---------|
+| `GetBoardState` | `vision_node` (`get_board_state`) | On-demand snapshot; `force_rescan` bypasses cache |
+| `GetBestMove` | `ai_engine_node` (`get_best_move`) | FEN + depth/time + optional `engine_type` → UCI move + search stats |
+| `SetEngine` | `ai_engine_node` (`set_engine`) | Runtime switch `fairystockfish` \| `minimax` + difficulty |
+| `GripperControl` | `gripper_controller_node` (`/xiangqi/gripper_control`) | Target width/force (mm, N) → RG2 via lab driver |
+
+**Standard services (not in `xiangqi_msgs`):**
+
+| Service | Server | Purpose |
+|---------|--------|---------|
+| `std_srvs/Trigger` | `manipulation_node` | `/xiangqi/move_to_scan_pose`, `/xiangqi/move_to_initial_pose` |
+
+### 4c. Actions
+
+| Action | Server | Purpose |
+|--------|--------|---------|
+| `xiangqi_msgs/PickAndPlace` | `manipulation_node` (`/xiangqi/pick_and_place`) | **Primary motion primitive** — pick/place poses in `base_link`, approach/transit heights; feedback `phase` string |
+| `xiangqi_msgs/ExecuteMove` | *(defined, not used in live BT)* | Higher-level move string; stack uses `PickAndPlace` + `AiMoveCommand` instead |
+
+### 4d. Lab / UR5e_Env interfaces (external to `xiangqi_msgs`)
+
+Used by `manipulation_node` on hardware (from `par_interfaces` / `onrobot_rg2_msgs`):
+
+| Interface | Type | Name | Role |
+|-----------|------|------|------|
+| Move group OMPL | action | `/move_action` (param `move_group_action`) | Joint-space transit / homing |
+| Cartesian waypoint | action | `/par_moveit/waypoint_move` | Vertical descend/lift over pieces |
+| RG2 width | action | `/rg2/set_width` | Grasp / release (also called inside `manipulation_node`; `gripper_controller_node` exposes `GripperControl` for other callers) |
+| UR safety | topic | `/ur_hardware_interface/safety_mode` | Protective stop input to `safety_monitor_node` |
+
+---
+
+## 4e. ROS 2 topic and service catalog (as implemented)
+
+Unless noted, topics are under the `/xiangqi/` namespace. Service names without a leading `/ are resolved on the node that advertises them (`vision_node`, `ai_engine_node`).
+
+### Topics — publish / subscribe matrix
+
+| Topic | Type | Publisher | Main subscribers |
+|-------|------|-----------|------------------|
+| `/xiangqi/board_state` | `BoardState` | `vision_node`, `game_manager_node` (logical/sim) | `game_manager_node`, `dashboard_node` |
+| `/xiangqi/human_move_detected` | `Bool` | `vision_node` | `game_manager_node`, `task_planner_node` (blackboard hint) |
+| `/xiangqi/start_watching` | `Bool` | `game_manager_node` | `vision_node` |
+| `/xiangqi/human_ready` | `Empty` | `dashboard_node` | `vision_node`, `game_manager_node` |
+| `/xiangqi/game_status` | `GameStatus` | `game_manager_node` | `dashboard_node`, `task_planner_node` |
+| `/xiangqi/move_history` | `MoveHistory` | `game_manager_node` | `dashboard_node` |
+| `/xiangqi/engine_info` | `EngineInfo` | `ai_engine_node` | `dashboard_node` |
+| `/xiangqi/ai_move_command` | `AiMoveCommand` | `game_manager_node` | `task_planner_node` |
+| `/xiangqi/ai_command_ack` | `AiCommandAck` | `task_planner_node` | `game_manager_node` |
+| `/xiangqi/ai_execution_result` | `AiExecutionResult` | `task_planner_node` | `game_manager_node` |
+| `/xiangqi/illegal_move_alert` | `String` | `game_manager_node`, BT behaviours | `dashboard_node` |
+| `/xiangqi/estop` | `Bool` | `safety_monitor_node` | `game_manager_node`, `task_planner_node` |
+| `/xiangqi/emergency_stop` | `Bool` | `dashboard_node` | `safety_monitor_node` |
+| `/xiangqi/safety_status` | `String` | `safety_monitor_node` | `dashboard_node` |
+| `/xiangqi/gripper_active` | `Bool` | `gripper_controller_node` | `dashboard_node` |
+| `/xiangqi/debug_image` | `sensor_msgs/Image` | `vision_node` | RViz / debug |
+| `/xiangqi/new_game` | `Empty` | `dashboard_node` | `game_manager_node` |
+| `/xiangqi/stop_game` | `Empty` | `dashboard_node` | `game_manager_node` |
+| `/xiangqi/reset_game` | `Empty` | `dashboard_node` | `game_manager_node` |
+| `/xiangqi/game_mode` | `String` | `dashboard_node` | `game_manager_node` (`ai_vs_ai` \| `ai_vs_human`) |
+| `/xiangqi/ai_engines` | `String` | `dashboard_node` | `game_manager_node` (JSON: red/black engine) |
+| `/xiangqi/human_color` | `String` | `dashboard_node` | `game_manager_node` (`red` \| `black`) |
+| `/xiangqi/simulate_human_move` | `String` | `dashboard_node` | `game_manager_node` (sim AI vs human clicks) |
+| `/xiangqi/resync_from_vision` | `Empty` | `dashboard_node` | `game_manager_node` (Sync board) |
+
+**Camera input (parameterised, default in `vision_config.yaml`):** subscribe `vision_node` → `/camera/camera/color/image_raw` (RealSense; lab topic name).
+
+### Services and actions — by node
+
+| Node | Provides | Calls |
+|------|----------|-------|
+| `vision_node` | `get_board_state` (`GetBoardState`) | — |
+| `ai_engine_node` | `get_best_move`, `set_engine` | — |
+| `game_manager_node` | — | `get_best_move`, `get_board_state`, `/xiangqi/move_to_scan_pose` |
+| `task_planner_node` | — | `get_board_state`, `/xiangqi/move_to_scan_pose`, `/xiangqi/pick_and_place` (via BT) |
+| `manipulation_node` | `/xiangqi/pick_and_place`, `/xiangqi/move_to_scan_pose`, `/xiangqi/move_to_initial_pose` | `/move_action`, `/par_moveit/waypoint_move`, `/rg2/set_width` |
+| `gripper_controller_node` | `/xiangqi/gripper_control` | `/rg2/set_width` |
+| `safety_monitor_node` | — | subscribes UR safety + `/xiangqi/emergency_stop` |
+| `dashboard_node` | HTTP `:5000` + SocketIO | `set_engine` client; publishes control topics above |
+
+### End-to-end message flow (one robot move)
+
+```mermaid
+sequenceDiagram
+  participant GM as game_manager
+  participant AI as ai_engine
+  participant TP as task_planner BT
+  participant MN as manipulation
+  participant VN as vision
+
+  GM->>AI: GetBestMove(fen)
+  AI-->>GM: best_move, eval
+  GM->>TP: AiMoveCommand(dispatch_id, move, is_capture, expected_fen)
+  TP-->>GM: AiCommandAck(accepted)
+  GM->>MN: Trigger move_to_scan_pose (before human watch / optional)
+  TP->>MN: PickAndPlace (capture to graveyard if is_capture)
+  TP->>MN: PickAndPlace (main move)
+  TP->>MN: Trigger move_to_scan_pose
+  TP->>VN: GetBoardState(force_rescan)
+  VN-->>TP: grid vs expected_fen
+  TP-->>GM: AiExecutionResult(ROBOT_MOVE_COMPLETE or BOARD_VERIFY_FAILED)
+  GM->>GM: apply pending FEN, publish GameStatus
+  GM->>VN: start_watching true
 ```
-msg/
-  BoardState.msg           # int8[90] grid, string fen, string last_move
-  PieceDetection.msg       # string piece_type, float64 x, float64 y, float64 confidence
-  GameStatus.msg           # string status (playing/red_wins/black_wins/draw), bool is_red_turn
 
-srv/
-  GetBoardState.srv        # {} -> BoardState
-  GetBestMove.srv          # string fen, int32 depth -> string best_move, string ponder
-  PickAndPlace.srv         # geometry_msgs/Pose pick, geometry_msgs/Pose place -> bool success
-  GripperControl.srv       # bool activate -> bool success
+### End-to-end flow (human turn, hardware)
 
-action/
-  ExecuteMove.action       # string move (e.g. "b0c2") -> bool success | string feedback
+```mermaid
+sequenceDiagram
+  participant Human
+  participant VN as vision
+  participant GM as game_manager
+  participant DB as dashboard
+
+  GM->>VN: start_watching + scan pose
+  alt Vision stability OK
+    VN->>GM: human_move_detected true
+  else Demo fallback (common today)
+    Human->>DB: Confirm move
+    DB->>GM: human_ready Empty
+  end
+  GM->>VN: GetBoardState(force_rescan)
+  GM->>GM: _infer_move_from_board (pyffish legal_moves)
+  GM->>GM: apply human move, compute AI
 ```
+
+### `game_manager_node` FSM (internal `GameState`)
+
+| State | Meaning |
+|-------|---------|
+| `IDLE` | No active game |
+| `WAITING_HUMAN` | Human / opponent turn; vision watching or awaiting Confirm |
+| `DETECTING_MOVE` | Rescan + infer human move from grid |
+| `COMPUTING_AI` | Async `GetBestMove` in flight |
+| `EXECUTING_MOVE` | `AiMoveCommand` dispatched; waiting for `AiExecutionResult` matching `dispatch_id` |
+| `GAME_OVER` | Terminal |
+
+Published `GameStatus.status` strings align with these (see `GameStatus.msg`).
 
 ---
 
@@ -166,10 +322,8 @@ action/
 
 Following the approach validated by the Star-Robot chinese-chess-robot paper (YOLOv7-tiny achieved 99.3% mAP@0.75 on 888 images across 3 board types), we use the newer YOLOv8n architecture:
 
-- Start from an existing Roboflow Xiangqi dataset (200+ annotated images, 15 classes: 7 red pieces + 7 black pieces + empty intersection).
-- Capture ~50-100 additional images from the lab RealSense camera with your actual pieces and custom-printed board mat under lab lighting conditions.
-- Annotate the lab images (Roboflow web annotator) and merge with the existing dataset.
-- Fine-tune YOLOv8n (nano) on the combined dataset. This adapts the model to your specific pieces, board, and lighting while leveraging the existing labeled data.
+- Start from an existing online/Roboflow Xiangqi dataset; merge with **~200 lab-captured images** (own pieces + mat), **~1200 images total** after labeling.
+- Fine-tune **YOLOv8** on the combined dataset (weights such as `xiangqi_kaggle_v1_best.pt`, `v2`, or lab-deployed `v3` per `vision_config.yaml`).
 - Map detected bounding-box centers through the homography to get grid coordinates (file, rank).
 - Expected performance: 99%+ mAP@0.75 based on the Star-Robot baseline with a comparable approach.
 
@@ -194,22 +348,30 @@ The robot must know when the human has finished their move without requiring man
 6. If the board keeps changing (hand still moving), reset the stability counter.
 7. Once stable, pass the new board state to the Game Manager for move validation.
 
-**Fallback: Keyboard trigger**
-- A ROS topic `/xiangqi/human_ready` (std_msgs/Empty) can be published via a simple keyboard node.
-- If the vision stability detection gets stuck (e.g., lighting change causes false positives), the human can press a key to force a board scan.
-- This is a safety net for the demo, not the primary mechanism.
+**Fallback: Dashboard Confirm move**
+- Topic `/xiangqi/human_ready` (`std_msgs/Empty`) — published by the dashboard **Confirm move** button (and usable from CLI).
+- `game_manager_node` also subscribes to `human_ready` and forces a fresh `GetBoardState` + pyffish move inference.
+- In current lab testing, **Confirm move is the reliable path** when YOLO grids are unstable; auto stability detection remains implemented for future tuning.
 
 **Hand presence detection (optional enhancement)**
 - Before running the stability check, optionally detect whether a hand/arm is present in the frame using a simple skin-color HSV mask or a lightweight hand detector.
 - Only begin move detection when no hand is detected in the board region.
 
 ### 5e. ROS Node: `vision_node`
-- Subscribes to `/camera/color/image_raw` (RealSense RGB topic)
-- Publishes `BoardState` on `/xiangqi/board_state`
-- Publishes `Bool` on `/xiangqi/human_move_detected` (triggers when stable change found)
-- Provides service `GetBoardState`
-- Subscribes to `/xiangqi/human_ready` (keyboard fallback trigger)
-- Parameters: `homography_matrix`, `model_path`, `confidence_threshold`, `board_to_base_tf`, `stability_frames: 8`, `poll_rate_hz: 3.0`
+
+| Direction | Name | Type |
+|-----------|------|------|
+| Sub | `camera_topic` (param, default `/camera/camera/color/image_raw`) | `sensor_msgs/Image` |
+| Sub | `/xiangqi/human_ready` | `std_msgs/Empty` |
+| Sub | `/xiangqi/start_watching` | `std_msgs/Bool` |
+| Pub | `/xiangqi/board_state` | `xiangqi_msgs/BoardState` |
+| Pub | `/xiangqi/human_move_detected` | `std_msgs/Bool` |
+| Pub | `/xiangqi/debug_image` | `sensor_msgs/Image` |
+| Srv | `get_board_state` | `xiangqi_msgs/GetBoardState` |
+
+**Parameters (see `vision_config.yaml`):** `model_path`, `calibration_file`, `confidence_threshold`, `stability_frames` (default 5), `poll_rate_hz` (default 4.0), optional piece preprocess preset.
+
+**Auxiliary:** `calibration_tool` (CLI teach-in → `board_calibration.yaml`); optional `vision_preprocess_experiment` node for tuning lighting.
 
 ---
 
@@ -217,20 +379,19 @@ The robot must know when the human has finished their move without requiring man
 
 A Flask-based web dashboard running on the dev box, accessible from any browser (including a tablet next to the board for the demo).
 
-### 6a. Features
+### 6a. Features (implemented)
 
-- **Live board visualization**: Render the 9x10 Xiangqi grid with piece positions using SVG or HTML canvas. Updates in real-time via WebSocket as `BoardState` messages arrive.
-- **Move history panel**: Scrollable list of all moves in algebraic notation (e.g., "R: h0-h4, B: b9-c7") with timestamps.
-- **AI analysis panel**: Shows current engine evaluation (centipawn score), search depth, thinking time, and the selected engine type (Fairy-Stockfish vs. minimax).
-- **System status panel**: Node health indicators (green/red), last detection confidence scores per piece, camera feed thumbnail, gripper state.
-- **Game controls**: New game button, engine selector dropdown, difficulty slider, emergency stop button.
-- **Debug mode**: Toggle to show raw detection overlay (bounding boxes on camera image), homography grid, and BT execution state.
+- **Live board** (HTML canvas): sim uses logical FEN; hardware uses vision grid with **glitch hold filter** before display updates.
+- **Modes:** AI vs AI, AI vs Human; per-side engine (`fairystockfish` \| `minimax`); human color Red/Black; Stockfish difficulty slider.
+- **Move history**, **engine eval bar** (`EngineInfo`), **phase chip**, game result banner.
+- **Hardware:** Confirm move, Sync board (`/xiangqi/resync_from_vision`), physical-play banner; sim-only board clicks + `/api/legal_moves` highlights.
+- **E-stop** → `/xiangqi/emergency_stop`; illegal/error toasts via `/xiangqi/illegal_move_alert`.
 
 ### 6b. Architecture
 
-- A ROS 2 node (`dashboard_node`) subscribes to key topics (`/xiangqi/board_state`, `/xiangqi/game_status`, `/xiangqi/move_history`) and bridges them to the Flask app via a shared state or `rclpy` spinning in a background thread.
-- Flask serves static HTML/JS/CSS. WebSocket (via `flask-socketio`) pushes real-time updates to the browser.
-- Runs on port 5000, accessible at `http://<dev_box_ip>:5000`.
+- `dashboard_node` bridges ROS ↔ Flask (`flask-socketio` on **port 5000**).
+- **HTTP API examples:** `POST /api/human_ready`, `/api/sync_board`, `/api/set_engines`, `/api/legal_moves` (sim AI vs human only), `/api/simulate_move` (sim only).
+- Publishes game control topics listed in §4e; subscribes `board_state`, `game_status`, `move_history`, `engine_info`, alerts.
 
 ### 6c. Value for demo and report
 
@@ -244,7 +405,7 @@ A Flask-based web dashboard running on the dev box, accessible from any browser 
 
 The "multiple algorithm" UG requirement is fulfilled here: a custom-built minimax engine vs. the professional-grade Fairy-Stockfish, both exposed through the same `GetBestMove.srv` interface. This allows a direct, meaningful comparison in the report.
 
-### 6a. Fairy-Stockfish Integration (primary, production engine)
+### 7a. Fairy-Stockfish Integration (primary, production engine)
 
 - Download and compile Fairy-Stockfish binary inside the Docker image (add to Dockerfile).
 - Wrap the engine in a Python ROS 2 node that communicates via subprocess using **UCI protocol**:
@@ -261,10 +422,10 @@ engine.stdin.write(f"go depth {depth}\n")
 # ... parse "bestmove XXXX" from stdout
 ```
 
-- Optionally download the Xiangqi NNUE weights for stronger play.
-- Expose as ROS service: `GetBestMove.srv`
+- **NNUE:** Fairy-Stockfish is NNUE-capable; set `XIANGQI_NNUE_PATH` to a `.nnue` file to load `EvalFile` (optional bake-in in `Dockerfile` is commented out). Dashboard minimax eval can use a **shallow FSF search** for display cp (`minimax_nnue_display_eval` in `game_config.yaml`) — not full MCTS.
+- Expose as ROS service: `get_best_move` (`GetBestMove.srv`); runtime switch via `set_engine` (`SetEngine.srv`).
 
-### 6b. Custom Minimax Engine (second algorithm, original implementation)
+### 7b. Custom Minimax Engine (second algorithm, original implementation)
 
 A from-scratch Xiangqi AI engine demonstrating core game-tree search:
 
@@ -279,7 +440,7 @@ A from-scratch Xiangqi AI engine demonstrating core game-tree search:
 - **Legal move generation**: Use `pyffish` for correct move generation (avoids reimplementing complex Xiangqi rules like flying general, river crossing, palace confinement).
 - Exposed through the same `GetBestMove.srv` interface, swappable via a ROS parameter `engine_type: "fairystockfish" | "minimax"`.
 
-### 6c. Comparative Analysis (for report)
+### 7c. Comparative Analysis (for report)
 
 This comparison yields rich experimental data:
 - **Move quality**: Play the two engines against each other over N games; measure win/loss/draw ratio.
@@ -287,118 +448,113 @@ This comparison yields rich experimental data:
 - **Move agreement**: Given the same position, how often do both engines choose the same move? Measures how close the custom engine gets to professional-grade play.
 - **Positional understanding**: Present specific board positions where the custom engine fails (e.g., complex sacrifices, long-term positional play) to discuss fundamental limitations of static evaluation vs. NNUE.
 
-### 6d. Game Manager Node (`game_manager_node`)
+### 7d. Game Manager Node (`game_manager_node`)
 
-Central orchestrator in the Deliberative layer:
-- Maintains authoritative game state as a FEN string.
-- Uses `pyffish` library for legal move validation, game-over detection, FEN updates.
-- State machine: `WAIT_HUMAN_MOVE -> DETECT_HUMAN_MOVE -> VALIDATE -> COMPUTE_AI_MOVE -> EXECUTE_AI_MOVE -> WAIT_HUMAN_MOVE`
-- Publishes `GameStatus` on `/xiangqi/game_status`
-- ROS parameter `engine_type` selects which AI engine to use
+Central orchestrator in the Deliberative layer (see §4e for full I/O):
+
+- Authoritative **FEN** + move history; **pyffish** for legality, game-over, human move inference (`_infer_move_from_board`).
+- **Does not** send motion goals directly — publishes **`AiMoveCommand`** and waits for **`AiExecutionResult`** with matching **`dispatch_id`**.
+- Hardware new game: startup **`GetBoardState`** scan (repair incomplete FEN rather than always `STARTING_FEN`).
+- Parameters: `engine_type`, `self_play`, `simulation_mode`, `human_move_grid_tolerance`, `trust_robot_move_after_verify_fail`, per-side engines from dashboard.
 
 ---
 
-## 7. Task Planner (`xiangqi_planner`) -- Behavior Tree
+## 8. Task Planner (`xiangqi_planner`) — Behaviour Tree
 
-Uses `py_trees` / `py_trees_ros` for modular, recoverable move execution.
+Uses **`py_trees`** (not a separate `py_trees_ros` action module in all behaviours). The tree **ticks at 10 Hz** only when blackboard `ai_move` is set (after `AiMoveCommand` ACK).
 
-### 7a. Behavior Tree Structure
+### 8a. Behaviour tree structure (as implemented)
 
 ```
 Root (Sequence)
-  ├── WaitForHumanMove (subscriber-based condition)
-  ├── DetectHumanMove (service call to vision)
-  ├── ValidateHumanMove (pyffish check via game_manager)
-  │    └── Fallback: IllegalMoveAlert -> re-scan
-  ├── ComputeAIMove (service call to AI engine)
-  ├── ExecuteAIMove (Sequence)
-  │    ├── Selector: IsCaptureMove?
-  │    │    ├── Yes -> CaptureSubtree (Sequence)
-  │    │    │    ├── PickCapturedPiece (from destination)
-  │    │    │    └── PlaceInGraveyard
-  │    │    └── No -> Skip
-  │    ├── PickAIPiece (from source square)
-  │    ├── PlaceAIPiece (at destination square)
-  │    └── Fallback: VerifyBoardState
-  │         ├── VisionScan matches expected -> Success
-  │         └── Retry (re-scan up to 3x) -> AlertOperator
-  └── UpdateGameState
+  └── NotEstopped (Inverter of IsEstopActive)
+        └── Selector MotionOrAbortReport
+              ├── Sequence MoveSequence (memory)
+              │     ├── SetupMoveCoordinates  (move_translator → blackboard poses)
+              │     ├── CaptureOrSkip (Selector)
+              │     │     ├── NotACapture → skip
+              │     │     └── CaptureSequence → PlaceInGraveyard (PickAndPlace)
+              │     ├── ExecuteMove → PickAIPiece (PickAndPlace)
+              │     ├── ScanPoseBestEffort → GoToScanPose (Trigger srv, FailureIsSuccess)
+              │     ├── VerifyBestEffort → Retry(VerifyBoardState ×5, FailureIsSuccess)
+              │     └── FinalizeRobotMoveAfterVerify → AiExecutionResult
+              └── AiMotionFailureFinalizer → AiExecutionResult AI_MOTION_FAILED
 ```
 
-Each leaf node (PickPiece, PlacePiece, etc.) is a `py_trees_ros` action client that calls into the manipulation layer. Fallback nodes handle retry logic naturally -- e.g., if a pick fails, the BT retries before escalating.
+**Not in the BT:** human turn, AI search, FEN commits — all in `game_manager_node`.
 
-### 7b. Why Behavior Tree over FSM
+### 8b. Why Behaviour Tree over a monolithic FSM
 
-- **Natural retry/fallback**: Fallback composites handle failure gracefully without spaghetti transitions.
-- **Modular**: Each subtree (capture, simple move, verify) is reusable and independently testable.
-- **Readable**: The tree structure maps directly to the task description, making it easy to explain in the report.
-- **Extensible**: Adding new behaviors (e.g., "offer draw", "undo move") is just appending subtrees.
+- Retry/fallback on verify and best-effort scan pose without blocking deliberative logic.
+- Capture subtree isolated from main pick-place.
+- Clear mapping to demo narrative (capture → move → scan → verify).
 
-### 7b. Coordinate Translation (`move_translator`)
+### 8c. Coordinate translation (`move_translator`)
 
-- Converts algebraic Xiangqi coordinates (file 0-8, rank 0-9) to world-frame (x, y, z) poses using the calibrated `board_to_base_tf`.
-- Adds appropriate z-offsets for: approach height, grasp height, transit height.
-- Publishes pick and place poses as `geometry_msgs/PoseStamped`.
+- Library (not a node): UCI move string → `pick_pose` / `place_pose` in `base_link`.
+- **Joint teach-in:** corner (+ optional E-file and rank midpoints) approach joints → bilinear / multi-patch interpolation; graveyard joint configs per side.
+- Homography + `board_to_base_tf` from `calibration_tool` (ArUco).
 
 ---
 
-## 8. Manipulation (`xiangqi_manipulation`)
+## 9. Manipulation (`xiangqi_manipulation`)
 
-### 8a. MoveIt2 Integration
+### 9a. Motion stack (hardware)
 
-- Use the existing `moveit_config_driver` from the lab Docker environment.
-- Create a MoveIt2 action client node that accepts `PickAndPlace` goals.
-- Motion sequence for each pick-and-place:
-  1. Move to approach pose (above pick position, +Z offset ~80mm)
-  2. Descend to grasp pose (piece surface height)
-  3. Close RG2 to grasp piece
-  4. Ascend to transit height
-  5. Move to approach pose above place position
-  6. Descend to place pose
-  7. Open RG2 to release piece
-  8. Ascend to safe transit height
+Requires VXLab **`moveit_config_driver`** + **`arm_drivers`** running first.
 
-### 8b. Gripper Control
+| Phase | Backend |
+|-------|---------|
+| Homing / large transit | OMPL **`/move_action`** (joint targets from calibration) |
+| Vertical pick/place | Cartesian **`/par_moveit/waypoint_move`** when available |
+| Gripper | **`/rg2/set_width`** (`GripperSetWidth`) inside `manipulation_node` |
 
-The VXLab UR5e uses an OnRobot RG2 two-finger gripper via the EyeBox (IP 10.234.6.47). Based on the existing lab setup:
-- Control via Modbus TCP (`onrobot_rg2_driver`: set width / force actions).
-- ROS service wrapper: `GripperControl.srv` with `activate: bool`.
-- Alternatively, if the EyeBox has a REST/TCP API, wrap that instead.
+**Action server:** `/xiangqi/pick_and_place` (`xiangqi_msgs/PickAndPlace`) — 8-step sequence with feedback `phase` strings.
 
-### 8c. Safety Monitor
+**Triggers:** `/xiangqi/move_to_scan_pose`, `/xiangqi/move_to_initial_pose` (`std_srvs/Trigger`).
 
-- Monitor force/torque sensor on UR5e for unexpected contacts.
-- Subscribe to UR robot state topics for protective stops.
-- Enforce workspace boundaries (rectangular region around the board + graveyard).
+### 9b. `gripper_controller_node`
+
+- Service **`/xiangqi/gripper_control`** (`GripperControl`: width mm, force N).
+- Publishes **`/xiangqi/gripper_active`** for dashboard.
+- BT pick-place uses `manipulation_node`’s RG2 client directly; this node is an alternate/ thin API.
+
+### 9c. `safety_monitor_node`
+
+- Subscribes **`/xiangqi/emergency_stop`** (dashboard) and **`/ur_hardware_interface/safety_mode`**.
+- Publishes **`/xiangqi/estop`** and **`/xiangqi/safety_status`** (latched OR of dashboard + UR stop).
 
 ---
 
-## 9. Launch and Bringup (`xiangqi_bringup`)
+## 10. Launch and Bringup (`xiangqi_bringup`)
 
-### Main launch file `xiangqi_system.launch.py`:
+### Prerequisites (VXLab — **not** started by Xiangqi launch)
 
-```
-arm_drivers                    # UR5e + gripper + camera (existing alias)
-moveit_config_driver           # MoveIt2 (existing alias)
-vision_node                    # xiangqi_vision (detection + turn monitoring)
-game_manager_node              # xiangqi_ai
-ai_engine_node                 # xiangqi_ai (Fairy-Stockfish or minimax, via param)
-task_planner_node              # xiangqi_planner (Behavior Tree)
-manipulation_node              # xiangqi_manipulation
-gripper_controller_node        # xiangqi_manipulation
-safety_monitor_node            # xiangqi_manipulation
-dashboard_node                 # xiangqi_dashboard (Flask web UI on port 5000)
+```bash
+arm_drivers              # UR5e + RG2 + RealSense
+moveit_config_driver     # MoveIt / move_action + waypoint_move
 ```
 
-Config files in `config/`:
-- `board_calibration.yaml` -- homography, board-to-base transform, grid dimensions
-- `game_config.yaml` -- AI difficulty, engine type, time limits, graveyard coordinates
-- `manipulation_config.yaml` -- z-offsets, speed scaling, waypoint heights
-- `vision_config.yaml` -- stability frames, poll rate, confidence threshold, model path
+### `xiangqi_system.launch.py` (starts Xiangqi stack only)
+
+```
+vision_node
+manipulation_node
+gripper_controller_node
+safety_monitor_node
+task_planner_node
+ai_engine_node
+game_manager_node
+dashboard_node          # http://<host>:5000
+```
+
+**Sim:** `xiangqi_sim.launch.py` → `simulation_mode:=true`, optional `vision_config_sim.yaml`.
+
+**Config** (`xiangqi_bringup/config/`): `vision_config.yaml`, `game_config.yaml`, `manipulation_config.yaml`, `planner_config.yaml`, `robot_side.yaml`; runtime **`workspace/config/board_calibration.yaml`**.
 
 ---
 
-## 10. Physical Setup
+## 11. Physical Setup
 
 - **Xiangqi board**: Print a custom board mat (A2 or A3 size) with four ArUco markers at the outer corners for automatic calibration. Design the board digitally (e.g., Inkscape/Illustrator) with precise grid spacing ~40-50mm per intersection, standard Xiangqi line markings (river, palace diagonals), and the ArUco markers embedded into the corner margins. Print on thick card stock or laminate for durability. This gives full control over grid dimensions and marker placement.
 - **Pieces**: Standard round Xiangqi pieces (~30–40 mm diameter). Cylindrical sides are ideal for RG2 side grasps; flat tops help vision.
@@ -408,7 +564,7 @@ Config files in `config/`:
 
 ---
 
-## 11. Development Phases and Timeline
+## 12. Development Phases and Timeline
 
 ### Phase 1: Infrastructure (Week 1-2) -- UG focus
 - Fork/extend the Docker environment from `Kibibibit/UR5e_Env`
@@ -450,7 +606,7 @@ Config files in `config/`:
 
 ---
 
-## 12. Key "Original Implementation" Elements (for rubric)
+## 13. Key "Original Implementation" Elements (for rubric)
 
 These are not off-the-shelf and demonstrate original work:
 
@@ -462,7 +618,7 @@ These are not off-the-shelf and demonstrate original work:
 
 ---
 
-## 13. Extended UG Work (for rubric section 3.1 / 3.2)
+## 14. Extended UG Work (for rubric section 3.1 / 3.2)
 
 - **ROS 2 Infrastructure**: Docker environment extension, custom message types, launch system, parameter management
 - **Robot Software Architecture**: Three-tier design with explicit interface boundaries, enforced via Behavior Tree sequencing layer
@@ -470,7 +626,7 @@ These are not off-the-shelf and demonstrate original work:
 
 ---
 
-## 14. PG Experimental Design (for rubric section 3.3)
+## 15. PG Experimental Design (for rubric section 3.3)
 
 - **Experiment 1 -- Detection accuracy**: Run N=100 board configurations, measure per-piece detection accuracy (confusion matrix across 14 piece classes).
 - **Experiment 2 -- Move detection reliability**: Execute M=50 human moves, measure correct detection rate, false positive rate.
@@ -479,7 +635,7 @@ These are not off-the-shelf and demonstrate original work:
 
 ---
 
-## 15. Key Dependencies
+## 16. Key Dependencies
 
 - `pyffish` (pip) -- Xiangqi legal moves, FEN management
 - Fairy-Stockfish binary -- compiled from source in Docker
@@ -493,10 +649,31 @@ These are not off-the-shelf and demonstrate original work:
 
 ---
 
-## 16. Risk Mitigation
+## 17. Implementation status and known gaps (May 2026)
+
+| Area | Status | Notes |
+|------|--------|-------|
+| ROS packages + launch | Done | 7 packages; see §10 |
+| Vision YOLO + ArUco | Done, **fragile on hardware** | Grid jitter drives FEN/human-inference failures; Confirm move reliable |
+| Human move pyffish inference | Implemented | Depends on stable `BoardState` |
+| AI FSF + minimax | Done | NNUE weights optional via env var |
+| BT + PickAndPlace + graveyard | Done | `dispatch_id` protocol |
+| Dashboard modes | Done | Sim legal-move UI; hardware Confirm/Sync |
+| MCTS / third algorithm | **Not started** | Planned extension |
+| Hand-in-frame detection | **Not started** | Optional in §5d |
+| Full hardware integration test | **Pending** (todo) | End-to-end logged games |
+| Evaluation experiments | **Pending** (todo) | §15 templates |
+| `ExecuteMove.action` | Defined only | Live stack uses `PickAndPlace` |
+
+**Report one-liner:** Deliberative + sequencing + reactive stack is complete; lab autonomy is limited by **perception stability** and **grasp calibration**, with **Confirm move** as the dependable human-turn interface until vision is tuned.
+
+---
+
+## 18. Risk Mitigation
 
 - **Gripper slips**: Tune `grasp_width` / `grasp_force` in `manipulation_config.yaml`; ensure smooth cylindrical sides; test with actual pieces early.
 - **Camera calibration drift**: Re-calibrate at start of each session; ArUco markers are fast to detect.
-- **MoveIt timeout**: Set generous planning time (5s); use cartesian path planning for simple vertical moves.
-- **Fairy-Stockfish subprocess hangs**: Set timeouts on UCI communication; restart engine process if needed.
-- **UR connection drops**: Known issue from lab docs; implement reconnection logic and watchdog timer.
+- **Vision false grids**: Increase `stability_frames`, lab YOLO retrain, preprocess presets; use Sync board after slips.
+- **MoveIt / OMPL timeout**: `allowed_planning_time`, retries in `manipulation_config.yaml`; Cartesian for vertical segments.
+- **Fairy-Stockfish subprocess hangs**: Timeouts on UCI; game manager cancels in-flight `GetBestMove` on e-stop.
+- **UR connection drops**: Known lab issue; restart `arm_drivers`; dashboard e-stop before recovery.

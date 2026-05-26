@@ -73,6 +73,7 @@ def fen_to_grid(fen: str) -> list:
 _state = {
     'board_grid': [0] * 90,  # empty until vision or sim populates it
     'fen': STARTING_FEN,
+    'game_fen': STARTING_FEN,  # authoritative FEN from game manager only (never from vision)
     'game_status': 'idle',
     'is_red_turn': True,
     'move_count': 0,
@@ -789,6 +790,7 @@ class DashboardNode(Node):
             # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
                 _state['fen'] = msg.current_fen
+                _state['game_fen'] = msg.current_fen
                 if _state.get('simulation_mode', False) or msg.move_count > prev_moves:
                     _state['board_grid'] = fen_to_grid(msg.current_fen)
                     _state['board_source'] = 'fen'

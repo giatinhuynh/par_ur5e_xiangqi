@@ -38,28 +38,31 @@ BOARD_FILES = 9
 BOARD_RANKS = 10
 
 # (class_id -> (is_red, piece_code))
+# Kaggle model classes are alphabetically ordered within each color group:
+#   0-6: black advisor, cannon, chariot, elephant, general, horse, soldier
+#   7-13: red advisor, cannon, chariot, elephant, general, horse, soldier
 CLASS_MAP = {
-    0:  (True,  1),   # red general
-    1:  (True,  2),   # red advisor
-    2:  (True,  3),   # red elephant
-    3:  (True,  4),   # red horse
-    4:  (True,  5),   # red chariot
-    5:  (True,  6),   # red cannon
-    6:  (True,  7),   # red soldier
-    7:  (False, 1),   # black general
-    8:  (False, 2),   # black advisor
-    9:  (False, 3),   # black elephant
-    10: (False, 4),   # black horse
-    11: (False, 5),   # black chariot
-    12: (False, 6),   # black cannon
-    13: (False, 7),   # black soldier
+    0:  (False, 2),   # black advisor
+    1:  (False, 6),   # black cannon
+    2:  (False, 5),   # black chariot
+    3:  (False, 3),   # black elephant
+    4:  (False, 1),   # black general
+    5:  (False, 4),   # black horse
+    6:  (False, 7),   # black soldier
+    7:  (True,  2),   # red advisor
+    8:  (True,  6),   # red cannon
+    9:  (True,  5),   # red chariot
+    10: (True,  3),   # red elephant
+    11: (True,  1),   # red general
+    12: (True,  4),   # red horse
+    13: (True,  7),   # red soldier
 }
 
 CLASS_NAMES = [
-    'red_general', 'red_advisor', 'red_elephant', 'red_horse',
-    'red_chariot', 'red_cannon', 'red_soldier',
-    'black_general', 'black_advisor', 'black_elephant', 'black_horse',
-    'black_chariot', 'black_cannon', 'black_soldier',
+    'black_advisor', 'black_cannon', 'black_chariot', 'black_elephant',
+    'black_general', 'black_horse', 'black_soldier',
+    'red_advisor', 'red_cannon', 'red_chariot', 'red_elephant',
+    'red_general', 'red_horse', 'red_soldier',
 ]
 
 from xiangqi_vision.board_layout import NORM_W, NORM_H, MARGIN, pixel_to_grid as _pixel_to_grid

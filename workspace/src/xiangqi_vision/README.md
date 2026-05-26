@@ -129,3 +129,112 @@ If calibration or model files are missing, the node logs warnings; without ArUco
 ## `calibration_tool`
 
 Interactive tool: capture frame (**SPACE**) with all four ArUco visible → **H**; teach TCP at four **grid** corners → solve **`board_to_base_tf`** → write `board_calibration.yaml`. See repository **`docs/board_printing_guide.md`** and **`docs/vision_training_guide.md`**.
+
+---
+
+## Lighting and preprocessing experiments
+
+**ArUco** already runs CLAHE on a grayscale copy when markers are hard to see (`board_detector._preprocess`). **YOLO** runs on the warped board; you can tune that input separately.
+
+### A/B several presets (recommended first)
+
+With the camera and arm at **scan pose**, run the experiment node (does not change live `vision_node` output):
+
+```bash
+source /home/rosuser/workspace/install/setup.bash
+ros2 run xiangqi_vision vision_preprocess_experiment --ros-args \
+  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v2_best.pt \
+  -p calibration_file:=/home/rosuser/workspace/config/board_calibration.yaml \
+  -p compare_presets:="['none','clahe','lab_default','high_contrast','saturation']"
+```
+
+View the tiled comparison (same QoS style as `/xiangqi/debug_image`):
+
+```bash
+ros2 run rqt_image_view rqt_image_view /xiangqi/preprocess_experiment_image
+```
+
+Check that frames are publishing (first tick can take **10–30 s** on CPU with 4 presets):
+
+```bash
+ros2 topic hz /xiangqi/preprocess_experiment_image
+```
+
+If rqt is blank but `debug_image` works: rebuild `xiangqi_vision` (experiment downscales large tiles for rqt), wait for a log line `Published experiment frame #1`, or watch the status image (`No camera frames` / `ArUco failed`).
+
+Each row is **warped | preprocessed | YOLO boxes**, with piece count and mean confidence. Pick the preset that looks best, then enable it on `vision_node` (below).
+
+### Enable preprocessing on `vision_node`
+
+In `xiangqi_bringup/config/vision_config.yaml` (or at runtime):
+
+```yaml
+piece_preprocess_enabled: true
+piece_preprocess_preset: "lab_default"   # or clahe, gamma_bright, etc.
+debug_show_preprocess: true            # debug topic: warped | preprocessed | detections
+```
+
+Runtime tuning without restart:
+
+```bash
+ros2 param set /vision_node piece_preprocess_enabled true
+ros2 param set /vision_node piece_preprocess_preset clahe
+ros2 param set /vision_node debug_show_preprocess true
+```
+
+Fine-grained overrides (only applied when different from defaults): `piece_gamma`, `piece_brightness`, `piece_contrast`, `piece_use_clahe`, `piece_clahe_clip_limit`, `piece_use_denoise`, `piece_use_sharpen`, `piece_saturation_scale`, `piece_use_white_balance`.
+
+**Presets:** `none`, `bright`, `bright_sharp`, `clahe`, `clahe_strong`, `gamma_bright`, `gamma_dark`, `high_contrast`, `denoise`, `sharpen`, `saturation`, `lab_default`.
+
+### Dim image + soft / blurry pieces (good starting point)
+
+Try **`bright_sharp`** first (brighten → CLAHE on L channel → mild saturation → unsharp mask):
+
+```bash
+# Compare against raw and lighter-only on the experiment topic
+ros2 run xiangqi_vision vision_preprocess_experiment --ros-args \
+  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v2_best.pt \
+  -p calibration_file:=/home/rosuser/workspace/config/board_calibration.yaml \
+  -p compare_presets:="['none','bright','bright_sharp','sharpen']"
+
+# Then enable on live vision_node
+ros2 param set /vision_node piece_preprocess_enabled true
+ros2 param set /vision_node piece_preprocess_preset bright_sharp
+ros2 param set /vision_node debug_show_preprocess true
+```
+
+Or in `vision_config.yaml`:
+
+```yaml
+piece_preprocess_enabled: true
+piece_preprocess_preset: "bright_sharp"
+debug_show_preprocess: true
+```
+
+**Still too dim?** Nudge brighter without a rebuild:
+
+```bash
+ros2 param set /vision_node piece_gamma 0.65          # lower = brighter (default in bright_sharp: 0.72)
+ros2 param set /vision_node piece_brightness 35      # add flat lift (0–255 scale)
+```
+
+**Still soft?** Add sharpen on top of any preset:
+
+```bash
+ros2 param set /vision_node piece_use_sharpen true
+```
+
+**Too noisy after sharpen?** Do not use `denoise` with `bright_sharp` unless the image is grainy—denoise can make piece edges look softer. Prefer physical focus/lighting first.
+
+| Goal | Preset / params |
+|------|-----------------|
+| Only brighter | `bright` or `gamma_bright` |
+| Brighter + crisper piece edges | `bright_sharp` |
+| Local shadow on mat | `clahe` or `lab_default` |
+| Fine-tune live | `piece_gamma`, `piece_brightness`, `piece_use_sharpen` |
+
+### Physical lighting tips
+
+- Reduce direct glare on white ArUco print (diffuse overhead light, slight angle).
+- Keep exposure consistent at scan pose; re-check after moving lights.
+- If ArUco fails but YOLO is fine (or vice versa), tune ArUco (mat visibility) and piece presets separately.

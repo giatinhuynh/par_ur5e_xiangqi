@@ -37,6 +37,7 @@ from xiangqi_vision.fen_util import grid_to_fen
 from xiangqi_msgs.srv import GetBoardState
 
 from .board_detector import BoardDetector, BoardCalibration
+from .image_preprocess import PreprocessConfig, apply_piece_preprocess, stack_comparison
 from .piece_detector import PieceDetector
 from .turn_detector import TurnDetector, TurnDetectorState
 from .weights_util import resolve_calibration_path, resolve_yolo_model_path
@@ -100,6 +101,19 @@ class VisionNode(Node):
         self.declare_parameter('grid_smooth_frames', 3)
         self.declare_parameter('poll_rate_hz', 3.0)
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
+        # Piece detection preprocessing (warped board, before YOLO)
+        self.declare_parameter('piece_preprocess_enabled', False)
+        self.declare_parameter('piece_preprocess_preset', 'none')
+        self.declare_parameter('piece_gamma', 1.0)
+        self.declare_parameter('piece_brightness', 0)
+        self.declare_parameter('piece_contrast', 1.0)
+        self.declare_parameter('piece_use_clahe', False)
+        self.declare_parameter('piece_clahe_clip_limit', 2.0)
+        self.declare_parameter('piece_use_denoise', False)
+        self.declare_parameter('piece_use_sharpen', False)
+        self.declare_parameter('piece_saturation_scale', 1.0)
+        self.declare_parameter('piece_use_white_balance', False)
+        self.declare_parameter('debug_show_preprocess', False)
 
         model_path_param = self.get_parameter('model_path').value
         cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
@@ -226,6 +240,36 @@ class VisionNode(Node):
         self._timer = self.create_timer(period, self._publish_tick)
 
         self.get_logger().info('vision_node started')
+
+    def _piece_preprocess_config(self) -> PreprocessConfig:
+        """Read preprocess params (safe to call each detection tick for live tuning)."""
+        defaults = PreprocessConfig()
+        enabled = bool(self.get_parameter('piece_preprocess_enabled').value)
+        preset = str(self.get_parameter('piece_preprocess_preset').value)
+        if enabled and preset != 'none':
+            cfg = PreprocessConfig.from_preset(preset, enabled=True)
+        else:
+            cfg = PreprocessConfig(enabled=enabled, preset=preset)
+
+        overrides = {
+            'gamma': float(self.get_parameter('piece_gamma').value),
+            'brightness': int(self.get_parameter('piece_brightness').value),
+            'contrast': float(self.get_parameter('piece_contrast').value),
+            'use_clahe': bool(self.get_parameter('piece_use_clahe').value),
+            'clahe_clip_limit': float(self.get_parameter('piece_clahe_clip_limit').value),
+            'use_denoise': bool(self.get_parameter('piece_use_denoise').value),
+            'use_sharpen': bool(self.get_parameter('piece_use_sharpen').value),
+            'saturation_scale': float(self.get_parameter('piece_saturation_scale').value),
+            'use_white_balance': bool(self.get_parameter('piece_use_white_balance').value),
+        }
+        for key, val in overrides.items():
+            if val != getattr(defaults, key):
+                setattr(cfg, key, val)
+        if enabled and preset == 'none' and any(
+            overrides[k] != getattr(defaults, k) for k in overrides
+        ):
+            cfg.enabled = True
+        return cfg
 
     # ------------------------------------------------------------------
     # Camera callback - must be trivially fast, no blocking
@@ -386,20 +430,25 @@ class VisionNode(Node):
             return None, debug, False
 
         warped = self._board_detector.warp_board(image, H)
+        preprocess_cfg = self._piece_preprocess_config()
+        yolo_input = apply_piece_preprocess(warped, preprocess_cfg)
 
         grid = np.zeros(90, dtype=np.int8)
         mean_conf = 0.0
 
         if self._piece_detector is not None:
-            detections, annotated = self._piece_detector.detect(warped)
+            detections, annotated = self._piece_detector.detect(yolo_input)
             raw_grid = self._piece_detector.detections_to_grid(detections)
             # Apply per-cell temporal smoothing - a cell value only commits
             # after `grid_smooth_frames` consecutive agreeing detections.
             grid = self._grid_stabilizer.update(raw_grid)
             mean_conf = self._piece_detector.mean_confidence(detections)
-            debug_out = annotated
+            if bool(self.get_parameter('debug_show_preprocess').value):
+                debug_out = stack_comparison(warped, yolo_input, annotated)
+            else:
+                debug_out = annotated
         else:
-            debug_out = warped
+            debug_out = yolo_input if preprocess_cfg.enabled else warped
 
         msg = BoardState()
         msg.header = Header()

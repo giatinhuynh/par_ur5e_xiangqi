@@ -20,7 +20,12 @@ ros2 run xiangqi_manipulation test_moveit_move --check          # prerequisites 
 ros2 run xiangqi_manipulation test_moveit_move --ompl             # /move_action (OMPL)
 ros2 run xiangqi_manipulation test_moveit_move --cartesian        # /par_moveit/waypoint_move
 ros2 run xiangqi_manipulation test_moveit_move --ompl --nudge-z 0.02   # small Z bump from current pose
+ros2 run xiangqi_manipulation test_moveit_move --move e5 e7              # pick-and-place e5 → e7
+ros2 run xiangqi_manipulation test_moveit_move --capture e5 e7 --captured-red
+# capture demo: piece on e7 → red graveyard, then e5 → e7 (needs graveyard joints in calibration)
 ```
+
+Board / capture modes use joint poses from `board_calibration.yaml` (same path as production `manipulation_node`). Graveyard zones must be taught in the calibration tool before `--capture` works.
 
 ## `gripper_controller_node`
 

@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'vision_node = xiangqi_vision.vision_node:main',
             'calibration_tool = xiangqi_vision.calibration_tool:main',
+            'vision_preprocess_experiment = xiangqi_vision.vision_preprocess_experiment:main',
         ],
     },
 )

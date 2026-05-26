@@ -1,7 +1,7 @@
 # game_config.yaml: Game Manager and AI Engine configuration
 game_manager_node:
   ros__parameters:
-    engine_type: "fairystockfish"    # "fairystockfish" | "minimax"
+    engine_type: "fairystockfish"    # "fairystockfish" | "minimax" | "mcts"
     # robot_plays_red: see robot_side.yaml (single source with task_planner_node)
     ai_time_limit: 5.0               # Seconds per AI move
     sim_ai_time_limit: 3.0           # Sim cap (was 1s — too weak for Stockfish)

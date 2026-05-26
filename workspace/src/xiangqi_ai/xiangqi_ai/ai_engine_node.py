@@ -14,6 +14,7 @@ from std_msgs.msg import Header
 
 from .fairy_stockfish_engine import FairyStockfishEngine
 from .minimax_engine import MinimaxEngine
+from .mcts_engine import MCTSEngine
 from .move_resolver import eval_to_red_perspective
 
 
@@ -21,7 +22,7 @@ class AIEngineNode(Node):
     def __init__(self):
         super().__init__('ai_engine_node')
 
-        self.declare_parameter('engine_type', 'fairystockfish')  # or 'minimax'
+        self.declare_parameter('engine_type', 'fairystockfish')  # fairystockfish | minimax | mcts
         self.declare_parameter('difficulty', 20)   # Fairy-Stockfish skill level 1-20 (max)
         self.declare_parameter('default_depth', 5)
         self.declare_parameter('default_time_limit', 5.0)
@@ -41,6 +42,7 @@ class AIEngineNode(Node):
 
         self._fairy_engine: FairyStockfishEngine | None = None
         self._minimax_engine: MinimaxEngine | None = None
+        self._mcts_engine: MCTSEngine | None = None
         self._load_engine(self._engine_type)
 
         self._get_best_move_srv = self.create_service(
@@ -81,9 +83,9 @@ class AIEngineNode(Node):
             display_cp = int(eval_cp)
             display_depth = depth_reached
 
-            # Minimax searches with a fast hand-crafted eval; use NNUE for displayed cp
+            # Custom engines use fast hand-crafted evals; use NNUE for displayed cp.
             if (
-                engine_type == 'minimax'
+                engine_type in ('minimax', 'mcts')
                 and self._minimax_nnue_display_eval
             ):
                 try:
@@ -97,7 +99,7 @@ class AIEngineNode(Node):
                     display_depth = max(display_depth, nnue_depth)
                 except Exception as e:
                     self.get_logger().warn(
-                        f'NNUE display eval unavailable, using minimax heuristic: {e}'
+                        f'NNUE display eval unavailable, using {engine_type} heuristic: {e}'
                     )
 
             response.best_move = best_move
@@ -159,6 +161,11 @@ class AIEngineNode(Node):
                 self.get_logger().info('Loading minimax engine...')
                 self._minimax_engine = MinimaxEngine()
                 self.get_logger().info('Minimax engine ready')
+        elif engine_type == 'mcts':
+            if self._mcts_engine is None:
+                self.get_logger().info('Loading MCTS engine...')
+                self._mcts_engine = MCTSEngine()
+                self.get_logger().info('MCTS engine ready')
         else:
             raise ValueError(f'Unknown engine type: {engine_type}')
 
@@ -171,6 +178,10 @@ class AIEngineNode(Node):
             if self._minimax_engine is None:
                 self._load_engine('minimax')
             return self._minimax_engine
+        elif engine_type == 'mcts':
+            if self._mcts_engine is None:
+                self._load_engine('mcts')
+            return self._mcts_engine
         raise ValueError(f'Unknown engine: {engine_type}')
 
     def _publish_engine_info(self, engine_type, depth, eval_cp, elapsed, best_move, ponder):

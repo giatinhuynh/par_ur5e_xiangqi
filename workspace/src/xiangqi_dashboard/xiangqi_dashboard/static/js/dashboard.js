@@ -759,6 +759,7 @@ function formatEngineShort(name) {
   const n = (name || '').toLowerCase();
   if (n === 'fairystockfish') return 'Stockfish';
   if (n === 'minimax') return 'Minimax';
+  if (n === 'mcts') return 'MCTS';
   return name || '—';
 }
 
@@ -767,10 +768,11 @@ function engineUsesStockfish(red, black) {
 }
 
 function evalScoreHint() {
-  const usesMinimax =
-    state.red_engine === 'minimax' || state.black_engine === 'minimax';
-  if (usesMinimax) {
-    return 'Centipawns (Red view). Minimax search uses heuristics; bar uses NNUE.';
+  const usesCustom =
+    ['minimax', 'mcts'].includes(state.red_engine) ||
+    ['minimax', 'mcts'].includes(state.black_engine);
+  if (usesCustom) {
+    return 'Centipawns (Red view). Custom engines use heuristics; bar uses NNUE when available.';
   }
   return 'Centipawns (Red view). NNUE via Stockfish.';
 }
@@ -993,6 +995,8 @@ function updateHistory() {
       ? 'SF'
       : eng.includes('minimax')
         ? 'MM'
+        : eng.includes('mcts')
+          ? 'MC'
         : eng === 'human'
           ? 'H'
           : '';

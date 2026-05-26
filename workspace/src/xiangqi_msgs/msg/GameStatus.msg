@@ -7,7 +7,7 @@ string status
 bool is_red_turn
 int32 move_count
 string current_fen
-string engine_type   # "fairystockfish" | "minimax"
+string engine_type   # "fairystockfish" | "minimax" | "mcts"
 string system_state  # Human-readable description of current BT state
 
 # High-level result classification (orthogonal to status FSM)

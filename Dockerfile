@@ -56,9 +56,17 @@ RUN pip3 install --no-cache-dir \
 WORKDIR /opt
 RUN git clone --depth=1 https://github.com/fairy-stockfish/Fairy-Stockfish.git fairy-stockfish
 WORKDIR /opt/fairy-stockfish/src
-RUN make -j$(nproc) ARCH=x86-64-modern build largeboards=yes \
-    && cp stockfish /usr/local/bin/fairy-stockfish \
-    && chmod +x /usr/local/bin/fairy-stockfish
+# ARCH must match the container CPU (Mac Apple Silicon → armv8; lab x86_64 → x86-64-modern).
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      x86_64|amd64) FSF_ARCH=x86-64-modern ;; \
+      aarch64|arm64) FSF_ARCH=armv8 ;; \
+      *) FSF_ARCH=general-64 ;; \
+    esac; \
+    make -j"$(nproc)" ARCH="$FSF_ARCH" build largeboards=yes; \
+    cp stockfish /usr/local/bin/fairy-stockfish; \
+    chmod +x /usr/local/bin/fairy-stockfish
 WORKDIR /opt/fairy-stockfish
 RUN pip3 install --no-cache-dir . \
     && python3 -c "import pyffish as sf; sf.set_option('VariantPath',''); print('pyffish', sf.__file__)"

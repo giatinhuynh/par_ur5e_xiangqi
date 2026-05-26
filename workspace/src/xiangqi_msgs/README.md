@@ -19,7 +19,7 @@ ROS 2 interface definitions shared by vision, AI, planner, manipulation, and das
 | `GetBoardState` | On-demand board snapshot from vision (`force_rescan` can bypass cache). |
 | `GetBestMove` | Request best move from `ai_engine_node`: FEN, depth or time limit, optional engine override; returns UCI-style coordinate move plus search stats. |
 | `GripperControl` | Thin command surface for open/close semantics used by higher-level code (implemented by `gripper_controller_node`). |
-| `SetEngine` | Switch engine type (`fairystockfish` / `minimax`) and difficulty at runtime. |
+| `SetEngine` | Switch engine type (`fairystockfish` / `minimax` / `mcts`) and difficulty/search hints at runtime. |
 
 ## Actions
 

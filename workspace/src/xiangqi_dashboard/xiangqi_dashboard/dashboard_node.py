@@ -313,7 +313,7 @@ def api_set_engine():
 
 @_flask_app.route('/api/set_engines', methods=['POST'])
 def api_set_engines():
-    """Per-side engines (sim setup only): minimax and/or fairystockfish."""
+    """Per-side engines (sim setup only): minimax, mcts, and/or fairystockfish."""
     if not _mode_change_allowed():
         return jsonify({
             'ok': False,
@@ -414,6 +414,8 @@ def _normalize_engine_name(name: str) -> str:
     n = (name or '').strip().lower()
     if n in ('stockfish', 'fairy', 'fairystockfish', 'fsf'):
         return 'fairystockfish'
+    if n in ('mcts', 'montecarlo', 'monte_carlo', 'monte-carlo'):
+        return 'mcts'
     return 'minimax'
 
 

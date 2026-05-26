@@ -1,6 +1,6 @@
 # Real-time AI engine analysis info for the dashboard.
 std_msgs/Header header
-string engine_type        # "fairystockfish" | "minimax"
+string engine_type        # "fairystockfish" | "minimax" | "mcts"
 int32 depth_reached
 int32 nodes_searched
 float64 thinking_time_sec

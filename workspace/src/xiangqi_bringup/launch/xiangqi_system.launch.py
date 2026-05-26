@@ -35,7 +35,7 @@ def generate_launch_description():
     engine_arg = DeclareLaunchArgument(
         'engine_type',
         default_value='fairystockfish',
-        description='AI engine: fairystockfish or minimax',
+        description='AI engine: fairystockfish, minimax, or mcts',
     )
     difficulty_arg = DeclareLaunchArgument(
         'difficulty',

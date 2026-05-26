@@ -20,7 +20,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'engine_type', default_value='minimax',
-            description='AI engine: fairystockfish or minimax (minimax needs no FSF binary)'),
+            description='AI engine: fairystockfish, minimax, or mcts (custom engines need no FSF binary)'),
         DeclareLaunchArgument(
             'self_play', default_value='false',
             description='Both sides played by AI (true = bot vs bot)'),

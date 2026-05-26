@@ -225,6 +225,8 @@ class GameManagerNode(Node):
             return 'fairystockfish'
         if n in ('minimax', 'custom'):
             return 'minimax'
+        if n in ('mcts', 'montecarlo', 'monte_carlo', 'monte-carlo'):
+            return 'mcts'
         return default
 
     def _side_to_move_is_red(self) -> bool:

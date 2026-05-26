@@ -20,7 +20,7 @@ Central **finite-state machine** over `GameState` (`IDLE`, `WAITING_HUMAN`, `DET
 ## `ai_engine_node`
 
 - Exposes **`get_best_move`** and **`set_engine`** services.
-- Holds two backends: `FairyStockfishEngine` (subprocess UCI, Xiangqi variant, skill level) and `MinimaxEngine` (custom search—see below).
+- Holds three backends: `FairyStockfishEngine` (subprocess UCI, Xiangqi variant, skill level), `MinimaxEngine` (custom alpha–beta search), and `MCTSEngine` (custom Monte Carlo Tree Search).
 - `GetBestMove` request chooses depth- vs time-bounded search; publishes `EngineInfo` for the UI.
 
 ## `minimax_engine.py` + `evaluation.py`
@@ -30,6 +30,14 @@ Central **finite-state machine** over `GameState` (`IDLE`, `WAITING_HUMAN`, `DET
 - **Legal moves** and position I/O from **pyffish** (rules are not reimplemented).
 - **Search**: iterative deepening, alpha–beta pruning, time cutoff, move ordering (captures/checks emphasised).
 - **Evaluation**: material balance + hand-tuned piece–square tables + mobility/king-safety style terms in `evaluation.py`.
+
+## `mcts_engine.py`
+
+**Custom Monte Carlo Tree Search algorithm**:
+
+- **Legal moves** and position transitions from **pyffish**.
+- **Search**: UCT selection, expansion, random/capture-biased rollouts, and backpropagation.
+- **Cutoff evaluation**: after a rollout depth cap or time limit, uses the same hand-crafted evaluator as minimax for a comparable centipawn score.
 
 ## `fairy_stockfish_engine.py`
 

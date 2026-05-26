@@ -51,7 +51,7 @@ For wrist-camera setups (RealSense on the end-effector), board scans are now **s
 graph TB
   subgraph deliberative [Tier 3 Deliberative]
     GameManager["game_manager_node"]
-    AIEngine["ai_engine_node<br/>Fairy-Stockfish or minimax"]
+    AIEngine["ai_engine_node<br/>Fairy-Stockfish, minimax, or MCTS"]
   end
 
   subgraph sequencing [Tier 2 Sequencing]
@@ -97,12 +97,12 @@ The work targets **course §4.8** (UR5e pick-and-place with planning) as a **2D 
 
 **Methodology (high level).** The software is organised as a **three-tier robot architecture** implemented in ROS 2 Humble: a *deliberative* layer holds game state and AI (`game_manager_node`, `ai_engine_node`); a *sequencing* layer runs a **py_trees** behaviour tree for multi-step moves, retries, and capture handling (`task_planner_node`); a *reactive* layer performs perception and motion (`xiangqi_vision`, `xiangqi_manipulation`). That split keeps slow search and rule validation off the hot path for sensing and control, while the middle tier encodes task structure that would be awkward in a single monolithic node or a purely reactive stack. The written report should state this design choice explicitly and contrast it briefly with alternatives (e.g. flat FSM, subsumption-only), using the mermaid figure above.
 
-**Technical approach.** Perception combines **ArUco**-based board rectification with **YOLOv8** piece detection; moves are inferred by **board-state differencing** checked with **pyffish**. Manipulation uses the VXLab **MoveIt** waypoint action and **RG2** width goals. Two move generators satisfy the **multiple-algorithm** expectation for undergraduates: **Fairy-Stockfish** (UCI) and a **custom minimax** engine with alpha–beta pruning.
+**Technical approach.** Perception combines **ArUco**-based board rectification with **YOLOv8** piece detection; moves are inferred by **board-state differencing** checked with **pyffish**. Manipulation uses the VXLab **MoveIt** waypoint action and **RG2** width goals. Multiple move generators support algorithm comparison: **Fairy-Stockfish** (UCI), a **custom minimax** engine with alpha–beta pruning, and a **custom MCTS** engine.
 
 **Original scope (for the report — vs off-the-shelf components).** The rubric asks you to **delineate** team work from dependencies. The following matches the “original implementation” items in the [system plan](.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md) (§12–13):
 
 - **Designed and integrated here (cite files / nodes in the report):**
-  - **Custom Xiangqi engine** — Iterative-deepening minimax with alpha–beta pruning, move ordering, and a hand-crafted evaluation (material, piece–square tables, king safety, mobility) in `minimax_engine.py` / `evaluation.py`; legal moves via **pyffish**, not a reimplementation of Xiangqi rules.
+  - **Custom Xiangqi engines** — Iterative-deepening minimax with alpha–beta pruning, move ordering, and a hand-crafted evaluation (material, piece–square tables, king safety, mobility) in `minimax_engine.py` / `evaluation.py`; plus Monte Carlo Tree Search with UCT and heuristic rollouts in `mcts_engine.py`. Legal moves use **pyffish**, not a reimplementation of Xiangqi rules.
   - **Human move inference** — Board-state differencing from vision, validated against legal moves with **pyffish** (no generic ROS package provides this for Xiangqi).
   - **Board calibration pipeline** — ArUco + homography, grid/teach-in workflow, and persisted `board_calibration.yaml` (`calibration_tool`, `board_detector`).
   - **Vision integration** — `vision_node` wiring warp → YOLO → grid, turn / stability logic, debug output, and `GetBoardState`.
@@ -116,7 +116,7 @@ The work targets **course §4.8** (UR5e pick-and-place with planning) as a **2D 
 - **Imported or stock (acknowledge and reference; do not claim as original algorithms):**
   - **Ultralytics YOLOv8** — Detector backbone and training API; you contribute data, labels, class mapping, and integration.
   - **Fairy-Stockfish** — Pre-existing engine; contribution is **UCI subprocess wrapper**, ROS service interface, and variant/skill configuration.
-  - **pyffish** — Rule and FEN handling for validation and minimax legality.
+  - **pyffish** — Rule and FEN handling for validation and custom-engine legality.
   - **OpenCV** — ArUco/homography primitives; contribution is the **calibration and board pipeline** built on top.
   - **py_trees / py_trees_ros** — BT framework; contribution is the **tree design** and ROS behaviours.
   - **Lab stack** — `ur_robot_driver`, `realsense2_camera`, MoveIt 2, `par_moveit` action server, `onrobot_rg2_driver`: configured and **called from** `manipulation_node` / launch, not reimplemented.
@@ -264,7 +264,7 @@ ros2 launch xiangqi_bringup xiangqi_system.launch.py
 
 ### 8b. Simulation mode (setup and instructions)
 
-Use simulation to test **Xiangqi rules**, **Minimax / Fairy-Stockfish**, **AI vs AI**, and the **web dashboard** with **no UR5e, camera, MoveIt, or gripper**. Background (architecture, config tables, extended troubleshooting): **[docs/sim_mode.md](docs/sim_mode.md)**.
+Use simulation to test **Xiangqi rules**, **Minimax / MCTS / Fairy-Stockfish**, **AI vs AI**, and the **web dashboard** with **no UR5e, camera, MoveIt, or gripper**. Background (architecture, config tables, extended troubleshooting): **[docs/sim_mode.md](docs/sim_mode.md)**.
 
 **Do not run** `arm_drivers` or `moveit_config_driver` for simulation.
 
@@ -340,7 +340,7 @@ docker logs -f xiangqi_sim_ui
 
 1. Wait until the page loads (first-start build may take up to ~90 s).
 2. **Engine Setup**:
-   - **Red** / **Black**: `Minimax` or `Stockfish`.
+   - **Red** / **Black**: `Minimax`, `MCTS`, or `Stockfish`.
    - **Stockfish strength**: **1–20** (Level 20 = strongest).
    - **Mode**: **AI vs AI** or **AI vs Human** (you play Red by clicking the board).
 3. Click **Start Game**.
@@ -434,8 +434,9 @@ For simulation, use **§8b** (**Start Game** on Engine Setup).
 
 - **Fairy-Stockfish** — UCI subprocess; variant Xiangqi; skill / depth via `game_config.yaml` and launch args.
 - **Custom minimax** — Iterative-deepening alpha-beta, pyffish for legal moves, evaluation in `evaluation.py` (material, piece-square tables, etc.).
+- **Custom MCTS** — UCT tree search with capture-biased random rollouts and the same heuristic evaluator at rollout cutoff.
 
-Switch with the dashboard, `SetEngine` service, or the `engine_type` launch parameter (`fairystockfish` | `minimax`).
+Switch with the dashboard, `SetEngine` service, or the `engine_type` launch parameter (`fairystockfish` | `minimax` | `mcts`).
 
 ---
 

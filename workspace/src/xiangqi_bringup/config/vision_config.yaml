@@ -1,7 +1,7 @@
 # vision_config.yaml: Vision node and board calibration parameters
 vision_node:
   ros__parameters:
-    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v2_best.pt"
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v3_best.pt"
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     require_yolo_weights: true
     yolo_download_url: ""

@@ -143,7 +143,7 @@ With the camera and arm at **scan pose**, run the experiment node (does not chan
 ```bash
 source /home/rosuser/workspace/install/setup.bash
 ros2 run xiangqi_vision vision_preprocess_experiment --ros-args \
-  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v2_best.pt \
+  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v3_best.pt \
   -p calibration_file:=/home/rosuser/workspace/config/board_calibration.yaml \
   -p compare_presets:="['none','clahe','lab_default','high_contrast','saturation']"
 ```
@@ -193,7 +193,7 @@ Try **`bright_sharp`** first (brighten → CLAHE on L channel → mild saturatio
 ```bash
 # Compare against raw and lighter-only on the experiment topic
 ros2 run xiangqi_vision vision_preprocess_experiment --ros-args \
-  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v2_best.pt \
+  -p model_path:=/home/rosuser/workspace/models/xiangqi_kaggle_v3_best.pt \
   -p calibration_file:=/home/rosuser/workspace/config/board_calibration.yaml \
   -p compare_presets:="['none','bright','bright_sharp','sharpen']"
 

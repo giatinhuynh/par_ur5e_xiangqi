@@ -52,7 +52,12 @@ def _candidate_model_paths(primary: str) -> list[str]:
     share_models = _share_models_dir()
     if not share_models:
         return out
-    base_names = ['xiangqi_kaggle_v1_best.pt', 'xiangqi_default.pt']
+    base_names = [
+        'xiangqi_kaggle_v3_best.pt',
+        'xiangqi_kaggle_v2_best.pt',
+        'xiangqi_kaggle_v1_best.pt',
+        'xiangqi_default.pt',
+    ]
     if p0:
         bn = os.path.basename(p0)
         ordered = [bn] + [n for n in base_names if n != bn]
@@ -100,7 +105,7 @@ def resolve_yolo_model_path(
     env_url = (os.environ.get('XIANGQI_YOLO_DOWNLOAD_URL') or '').strip()
     url = (param_download_url or '').strip() or env_url
     if url and share_models:
-        dest = os.path.join(share_models, 'xiangqi_kaggle_v1_best.pt')
+        dest = os.path.join(share_models, 'xiangqi_kaggle_v3_best.pt')
         if _download(url, dest, logger):
             return dest
     return None

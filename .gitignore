@@ -5,6 +5,9 @@ chinese-chess-robot-main/
 fairy-stockfish-master/
 Fairy-Stockfish-master/
 
+# YOLO weights >100 MB (GitHub limit); copy to lab manually — see workspace/models/README.md
+workspace/models/xiangqi_kaggle_v3_best.pt
+
 # ROS 2 colcon
 workspace/build/
 workspace/install/

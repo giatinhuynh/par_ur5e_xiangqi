@@ -241,8 +241,45 @@ class GameManagerNode(Node):
             return 'minimax'
         return default
 
+    @staticmethod
+    def _fen_active_is_red(fen: str) -> bool | None:
+        """Parse FEN active-color field: w=Red, b=Black, None if missing/unknown."""
+        parts = (fen or '').split()
+        if len(parts) < 2:
+            return None
+        active = parts[1].strip().lower()
+        if active == 'w':
+            return True
+        if active == 'b':
+            return False
+        return None
+
+    @staticmethod
+    def _set_fen_active_color(fen: str, red_to_move: bool) -> str:
+        """Ensure FEN field 2 is w or b (vision often publishes '-')."""
+        parts = (fen or STARTING_FEN).split()
+        while len(parts) < 6:
+            parts.append('-' if len(parts) == 2 else '0' if len(parts) >= 5 else '1')
+        parts[1] = 'w' if red_to_move else 'b'
+        return ' '.join(parts)
+
     def _side_to_move_is_red(self) -> bool:
-        return 'w' in self._current_fen.split()[1] if self._current_fen else True
+        parsed = self._fen_active_is_red(self._current_fen)
+        if parsed is not None:
+            return parsed
+        return True  # standard Xiangqi: Red moves first when field is '-'
+
+    def _align_fen_side_to_play(self) -> None:
+        """Match FEN active color to who should move next (human or robot)."""
+        if self._self_play:
+            red_to_move = self._side_to_move_is_red()
+        elif self._game_state == GameState.WAITING_HUMAN:
+            red_to_move = self._human_side_is_red()
+        elif self._game_state == GameState.COMPUTING_AI:
+            red_to_move = self._robot_is_red
+        else:
+            return
+        self._current_fen = self._set_fen_active_color(self._current_fen, red_to_move)
 
     def _engine_for_side(self, red: bool) -> str:
         return self._red_engine_type if red else self._black_engine_type
@@ -793,10 +830,12 @@ class GameManagerNode(Node):
         """Transition into the first game state and begin play."""
         if self._robot_is_red or self._self_play:
             self._game_state = GameState.COMPUTING_AI
+            self._align_fen_side_to_play()
             self._publish_status()
             self._compute_and_emit_ai_move()
         else:
             self._game_state = GameState.WAITING_HUMAN
+            self._align_fen_side_to_play()
             self._tell_vision_to_watch(True)
             self._publish_status()
 
@@ -850,6 +889,7 @@ class GameManagerNode(Node):
 
             self._current_fen = self._sanitize_fen_for_engine(fen)
             self._game_state = GameState.WAITING_HUMAN
+            self._align_fen_side_to_play()
             self._tell_vision_to_watch(True)
             self._publish_status()
             ok = String()
@@ -874,6 +914,7 @@ class GameManagerNode(Node):
             alert.data = alert_text
             self._illegal_move_pub.publish(alert)
         self._game_state = GameState.WAITING_HUMAN
+        self._align_fen_side_to_play()
         self._tell_vision_to_watch(True)
         self._publish_status()
 
@@ -887,15 +928,13 @@ class GameManagerNode(Node):
             return
 
         human_red = self._human_side_is_red()
-        if self._side_to_move_is_red() != human_red:
-            self.get_logger().warn(
-                f'Human move ignored: FEN side to move does not match human color '
-                f'(human={self._human_color})'
+        side_red = self._side_to_move_is_red()
+        if side_red != human_red:
+            self.get_logger().info(
+                f'FEN active color was {"red" if side_red else "black"} but human is '
+                f'{self._human_color} - aligning for move detection'
             )
-            self._return_to_human_watch(
-                f'Not {self._human_color.capitalize()}\'s turn in game state - use Sync board or New Game'
-            )
-            return
+            self._current_fen = self._set_fen_active_color(self._current_fen, human_red)
 
         grid = list(self._latest_board_state.grid)
         base_tol = int(self.get_parameter('human_move_grid_tolerance').value)
@@ -1496,7 +1535,7 @@ class GameManagerNode(Node):
         msg.grid = [int(x) for x in grid]
         msg.fen = self._current_fen
         msg.last_move = self._move_history[-1] if self._move_history else ''
-        msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
+        msg.is_red_turn = self._side_to_move_is_red()
         msg.detection_confidence = 1.0
         self._board_state_pub.publish(msg)
 
@@ -1505,7 +1544,7 @@ class GameManagerNode(Node):
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.status = self._game_state.name.lower()
-        msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
+        msg.is_red_turn = self._side_to_move_is_red()
         msg.move_count = self._move_count
         msg.current_fen = self._current_fen
         if self._game_state == GameState.COMPUTING_AI:
@@ -1594,7 +1633,13 @@ class GameManagerNode(Node):
             has_black_king = any(v == -1 for v in grid)
 
             if has_red_king and has_black_king:
-                return fen  # already fully legal - fast path
+                out = fen
+            else:
+                out = None
+            if out is not None:
+                if GameManagerNode._fen_active_is_red(out) is None:
+                    out = GameManagerNode._set_fen_active_color(out, True)
+                return out
 
             if not has_red_king:
                 # Red king default: e0 → rank 0, file 4 → index 4
@@ -1619,7 +1664,10 @@ class GameManagerNode(Node):
                             grid[idx] = -1
                             break
 
-            return GameManagerNode._grid_to_fen(grid, fen)
+            out = GameManagerNode._grid_to_fen(grid, fen)
+            if GameManagerNode._fen_active_is_red(out) is None:
+                out = GameManagerNode._set_fen_active_color(out, True)
+            return out
         except Exception:
             return fen  # if anything goes wrong, pass through unchanged
 

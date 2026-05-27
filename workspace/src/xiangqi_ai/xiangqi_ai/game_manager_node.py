@@ -21,7 +21,12 @@ from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory
 from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck, AiExecutionResult
 from xiangqi_msgs.srv import GetBestMove, GetBoardState, SetEngine
 
-from .move_resolver import resolve_to_legal_move
+from .move_resolver import (
+    resolve_to_legal_move,
+    parse_move as _resolver_parse_move,
+    move_critical_indices,
+    origin_grid_index,
+)
 
 try:
     import pyffish as sf
@@ -57,6 +62,8 @@ class GameManagerNode(Node):
         self.declare_parameter('ai_time_limit', 5.0)
         self.declare_parameter('sim_ai_time_limit', 3.0)
         self.declare_parameter('ai_depth', 0)
+        self.declare_parameter('human_move_grid_tolerance', 8)
+        self.declare_parameter('trust_robot_move_after_verify_fail', True)
 
         self._engine_type = self.get_parameter('engine_type').value
         self._red_engine_type = str(self._engine_type)
@@ -66,9 +73,12 @@ class GameManagerNode(Node):
         self._robot_is_red = self.get_parameter('robot_plays_red').value
         self._self_play = self.get_parameter('self_play').value
         self._simulation_mode = self.get_parameter('simulation_mode').value
+        self._delayed_ai_timers: list = []
+        self._dashboard_mode = 'ai_vs_human'
+        self._human_color = 'red'   # which color the human plays in ai_vs_human
         if not self._simulation_mode:
-            # Hardware: human vs AI only; human moves come from vision on the physical board.
-            self._self_play = False
+            # Hardware: default human vs AI until dashboard publishes game_mode.
+            self._apply_dashboard_mode(self._dashboard_mode)
         self._ai_time_limit = float(self.get_parameter('ai_time_limit').value)
         self._ai_depth = self.get_parameter('ai_depth').value
         if self._simulation_mode:
@@ -77,10 +87,6 @@ class GameManagerNode(Node):
             if not self._self_play:
                 # Dashboard sim: human plays Red; AI plays Black.
                 self._robot_is_red = False
-
-        self._delayed_ai_timers: list = []
-        self._dashboard_mode = 'ai_vs_human'
-        self._human_color = 'red'   # which color the human plays in ai_vs_human
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
 
@@ -97,6 +103,10 @@ class GameManagerNode(Node):
         self._human_move_detected_sub = self.create_subscription(
             Bool, '/xiangqi/human_move_detected', self._human_move_detected_cb, 10,
             callback_group=cb_group
+        )
+        self._human_ready_sub = self.create_subscription(
+            Empty, '/xiangqi/human_ready', self._human_ready_cb, 10,
+            callback_group=cb_group,
         )
         self._new_game_sub = self.create_subscription(
             Empty, '/xiangqi/new_game', self._new_game_cb, 10,
@@ -176,9 +186,10 @@ class GameManagerNode(Node):
         self._status_timer = self.create_timer(1.0, self._publish_status)
 
         self._latest_board_state: BoardState | None = None
+        self._human_watch_reference_grid: list | None = None
         self._pending_human_move: str | None = None
 
-        # AI move bookkeeping — apply to FEN only after ai_execution_result=robot_move_complete
+        # AI move bookkeeping - apply to FEN only after ai_execution_result=robot_move_complete
         self._pending_ai_move: str | None = None
         self._pending_ai_eval_cp: int = 0
         self._pending_ai_depth: int = 0
@@ -206,6 +217,9 @@ class GameManagerNode(Node):
     # ------------------------------------------------------------------
 
     def _board_state_cb(self, msg: BoardState) -> None:
+        # Ignore logical snapshots we publish ourselves (confidence 1.0).
+        if float(msg.detection_confidence) >= 0.999:
+            return
         self._latest_board_state = msg
 
     def _apply_dashboard_mode(self, mode: str) -> None:
@@ -215,7 +229,7 @@ class GameManagerNode(Node):
         if self._self_play:
             self._robot_is_red = True
         else:
-            # AI (robot) plays Red when human chose Black — applies to both sim and hardware.
+            # AI (robot) plays Red when human chose Black - applies to both sim and hardware.
             self._robot_is_red = (self._human_color == 'black')
 
     @staticmethod
@@ -229,8 +243,45 @@ class GameManagerNode(Node):
             return 'mcts'
         return default
 
+    @staticmethod
+    def _fen_active_is_red(fen: str) -> bool | None:
+        """Parse FEN active-color field: w=Red, b=Black, None if missing/unknown."""
+        parts = (fen or '').split()
+        if len(parts) < 2:
+            return None
+        active = parts[1].strip().lower()
+        if active == 'w':
+            return True
+        if active == 'b':
+            return False
+        return None
+
+    @staticmethod
+    def _set_fen_active_color(fen: str, red_to_move: bool) -> str:
+        """Ensure FEN field 2 is w or b (vision often publishes '-')."""
+        parts = (fen or STARTING_FEN).split()
+        while len(parts) < 6:
+            parts.append('-' if len(parts) == 2 else '0' if len(parts) >= 5 else '1')
+        parts[1] = 'w' if red_to_move else 'b'
+        return ' '.join(parts)
+
     def _side_to_move_is_red(self) -> bool:
-        return 'w' in self._current_fen.split()[1] if self._current_fen else True
+        parsed = self._fen_active_is_red(self._current_fen)
+        if parsed is not None:
+            return parsed
+        return True  # standard Xiangqi: Red moves first when field is '-'
+
+    def _align_fen_side_to_play(self) -> None:
+        """Match FEN active color to who should move next (human or robot)."""
+        if self._self_play:
+            red_to_move = self._side_to_move_is_red()
+        elif self._game_state == GameState.WAITING_HUMAN:
+            red_to_move = self._human_side_is_red()
+        elif self._game_state == GameState.COMPUTING_AI:
+            red_to_move = self._robot_is_red
+        else:
+            return
+        self._current_fen = self._set_fen_active_color(self._current_fen, red_to_move)
 
     def _engine_for_side(self, red: bool) -> str:
         return self._red_engine_type if red else self._black_engine_type
@@ -261,17 +312,11 @@ class GameManagerNode(Node):
         )
 
     def _game_mode_cb(self, msg: String) -> None:
-        """Dashboard sim-only: ai_vs_ai enables self-play; ai_vs_human uses board clicks or vision."""
+        """Dashboard: ai_vs_ai = robot plays both sides; ai_vs_human = vision or sim clicks."""
         mode = (msg.data or '').strip()
         if mode not in ('ai_vs_ai', 'ai_vs_human'):
             return
         self._dashboard_mode = mode
-        if not self._simulation_mode:
-            if mode == 'ai_vs_ai':
-                self.get_logger().warn(
-                    'AI vs AI is simulation-only — ignoring (hardware uses human vs AI on the physical board)'
-                )
-            return
         if self._game_state not in (GameState.IDLE, GameState.GAME_OVER):
             self.get_logger().warn(
                 f'Ignoring game mode change during active game (state={self._game_state.name})'
@@ -327,7 +372,7 @@ class GameManagerNode(Node):
             return
         if move not in legal:
             alert = String()
-            alert.data = f'Illegal move {move} — try again'
+            alert.data = f'Illegal move {move} - try again'
             self._illegal_move_pub.publish(alert)
             return
         self.get_logger().info(f'[SIM] Dashboard human move: {move}')
@@ -340,6 +385,18 @@ class GameManagerNode(Node):
         self._publish_status()
         self._compute_and_emit_ai_move()
 
+    def _human_ready_cb(self, _: Empty) -> None:
+        """Dashboard confirm - process human move without relying on turn-detector IDLE/WATCHING."""
+        if self._self_play:
+            return
+        if self._game_state != GameState.WAITING_HUMAN:
+            self.get_logger().warn(
+                f'human_ready ignored (state={self._game_state.name})'
+            )
+            return
+        self.get_logger().info('human_ready - confirming human move')
+        self._begin_human_move_detection()
+
     def _human_move_detected_cb(self, msg: Bool) -> None:
         if not msg.data:
             return
@@ -347,8 +404,44 @@ class GameManagerNode(Node):
             return
         if self._game_state != GameState.WAITING_HUMAN:
             return
+        self._begin_human_move_detection()
+
+    @staticmethod
+    def _move_origin_matches_human(move: str, grid: list, human_red: bool) -> bool:
+        """True if reference grid shows a human piece on the move's from-square."""
+        idx = origin_grid_index(move)
+        if idx is None or idx < 0 or idx >= len(grid):
+            return False
+        val = grid[idx]
+        if val == 0:
+            return False
+        return val > 0 if human_red else val < 0
+
+    def _begin_human_move_detection(self) -> None:
+        """Transition to DETECTING_MOVE and refresh vision before move inference."""
+        self._tell_vision_to_watch(False)
         self._game_state = GameState.DETECTING_MOVE
         self._publish_status()
+        if self._simulation_mode:
+            self._process_human_move()
+            return
+        if not self._get_board_state_cli.service_is_ready():
+            self._process_human_move()
+            return
+        req = GetBoardState.Request()
+        req.force_rescan = True
+        future = self._get_board_state_cli.call_async(req)
+        future.add_done_callback(self._on_human_move_scan_done)
+
+    def _on_human_move_scan_done(self, future) -> None:
+        if self._game_state != GameState.DETECTING_MOVE:
+            return
+        try:
+            resp = future.result()
+            if resp is not None and resp.success and resp.board_state is not None:
+                self._latest_board_state = resp.board_state
+        except Exception as e:
+            self.get_logger().warn(f'Human-move rescan failed: {e}')
         self._process_human_move()
 
     def _ai_execution_result_cb(self, msg: AiExecutionResult) -> None:
@@ -384,12 +477,12 @@ class GameManagerNode(Node):
                 self._check_game_over()
             else:
                 self.get_logger().error(
-                    'robot_move_complete but no pending AI move — ignoring spurious signal'
+                    'robot_move_complete but no pending AI move - ignoring spurious signal'
                 )
                 return
 
             if self._game_state == GameState.GAME_OVER:
-                self.get_logger().info('Game over — robot finished last move')
+                self.get_logger().info('Game over - robot finished last move')
                 self._publish_status()
                 return
 
@@ -401,30 +494,36 @@ class GameManagerNode(Node):
                 self._compute_and_emit_ai_move()
                 return
 
-            self.get_logger().info('Robot move execution confirmed — waiting for human')
+            self.get_logger().info('Robot move execution confirmed - waiting for human')
             self._game_state = GameState.WAITING_HUMAN
             self._tell_vision_to_watch(True)
             self._publish_status()
             return
 
         if status == AiExecutionResult.BOARD_VERIFY_FAILED:
+            if self._commit_pending_ai_after_robot(
+                'Board verify failed - committing pending AI move (trust_robot)'
+            ):
+                return
+            if self._recover_ai_move_after_verify_failure():
+                return
             self._discard_pending_ai_after_planner_abort(
                 'Board verification failed after robot move (FEN unchanged)',
-                'Robot move did not match vision — align pieces with the UI or use New Game',
+                'Robot move could not be confirmed by vision - use Sync Board or New Game',
             )
             return
 
         if status == AiExecutionResult.AI_MOTION_FAILED:
             self._discard_pending_ai_after_planner_abort(
-                'AI motion subtree failed — pending AI move discarded (FEN unchanged)',
-                'Robot could not complete the planned move — check arm/gripper/board; '
+                'AI motion subtree failed - pending AI move discarded (FEN unchanged)',
+                'Robot could not complete the planned move - check arm/gripper/board; '
                 'UI position unchanged; use New Game if the physical board moved',
             )
             return
 
         self._discard_pending_ai_after_planner_abort(
-            f'Unknown ai_execution_result status={status} — pending move discarded (FEN unchanged)',
-            f'Unexpected planner status ({status}) — pending move discarded; check logs',
+            f'Unknown ai_execution_result status={status} - pending move discarded (FEN unchanged)',
+            f'Unexpected planner status ({status}) - pending move discarded; check logs',
         )
         return
 
@@ -442,7 +541,7 @@ class GameManagerNode(Node):
         # Planner never acked the command - abandon this pending move
         self._discard_pending_ai_after_planner_abort(
             f'Planner did not ack ai_move_command id={self._active_dispatch_id} (timeout)',
-            'Planner did not accept AI command — move aborted; check planner logs',
+            'Planner did not accept AI command - move aborted; check planner logs',
         )
 
     def _ai_command_ack_cb(self, msg: AiCommandAck) -> None:
@@ -456,15 +555,86 @@ class GameManagerNode(Node):
         else:
             self._discard_pending_ai_after_planner_abort(
                 f'Planner NACKed ai_move_command id={dispatch_id}: {reason}',
-                f'Planner rejected AI command ({reason}) — move aborted; check planner logs',
+                f'Planner rejected AI command ({reason}) - move aborted; check planner logs',
             )
+
+    def _commit_pending_ai_after_robot(self, log_msg: str) -> bool:
+        """Apply pending AI move after robot motion; advance game state."""
+        move = self._pending_ai_move
+        if not move or self._game_state != GameState.EXECUTING_MOVE:
+            return False
+
+        trust = bool(self.get_parameter('trust_robot_move_after_verify_fail').value)
+        grid = (
+            list(self._latest_board_state.grid)
+            if self._latest_board_state is not None
+            else None
+        )
+        if not trust:
+            if grid is None or not self._pending_move_matches_grid(
+                move, self._current_fen, grid
+            ):
+                return False
+            self.get_logger().warn(log_msg)
+        else:
+            if grid is not None and not self._pending_move_matches_grid(
+                move, self._current_fen, grid, loose=True
+            ):
+                self.get_logger().warn(
+                    f'{log_msg} - weak square match; applying {move} anyway'
+                )
+            else:
+                self.get_logger().warn(log_msg)
+
+        self._apply_move(
+            move,
+            is_ai=True,
+            eval_cp=self._pending_ai_eval_cp,
+            depth=self._pending_ai_depth,
+            elapsed=self._pending_ai_elapsed,
+        )
+        self._pending_ai_move = None
+        self._active_dispatch_id = None
+        self._clear_planner_ack_timer()
+        self._check_game_over()
+        if self._game_state == GameState.GAME_OVER:
+            self._publish_status()
+            return True
+        if self._self_play:
+            self._game_state = GameState.COMPUTING_AI
+            self._publish_status()
+            self._compute_and_emit_ai_move()
+        else:
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            self._publish_status()
+        return True
+
+    def _recover_ai_move_after_verify_failure(self) -> bool:
+        """Infer pending AI move from vision when verify fails (trust_robot disabled path)."""
+        if bool(self.get_parameter('trust_robot_move_after_verify_fail').value):
+            return False
+        move = self._pending_ai_move
+        if not move or self._game_state != GameState.EXECUTING_MOVE:
+            return False
+        if self._latest_board_state is None:
+            return False
+        grid = list(self._latest_board_state.grid)
+        inferred = self._infer_move_from_board(self._current_fen, grid, tolerance=12)
+        if inferred != move and not self._pending_move_matches_grid(
+            move, self._current_fen, grid, loose=True
+        ):
+            return False
+        return self._commit_pending_ai_after_robot(
+            f'Board verify failed but vision matches pending move {move}'
+        )
 
     def _discard_pending_ai_after_planner_abort(self, log_msg: str, alert_text: str) -> None:
         """Drop pending AI move without applying FEN; return to human watching."""
         if self._game_state != GameState.EXECUTING_MOVE:
             return
         if not self._pending_ai_move:
-            self.get_logger().warn(f'{log_msg} — no pending AI move (ignored)')
+            self.get_logger().warn(f'{log_msg} - no pending AI move (ignored)')
             return
         self.get_logger().error(log_msg)
         self._pending_ai_move = None
@@ -473,36 +643,61 @@ class GameManagerNode(Node):
         alert = String()
         alert.data = alert_text
         self._illegal_move_pub.publish(alert)
-        self._game_state = GameState.WAITING_HUMAN
-        self._tell_vision_to_watch(True)
-        self._publish_status()
+        if self._self_play:
+            self._game_state = GameState.COMPUTING_AI
+            self._publish_status()
+            self._compute_and_emit_ai_move()
+        else:
+            self._game_state = GameState.WAITING_HUMAN
+            self._tell_vision_to_watch(True)
+            self._publish_status()
 
     def _estop_cb(self, msg: Bool) -> None:
         """E-stop during motion or while waiting on the AI engine."""
         if not msg.data:
             return
         if self._game_state == GameState.EXECUTING_MOVE:
-            self._discard_pending_ai_after_planner_abort(
-                'E-stop asserted during robot AI move — pending move discarded (FEN unchanged)',
-                'E-stop: robot move cancelled in software — confirm physical board matches UI',
-            )
+            if self._self_play:
+                self._pending_ai_move = None
+                self._active_dispatch_id = None
+                self._clear_planner_ack_timer()
+                self._game_state = GameState.IDLE
+                alert = String()
+                alert.data = (
+                    'E-stop during AI vs AI move - confirm board matches UI, then Start'
+                )
+                self._illegal_move_pub.publish(alert)
+                self._publish_status()
+            else:
+                self._discard_pending_ai_after_planner_abort(
+                    'E-stop asserted during robot AI move - pending move discarded (FEN unchanged)',
+                    'E-stop: robot move cancelled in software - confirm physical board matches UI',
+                )
             return
         if self._game_state == GameState.COMPUTING_AI:
             self._abort_ai_computation = True
             self._cancel_ai_rpc_in_flight()
             self._active_ai_request_token = None
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
-            alert = String()
-            alert.data = (
-                'E-stop during AI thinking — cancelled engine request; make a move or New Game'
-            )
+            if self._self_play:
+                self._game_state = GameState.IDLE
+                alert = String()
+                alert.data = (
+                    'E-stop during AI vs AI - cancelled engine request; press Start to resume'
+                )
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                alert = String()
+                alert.data = (
+                    'E-stop during AI thinking - cancelled engine request; '
+                    'make a move or New Game'
+                )
             self._illegal_move_pub.publish(alert)
             self._publish_status()
             return
 
     def _recover_ai_computation_failed(self, detail: str) -> None:
-        """AI service or FEN computation failed while in COMPUTING_AI — unblock the game."""
+        """AI service or FEN computation failed while in COMPUTING_AI - unblock the game."""
         self._clear_ai_rpc_timeout_timer()
         self._clear_ai_service_retry_timer()
         self._ai_move_future = None
@@ -511,7 +706,7 @@ class GameManagerNode(Node):
         self.get_logger().error(detail)
         alert = String()
         alert.data = (
-            f'{detail} — make a move on the board or press New Game.'
+            f'{detail} - make a move on the board or press New Game.'
         )
         self._illegal_move_pub.publish(alert)
         if self._game_state == GameState.COMPUTING_AI:
@@ -523,7 +718,7 @@ class GameManagerNode(Node):
                     self._game_result = 'unknown'
                     self._game_result_reason = 'ai_engine_failed'
                     alert.data = (
-                        f'{detail} — AI vs AI stopped after repeated failures. '
+                        f'{detail} - AI vs AI stopped after repeated failures. '
                         'Try Reset or change engines.'
                     )
                     self._illegal_move_pub.publish(alert)
@@ -558,12 +753,12 @@ class GameManagerNode(Node):
 
     def _stop_game_cb(self, _: Empty) -> None:
         """Abort current game and return to idle (setup); board reset to start."""
-        self.get_logger().info('Stop game — returning to idle')
+        self.get_logger().info('Stop game - returning to idle')
         self._halt_game()
 
     def _reset_game_cb(self, _: Empty) -> None:
         """Abort and immediately start a fresh game in the current dashboard mode."""
-        self.get_logger().info('Reset game — restarting')
+        self.get_logger().info('Reset game - restarting')
         self._halt_game()
         self._begin_new_game()
 
@@ -584,19 +779,112 @@ class GameManagerNode(Node):
         if self._simulation_mode:
             self._apply_dashboard_mode(self._dashboard_mode)
             self._publish_logical_board_state()
+            self._kick_off_game()
+            return
 
+        # ── Hardware mode ────────────────────────────────────────────────
+        # Scan the physical board so the AI operates on what is *actually*
+        # placed on the table, not the standard starting position.
+        self._apply_dashboard_mode(self._dashboard_mode)
+        # Leave idle immediately so the dashboard clears "Starting game…" while
+        # the camera scan runs (status stays idle until kick_off otherwise).
+        if self._self_play:
+            self._game_state = GameState.COMPUTING_AI
+        else:
+            self._game_state = GameState.WAITING_HUMAN
+        self._publish_status()
+
+        if self._get_board_state_cli.service_is_ready():
+            self.get_logger().info(
+                'New game (hardware): scanning physical board for starting position…'
+            )
+            self._startup_scan_retries = 0
+            self._do_startup_scan()
+        else:
+            self.get_logger().warn(
+                'Vision service not ready - starting from STARTING_FEN (place pieces first)'
+            )
+            self._kick_off_game()
+
+    def _do_startup_scan(self):
+        req = GetBoardState.Request()
+        req.force_rescan = True
+        future = self._get_board_state_cli.call_async(req)
+        future.add_done_callback(self._on_startup_board_scan_done)
+
+    def _retry_startup_scan(self):
+        if hasattr(self, '_startup_retry_timer') and self._startup_retry_timer:
+            self.destroy_timer(self._startup_retry_timer)
+            self._startup_retry_timer = None
+        self._do_startup_scan()
+
+    def _on_startup_board_scan_done(self, future) -> None:
+        """Apply the vision-scanned FEN and begin game play.
+
+        Even if the scanned board is incomplete (missing kings, wrong
+        piece count due to YOLO glitching), we repair it to be minimally
+        legal rather than falling back to STARTING_FEN.  This way the AI
+        always operates on what is *actually* on the table.
+        """
+        try:
+            resp = future.result()
+        except Exception as e:
+            self.get_logger().warn(
+                f'Startup board scan failed ({e}) - using STARTING_FEN'
+            )
+            self._kick_off_game()
+        else:
+            if resp is not None and resp.success:
+                # vision_node publishes grid, not fen, so we construct it
+                raw_fen = resp.board_state.fen
+                if not raw_fen:
+                    raw_fen = GameManagerNode._grid_to_fen(resp.board_state.grid, STARTING_FEN)
+                
+                repaired_fen = self._sanitize_fen_for_engine(raw_fen)
+                if repaired_fen != raw_fen:
+                    self.get_logger().warn(
+                        f'Vision FEN was incomplete (missing king(s)) - '
+                        f'repaired for engine.  Raw: {raw_fen}  '
+                        f'Repaired: {repaired_fen}'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'Board scan OK - game starting from: {repaired_fen}'
+                    )
+                self._current_fen = repaired_fen
+                self._move_history = []
+                self._move_count = 0
+                self._kick_off_game()
+            else:
+                if self._startup_scan_retries < 6:
+                    self._startup_scan_retries += 1
+                    self.get_logger().info(
+                        f'Vision not ready, retrying ({self._startup_scan_retries}/6) in 0.5s...'
+                    )
+                    self._startup_retry_timer = self.create_timer(0.5, self._retry_startup_scan)
+                else:
+                    self.get_logger().warn(
+                        'Board scan failed after retries - using STARTING_FEN'
+                    )
+                    self._kick_off_game()
+
+    def _kick_off_game(self) -> None:
+        """Transition into the first game state and begin play."""
+        self._apply_dashboard_mode(self._dashboard_mode)
         if self._robot_is_red or self._self_play:
             self._game_state = GameState.COMPUTING_AI
+            self._align_fen_side_to_play()
             self._publish_status()
             self._compute_and_emit_ai_move()
         else:
             self._game_state = GameState.WAITING_HUMAN
+            self._align_fen_side_to_play()
             self._tell_vision_to_watch(True)
             self._publish_status()
 
     def _resync_from_vision_cb(self, _: Empty) -> None:
-        """Force a GetBoardState scan and adopt the returned FEN as authoritative."""
-        self.get_logger().warn('Resync requested — adopting vision FEN as authoritative state')
+        """Align game FEN with the camera; keeps move history (sync is not a new game)."""
+        self.get_logger().warn('Resync requested - adopting vision FEN (history preserved)')
         self._abort_ai_computation = True
         self._cancel_ai_rpc_in_flight()
         self._active_dispatch_id = None
@@ -632,20 +920,31 @@ class GameManagerNode(Node):
                 return
             fen = resp.board_state.fen
             if not fen:
+                fen = self._grid_to_fen(
+                    list(resp.board_state.grid), self._current_fen or STARTING_FEN
+                )
+            if not fen or not any(resp.board_state.grid):
                 self.get_logger().error('Resync failed: empty FEN from vision')
                 alert = String()
-                alert.data = 'Resync failed: empty FEN from vision'
+                alert.data = 'Resync failed: could not build FEN from camera grid'
                 self._illegal_move_pub.publish(alert)
                 return
 
-            self._current_fen = fen
-            self._move_history = []
-            self._move_count = 0
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
-            self._publish_status()
+            self._current_fen = self._sanitize_fen_for_engine(fen)
+            self._align_fen_side_to_play()
+            if self._self_play:
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                self._compute_and_emit_ai_move()
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                self._publish_status()
             ok = String()
-            ok.data = 'Resync OK: adopted vision FEN as authoritative'
+            ok.data = (
+                'Board synced from camera. Move history kept - use Restart if the '
+                'physical game does not match the log.'
+            )
             self._illegal_move_pub.publish(ok)
 
         future.add_done_callback(_done)
@@ -654,24 +953,75 @@ class GameManagerNode(Node):
     # Game flow
     # ------------------------------------------------------------------
 
+    def _human_side_is_red(self) -> bool:
+        return self._human_color == 'red'
+
+    def _return_to_human_watch(self, alert_text: str | None = None) -> None:
+        if alert_text:
+            alert = String()
+            alert.data = alert_text
+            self._illegal_move_pub.publish(alert)
+        self._game_state = GameState.WAITING_HUMAN
+        self._align_fen_side_to_play()
+        self._tell_vision_to_watch(True)
+        self._publish_status()
+
     def _process_human_move(self) -> None:
         """Detect and validate the human move from the current board state."""
         if self._latest_board_state is None:
             self.get_logger().warn('No board state available for human move detection')
-            self._game_state = GameState.WAITING_HUMAN
+            self._return_to_human_watch(
+                'No camera board state - check vision, then move again or press Confirm move'
+            )
             return
 
+        human_red = self._human_side_is_red()
+        side_red = self._side_to_move_is_red()
+        if side_red != human_red:
+            self.get_logger().info(
+                f'FEN active color was {"red" if side_red else "black"} but human is '
+                f'{self._human_color} - aligning for move detection'
+            )
+            self._current_fen = self._set_fen_active_color(self._current_fen, human_red)
+
+        grid = list(self._latest_board_state.grid)
+        base_tol = int(self.get_parameter('human_move_grid_tolerance').value)
+        ref_grid = self._human_watch_reference_grid
+        ref_for_side = ref_grid if ref_grid is not None else self._fen_to_grid(self._current_fen)
         detected_move = self._infer_move_from_board(
-            self._current_fen, self._latest_board_state.grid
+            self._current_fen,
+            grid,
+            tolerance=base_tol,
+            reference_grid=ref_grid,
+            human_red=human_red,
         )
+        if detected_move is None and base_tol < 16:
+            detected_move = self._infer_move_from_board(
+                self._current_fen,
+                grid,
+                tolerance=16,
+                reference_grid=ref_grid,
+                human_red=human_red,
+            )
+
+        if detected_move is not None and not self._move_origin_matches_human(
+            detected_move, ref_for_side, human_red
+        ):
+            self.get_logger().warn(
+                f'Rejecting inferred human move {detected_move}: no '
+                f'{self._human_color} piece on from-square in reference grid'
+            )
+            detected_move = None
 
         if detected_move is None:
-            self.get_logger().warn('Could not infer a valid human move from board state')
-            alert_msg = String()
-            alert_msg.data = 'Could not detect move -- please re-place your piece'
-            self._illegal_move_pub.publish(alert_msg)
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
+            self.get_logger().warn(
+                'Could not infer a valid human move from board state '
+                f'(tol={base_tol}, pieces_on_board={sum(1 for x in grid if x != 0)})'
+            )
+            self._return_to_human_watch(
+                'Could not read your move from the camera - adjust pieces, '
+                'press Confirm move in the dashboard, or Sync board'
+            )
             return
 
         self.get_logger().info(f'Human move detected: {detected_move}')
@@ -769,7 +1119,7 @@ class GameManagerNode(Node):
 
         fen_before_ai = self._ai_fen_at_request or self._current_fen
 
-        # Validate move is legal — pyffish and Stockfish sometimes disagree on coordinate system
+        # Validate move is legal - pyffish and Stockfish sometimes disagree on coordinate system
         import threading
         if not hasattr(self, '_pyffish_lock'):
             self._pyffish_lock = threading.Lock()
@@ -778,13 +1128,13 @@ class GameManagerNode(Node):
             with self._pyffish_lock:
                 legal = sf.legal_moves(VARIANT, fen_before_ai, [])
             if not legal:
-                self._recover_ai_computation_failed('No legal moves — game over?')
+                self._recover_ai_computation_failed('No legal moves - game over?')
                 return
             resolved, exact = resolve_to_legal_move(fen_before_ai, ai_move, legal)
             if not exact and resolved != ai_move:
                 self.get_logger().warn(
                     f'Engine move {ai_move!r} not in pyffish legal set '
-                    f'({len(legal)} moves) — using {resolved!r}'
+                    f'({len(legal)} moves) - using {resolved!r}'
                 )
             elif not exact:
                 self.get_logger().warn(
@@ -937,8 +1287,8 @@ class GameManagerNode(Node):
             if not PYFFISH_OK:
                 raise RuntimeError('pyffish unavailable')
             fen_before = self._current_fen
-            side_before = fen_before.split()[1] if fen_before else 'w'
-            is_red_move = 'w' in side_before
+            parsed_red = self._fen_active_is_red(fen_before)
+            is_red_move = parsed_red if parsed_red is not None else True
 
             self._current_fen = sf.get_fen(VARIANT, self._current_fen, [move])
             self._move_history.append(move)
@@ -955,8 +1305,7 @@ class GameManagerNode(Node):
             hist_msg.engine_used = self._active_ai_engine if is_ai else 'human'
             self._move_history_pub.publish(hist_msg)
             self._publish_status()
-            if self._simulation_mode:
-                self._publish_logical_board_state()
+            self._publish_logical_board_state()
         except Exception as e:
             self.get_logger().error(f'Failed to apply move {move}: {e}')
 
@@ -1083,18 +1432,91 @@ class GameManagerNode(Node):
             except Exception:
                 pass
 
-    def _infer_move_from_board(self, fen: str, new_grid: list) -> str | None:
+    def _grid_mismatch_count(self, expected: list, observed: list) -> int:
+        return sum(1 for a, b in zip(expected, observed) if a != b)
+
+    def _pending_move_matches_grid(
+        self, move: str, fen: str, grid: list, loose: bool = False
+    ) -> bool:
+        """True if from/to squares of move match expected post-move grid vs observation."""
+        try:
+            expected = self._fen_to_grid(sf.get_fen(VARIANT, fen, [move]))
+        except Exception:
+            return False
+        critical = move_critical_indices(move)
+        if not critical:
+            return self._grids_match(expected, grid, tolerance=12 if loose else 6)
+        for idx in critical:
+            if expected[idx] != grid[idx]:
+                if not loose:
+                    return False
+                if expected[idx] != 0 and grid[idx] != 0 and expected[idx] != grid[idx]:
+                    return False
+        return True
+
+    def _infer_move_from_board(
+        self,
+        fen: str,
+        new_grid: list,
+        tolerance: int = 0,
+        reference_grid: list | None = None,
+        human_red: bool | None = None,
+    ) -> str | None:
         """
-        Infer the human move by comparing the new board grid to the legal moves
-        in the current position and finding which legal move results in the observed grid.
+        Pick the legal move whose post-move grid best matches the observation.
+
+        When reference_grid is set (board before the human moved), only consider
+        moves that touch squares that actually changed - avoids spurious back-rank
+        matches when YOLO is sparse.
         """
         try:
             legal_moves = sf.legal_moves(VARIANT, fen, [])
-            for move in legal_moves:
+            ref = reference_grid if reference_grid is not None else self._fen_to_grid(fen)
+            changed = {i for i in range(90) if ref[i] != new_grid[i]}
+
+            pool = legal_moves
+            if changed:
+                touched = [
+                    m
+                    for m in legal_moves
+                    if move_critical_indices(m) & changed
+                ]
+                if len(changed) >= 2:
+                    both_ends = [
+                        m
+                        for m in touched
+                        if move_critical_indices(m).issubset(changed)
+                    ]
+                    if both_ends:
+                        touched = both_ends
+                if touched:
+                    pool = touched
+
+            if human_red is not None:
+                pool = [
+                    m
+                    for m in pool
+                    if self._move_origin_matches_human(m, ref, human_red)
+                ]
+                if not pool:
+                    return None
+
+            best_move: str | None = None
+            best_mismatches = 91
+            for move in pool:
                 candidate_fen = sf.get_fen(VARIANT, fen, [move])
                 candidate_grid = self._fen_to_grid(candidate_fen)
-                if self._grids_match(candidate_grid, new_grid):
-                    return move
+                mismatches = self._grid_mismatch_count(candidate_grid, new_grid)
+                if mismatches < best_mismatches:
+                    best_mismatches = mismatches
+                    best_move = move
+            if best_move is not None and best_mismatches <= tolerance:
+                if pool is not legal_moves:
+                    self.get_logger().info(
+                        f'Move inference narrowed to {len(pool)} candidate(s) '
+                        f'from {len(changed)} changed square(s)'
+                    )
+                return best_move
         except Exception as e:
             self.get_logger().error(f'Move inference error: {e}')
         return None
@@ -1111,7 +1533,15 @@ class GameManagerNode(Node):
         start_watching is published once the arm confirms it has arrived
         (or immediately if the service is unavailable, to degrade gracefully).
         """
+        if self._self_play:
+            if not watch:
+                self._human_watch_reference_grid = None
+                msg = Bool()
+                msg.data = False
+                self._start_watching_pub.publish(msg)
+            return
         if not watch:
+            self._human_watch_reference_grid = None
             msg = Bool()
             msg.data = False
             self._start_watching_pub.publish(msg)
@@ -1119,7 +1549,7 @@ class GameManagerNode(Node):
 
         if not self._move_to_scan_pose_cli.service_is_ready():
             self.get_logger().warn(
-                'move_to_scan_pose service not ready — starting watch without repositioning'
+                'move_to_scan_pose service not ready - starting watch without repositioning'
             )
             self._publish_start_watching()
             return
@@ -1134,13 +1564,18 @@ class GameManagerNode(Node):
             if result is None or not result.success:
                 self.get_logger().warn(
                     f'Scan pose move failed ({getattr(result, "message", "no result")}) '
-                    '— starting watch anyway'
+                    '- starting watch anyway'
                 )
         except Exception as e:
-            self.get_logger().warn(f'Scan pose service error: {e} — starting watch anyway')
+            self.get_logger().warn(f'Scan pose service error: {e} - starting watch anyway')
         self._publish_start_watching()
 
     def _publish_start_watching(self) -> None:
+        # Prefer the latest camera grid so inference matches vision's turn detector.
+        if self._latest_board_state is not None:
+            self._human_watch_reference_grid = list(self._latest_board_state.grid)
+        elif self._current_fen:
+            self._human_watch_reference_grid = self._fen_to_grid(self._current_fen)
         msg = Bool()
         msg.data = True
         self._start_watching_pub.publish(msg)
@@ -1151,8 +1586,12 @@ class GameManagerNode(Node):
         if not PYFFISH_OK or not move or len(move) < 4:
             return False
         try:
-            to_file = ord(move[2].lower()) - ord('a')
-            to_rank = int(move[3])
+            parsed = _resolver_parse_move(move)
+            if parsed is None:
+                return False
+            _, (to_file_ch, to_rank_1based) = parsed
+            to_file = ord(to_file_ch) - ord('a')
+            to_rank = to_rank_1based - 1  # UCI rank 1-10 → 0-indexed 0-9
             if not (0 <= to_file < 9 and 0 <= to_rank < 10):
                 return False
             idx = to_rank * 9 + to_file
@@ -1176,7 +1615,7 @@ class GameManagerNode(Node):
         msg.grid = [int(x) for x in grid]
         msg.fen = self._current_fen
         msg.last_move = self._move_history[-1] if self._move_history else ''
-        msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
+        msg.is_red_turn = self._side_to_move_is_red()
         msg.detection_confidence = 1.0
         self._board_state_pub.publish(msg)
 
@@ -1185,7 +1624,7 @@ class GameManagerNode(Node):
         msg.header = Header()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.status = self._game_state.name.lower()
-        msg.is_red_turn = 'w' in self._current_fen.split()[1] if self._current_fen else True
+        msg.is_red_turn = self._side_to_move_is_red()
         msg.move_count = self._move_count
         msg.current_fen = self._current_fen
         if self._game_state == GameState.COMPUTING_AI:
@@ -1223,6 +1662,94 @@ class GameManagerNode(Node):
                         grid[idx] = code if ch.isupper() else -code
                     file_idx += 1
         return grid
+
+    @staticmethod
+    def _grid_to_fen(grid: list, original_fen: str) -> str:
+        """Reconstruct a FEN string from a flat int8[90] grid.
+
+        The board part is rebuilt from the grid; the metadata tail (side to
+        move, castling, en-passant, move counters) is preserved unchanged from
+        `original_fen`.
+        """
+        PIECE_CHARS = {1: 'K', 2: 'A', 3: 'B', 4: 'N', 5: 'R', 6: 'C', 7: 'P'}
+        rows = []
+        for rank in range(9, -1, -1):   # FEN: rank 9 (black home) → rank 0 (red home)
+            row = ''
+            empty = 0
+            for file in range(9):
+                val = grid[rank * 9 + file]
+                if val == 0:
+                    empty += 1
+                else:
+                    if empty:
+                        row += str(empty)
+                        empty = 0
+                    ch = PIECE_CHARS.get(abs(val), '?')
+                    row += ch if val > 0 else ch.lower()
+            if empty:
+                row += str(empty)
+            rows.append(row)
+        board_part = '/'.join(rows)
+        parts = original_fen.split()
+        parts[0] = board_part
+        return ' '.join(parts)
+
+    @staticmethod
+    def _sanitize_fen_for_engine(fen: str) -> str:
+        """Ensure a vision-scanned FEN is legally playable.
+
+        The YOLO detector may miss pieces (especially in glitchy conditions).
+        If either king is absent, we insert it at its standard starting square
+        (e0 for Red = index 4, e9 for Black = index 85) or, if that square is
+        already occupied, at the first empty cell in the home row.
+
+        This means the AI always receives a FEN that pyffish can parse, even
+        when the physical board is partially set up or detection is imperfect.
+        No pieces are *removed* - we only add the missing king(s).
+        """
+        try:
+            grid = list(GameManagerNode._fen_to_grid(fen))
+            has_red_king   = any(v ==  1 for v in grid)
+            has_black_king = any(v == -1 for v in grid)
+
+            if has_red_king and has_black_king:
+                out = fen
+            else:
+                out = None
+            if out is not None:
+                if GameManagerNode._fen_active_is_red(out) is None:
+                    out = GameManagerNode._set_fen_active_color(out, True)
+                return out
+
+            if not has_red_king:
+                # Red king default: e0 → rank 0, file 4 → index 4
+                preferred = 0 * 9 + 4
+                if grid[preferred] == 0:
+                    grid[preferred] = 1
+                else:
+                    for f in range(9):
+                        if grid[f] == 0:
+                            grid[f] = 1
+                            break
+
+            if not has_black_king:
+                # Black king default: e9 → rank 9, file 4 → index 85
+                preferred = 9 * 9 + 4
+                if grid[preferred] == 0:
+                    grid[preferred] = -1
+                else:
+                    for f in range(9):
+                        idx = 9 * 9 + f
+                        if grid[idx] == 0:
+                            grid[idx] = -1
+                            break
+
+            out = GameManagerNode._grid_to_fen(grid, fen)
+            if GameManagerNode._fen_active_is_red(out) is None:
+                out = GameManagerNode._set_fen_active_color(out, True)
+            return out
+        except Exception:
+            return fen  # if anything goes wrong, pass through unchanged
 
     @staticmethod
     def _grids_match(a: list, b: list, tolerance: int = 0) -> bool:

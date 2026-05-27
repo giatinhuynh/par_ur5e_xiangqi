@@ -1,12 +1,12 @@
 # xiangqi_bringup
 
-**Bringup only**: launch files and YAML parameters. No runtime algorithms—this package wires the other packages together.
+**Bringup only**: launch files and YAML parameters. No runtime algorithms-this package wires the other packages together.
 
 ## Launch files
 
 | File | Behaviour |
 |------|-----------|
-| `launch/xiangqi_system.launch.py` | Starts the full Xiangqi stack: `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`. Launch arguments: `simulation_mode`, `engine_type`, `difficulty`. **Does not** start UR5e, MoveIt, or camera drivers—those are started separately via the lab (`arm_drivers`, `moveit_config_driver`). |
+| `launch/xiangqi_system.launch.py` | Starts the full Xiangqi stack: `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`. Launch arguments: `simulation_mode`, `engine_type`, `difficulty`. **Does not** start UR5e, MoveIt, or camera drivers-those are started separately via the lab (`arm_drivers`, `moveit_config_driver`). |
 | `launch/xiangqi_sim.launch.py` | Includes `xiangqi_system.launch.py` with `simulation_mode:=true`, `vision_config_sim.yaml`, and launch args `engine_type` (default `minimax`), `difficulty` (default `20` for Stockfish). Use for dashboard / AI testing without hardware. See root [README.md](../../../README.md) §8b. |
 
 ## Config (`config/`)

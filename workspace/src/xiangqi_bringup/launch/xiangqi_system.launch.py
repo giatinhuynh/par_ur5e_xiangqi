@@ -57,6 +57,11 @@ def generate_launch_description():
         default_value='vision_config.yaml',
         description='Vision params YAML under xiangqi_bringup/config (e.g. vision_config_sim.yaml)',
     )
+    move_to_initial_on_start_arg = DeclareLaunchArgument(
+        'move_to_initial_pose_on_startup',
+        default_value='true',
+        description='After launch, move arm to initial pose once (hardware only)',
+    )
 
     sim = LaunchConfiguration('simulation_mode')
     engine = LaunchConfiguration('engine_type')
@@ -64,6 +69,7 @@ def generate_launch_description():
     self_play = LaunchConfiguration('self_play')
     robot_plays_red = LaunchConfiguration('robot_plays_red')
     vision_config_file = LaunchConfiguration('vision_config_file')
+    move_to_initial_on_start = LaunchConfiguration('move_to_initial_pose_on_startup')
 
     vision_cfg = PathJoinSubstitution([
         FindPackageShare('xiangqi_bringup'),
@@ -72,7 +78,8 @@ def generate_launch_description():
     ])
 
     return LaunchDescription([
-        sim_arg, engine_arg, difficulty_arg, self_play_arg, robot_plays_red_arg, vision_config_arg,
+        sim_arg, engine_arg, difficulty_arg, self_play_arg, robot_plays_red_arg,
+        vision_config_arg, move_to_initial_on_start_arg,
 
         LogInfo(msg='Starting Xiangqi Robot System...'),
 
@@ -90,7 +97,10 @@ def generate_launch_description():
             name='manipulation_node',
             parameters=[
                 get_config('manipulation_config.yaml'),
-                {'simulation_mode': sim},
+                {
+                    'simulation_mode': sim,
+                    'move_to_initial_pose_on_startup': move_to_initial_on_start,
+                },
             ],
             output='screen',
         ),

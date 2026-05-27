@@ -1,5 +1,5 @@
 /**
- * Xiangqi Dashboard — dashboard.js
+ * Xiangqi Dashboard - dashboard.js
  * Interactive board, mode switching, real-time state via SocketIO.
  */
 
@@ -41,13 +41,32 @@ function coordToGridIdx(file, rank) { return rank * COLS + file; }
 function coordToUCI(file, rank) {
   return String.fromCharCode(97 + file) + (rank + 1).toString();
 }
-function uciToCoord(uci) {
-  if (!uci || uci.length < 4) return null;
-  const file = uci.charCodeAt(0) - 97;
-  const rank = parseInt(uci[1]) - 1 + (uci.length >= 4 && uci[1] === '1' && uci[2] === '0' ? 9 : 0);
-  const toFile = uci.charCodeAt(uci.length === 5 ? 2 : 2) - 97;
-  const toRank = parseInt(uci.slice(uci.length === 5 ? 3 : 3)) - 1;
-  return { fromFile: file, fromRank: rank, toFile, toRank };
+
+/** Parse pyffish/UCI move (ranks 1–10, e.g. f6g6 or e10f10) to board grid coords. */
+function parseUciMove(move) {
+  if (!move) return null;
+  let i = 0;
+  const parseSquare = () => {
+    if (i >= move.length) return null;
+    const file = move.charCodeAt(i) - 97;
+    if (file < 0 || file > 8) return null;
+    i += 1;
+    let rank;
+    if (i + 1 < move.length && move[i] === '1' && move[i + 1] === '0') {
+      rank = 9;
+      i += 2;
+    } else if (i < move.length && move[i] >= '1' && move[i] <= '9') {
+      rank = parseInt(move[i], 10) - 1;
+      i += 1;
+    } else {
+      return null;
+    }
+    return { file, rank };
+  };
+  const from = parseSquare();
+  const to = parseSquare();
+  if (!from || !to || i !== move.length) return null;
+  return { fromFile: from.file, fromRank: from.rank, toFile: to.file, toRank: to.rank };
 }
 
 // ── State ─────────────────────────────────────────────────────────
@@ -81,10 +100,20 @@ let state = {
 // Human color choice in AI vs Human mode ('red' | 'black')
 let humanColor = 'red';
 
-function setHumanColor(color) {
+function applyHumanColorUI(color) {
+  if (color !== 'red' && color !== 'black') return;
   humanColor = color;
   document.getElementById('btn-play-red').classList.toggle('active', color === 'red');
   document.getElementById('btn-play-black').classList.toggle('active', color === 'black');
+}
+
+function setHumanColor(color) {
+  if (isEngineSetupLocked()) {
+    updateEngineSelectors();
+    return;
+  }
+  if (humanColor === color) return;
+  applyHumanColorUI(color);
   updateEngineSelectors();
   fetch('/api/set_human_color', {
     method: 'POST',
@@ -118,7 +147,7 @@ function beginGameStart(label) {
   gameStartingTimer = setTimeout(() => {
     if (!gameStarting) return;
     gameStarting = false;
-    showToast('Start timed out — try Reset or check logs');
+    showToast('Start timed out - try Reset or check logs');
     renderAll();
   }, GAME_START_TIMEOUT_MS);
   renderAll();
@@ -154,6 +183,17 @@ function canChangeMode() {
   return !isGameInProgress() && !isGameStarting() && !state.estop_active;
 }
 
+/** Engine / color / Stockfish controls only editable before Start or after game over. */
+function isEngineSetupLocked() {
+  const phase = getGamePhase();
+  return (
+    phase === 'playing' ||
+    phase === 'starting' ||
+    isGameInProgress() ||
+    isGameStarting()
+  );
+}
+
 function getGamePhase() {
   if (state.estop_active) return 'estop';
   if (gameStarting) return 'starting';
@@ -167,6 +207,14 @@ function formatModeLabel(mode) {
   if (mode === 'ai_vs_ai') return 'AI vs AI';
   if (mode === 'ai_vs_human') return 'AI vs Human';
   return mode || '--';
+}
+
+/** True when it is the human's turn in AI vs Human mode. */
+function isHumanPlayersTurn() {
+  if (state.game_mode !== 'ai_vs_human') return false;
+  // Game manager only enters waiting_human when the human should move; do not
+  // gate on is_red_turn (vision BoardState often leaves it wrong).
+  return (state.game_status || '').toLowerCase() === 'waiting_human';
 }
 
 function formatActivity(status) {
@@ -187,7 +235,7 @@ function formatActivity(status) {
     return `Waiting for you (${side})`;
   }
   const map = {
-    idle: 'Idle — choose mode, then Start',
+    idle: 'Idle - choose mode, then Start',
     detecting_move: 'Detecting move',
     validating_move: 'Validating move',
     computing_ai: 'AI thinking',
@@ -227,7 +275,7 @@ function formatGameResult(result, reason) {
   };
   const title = titles[r] || r.replace(/_/g, ' ');
   if (r === 'ongoing') {
-    return { title: '—', detail: 'Game not finished yet', css: 'result-ongoing' };
+    return { title: '-', detail: 'Game not finished yet', css: 'result-ongoing' };
   }
   const detail = reasonLabels[(reason || '').toLowerCase()] || (reason || '').replace(/_/g, ' ');
   let css = '';
@@ -237,10 +285,34 @@ function formatGameResult(result, reason) {
   return { title, detail: detail || 'Game over', css };
 }
 
+// ── FEN helpers ───────────────────────────────────────────────────
+
+const _FEN_CODES = { K:1, A:2, B:3, N:4, R:5, C:6, P:7 };
+
+function fenToGrid(fen) {
+  const grid = new Array(90).fill(0);
+  if (!fen) return grid;
+  const ranks = fen.split(' ')[0].split('/');
+  for (let ri = 0; ri < ranks.length; ri++) {
+    const boardRank = 9 - ri;
+    let fi = 0;
+    for (const ch of ranks[ri]) {
+      if (ch >= '1' && ch <= '9') { fi += parseInt(ch, 10); continue; }
+      const code = _FEN_CODES[ch.toUpperCase()] || 0;
+      if (code) grid[boardRank * 9 + fi] = ch === ch.toUpperCase() ? code : -code;
+      fi++;
+    }
+  }
+  return grid;
+}
+
 // ── Canvas ────────────────────────────────────────────────────────
 
 const canvas = document.getElementById('board-canvas');
 const ctx    = canvas.getContext('2d');
+
+const fenCanvas = document.getElementById('fen-board-canvas');
+const fenCtx    = fenCanvas.getContext('2d');
 
 // Convert board pixel → grid index
 function pixelToGridIdx(px, py) {
@@ -282,7 +354,7 @@ function drawBoard() {
   ctx.strokeStyle = 'rgba(80,40,5,.7)';
   ctx.lineWidth   = 1;
 
-  // Vertical lines (files) — break at river
+  // Vertical lines (files) - break at river
   for (let f = 0; f < COLS; f++) {
     const x = MARGIN_X + f * CELL_W;
     // Top half (canvas rows 0-4 = board ranks 9-5)
@@ -398,6 +470,46 @@ function drawBoard() {
   }
 }
 
+function drawFenBoard() {
+  const c = fenCtx;
+  c.clearRect(0, 0, W, H);
+
+  // Same wood background
+  const woodGrad = c.createLinearGradient(0, 0, W, H);
+  woodGrad.addColorStop(0,   '#c8822a');
+  woodGrad.addColorStop(0.5, '#d4923a');
+  woodGrad.addColorStop(1,   '#c8822a');
+  c.fillStyle = woodGrad;
+  c.fillRect(0, 0, W, H);
+
+  // Grid lines
+  c.strokeStyle = 'rgba(80,40,5,.7)';
+  c.lineWidth = 1;
+  for (let f = 0; f < COLS; f++) {
+    const x = MARGIN_X + f * CELL_W;
+    c.beginPath(); c.moveTo(x, MARGIN_Y); c.lineTo(x, H - MARGIN_Y); c.stroke();
+  }
+  for (let r = 0; r < ROWS; r++) {
+    const y = MARGIN_Y + r * CELL_H;
+    c.beginPath(); c.moveTo(MARGIN_X, y); c.lineTo(W - MARGIN_X, y); c.stroke();
+  }
+  // River
+  c.fillStyle = 'rgba(0,0,0,.08)';
+  c.fillRect(MARGIN_X, MARGIN_Y + 4 * CELL_H, W - 2 * MARGIN_X, CELL_H);
+
+  // Pieces from FEN
+  const grid = fenToGrid(state.game_fen || state.fen);
+  for (let i = 0; i < 90; i++) {
+    const code = grid[i];
+    if (code === 0) continue;
+    const isRed = code > 0;
+    const { x, y } = gridIdxToPixel(i);
+    const abs = Math.abs(code);
+    const label = PIECE_LABELS[abs] ? (isRed ? PIECE_LABELS[abs].r : PIECE_LABELS[abs].b) : '?';
+    drawPiece(c, x, y, label, isRed, false);
+  }
+}
+
 function drawPiece(ctx, x, y, label, isRed, isSelected) {
   // Outer ring (shadow)
   ctx.beginPath();
@@ -444,7 +556,7 @@ function drawPiece(ctx, x, y, label, isRed, isSelected) {
 // ── Socket.IO ─────────────────────────────────────────────────────
 
 const socket = io({
-  transports: ['websocket', 'polling'],
+  transports: ['polling'],
   reconnection: true,
   reconnectionDelay: 1000,
   reconnectionDelayMax: 5000,
@@ -457,6 +569,9 @@ function fetchStateSnapshot() {
     .then((r) => r.json())
     .then((data) => {
       state = { ...state, ...data };
+      if (data.human_color === 'red' || data.human_color === 'black') {
+        applyHumanColorUI(data.human_color);
+      }
       checkGameStartComplete();
       renderAll();
       return data;
@@ -466,7 +581,7 @@ function fetchStateSnapshot() {
 socket.on('connect', () => {
   document.getElementById('connection-dot').className = 'conn-dot connected';
   document.getElementById('system-status-label').textContent = 'Connected';
-  // Resync after reconnect — backend may have advanced many moves while UI was stale
+  // Resync after reconnect - backend may have advanced many moves while UI was stale
   fetchStateSnapshot().catch(() => {});
   updateSyncPolling();
 });
@@ -494,17 +609,14 @@ socket.on('state_update', (data) => {
 function renderAll() {
   estopActive = !!state.estop_active;
   checkGameStartComplete();
-  const humanIsRed = humanColor === 'red';
-  const humanTurn =
-    state.game_mode === 'ai_vs_human' &&
-    (state.game_status || '').toLowerCase() === 'waiting_human' &&
-    (humanIsRed ? state.is_red_turn : !state.is_red_turn);
+  const humanTurn = isHumanPlayersTurn();
   if (!humanTurn) {
     selectedIdx = null;
     legalDests = [];
     legalDestsRequestId += 1;
   }
   drawBoard();
+  drawFenBoard();
   updateHeader();
   updateBoardLoading();
   updateModeBar();
@@ -542,10 +654,36 @@ function updateHeader() {
   }
 }
 
+function updateConfirmMoveButton() {
+  const btn = document.getElementById('btn-confirm-move');
+  if (!btn) return;
+  const sim = !!state.simulation_mode;
+  const gs = (state.game_status || '').toLowerCase();
+  const show =
+    !sim &&
+    state.game_mode === 'ai_vs_human' &&
+    isGameInProgress() &&
+    !state.estop_active &&
+    !isGameStarting() &&
+    gs === 'waiting_human' &&
+    isHumanPlayersTurn();
+  btn.classList.toggle('hidden', !show);
+  btn.disabled = !show;
+}
+
+function updateHardwareModeHint() {
+  const el = document.getElementById('hardware-mode-hint');
+  if (!el) return;
+  const sim = !!state.simulation_mode;
+  el.classList.toggle('hidden', sim);
+  if (sim) return;
+  el.textContent = state.game_mode === 'ai_vs_ai'
+    ? 'Robot plays both sides on the physical board'
+    : 'You move pieces on the physical board';
+}
+
 function updateModeBar() {
   const sim = !!state.simulation_mode;
-  const modeBarSim = document.getElementById('mode-bar-sim');
-  const hwBanner = document.getElementById('hardware-play-banner');
   const lockHint = document.getElementById('mode-lock-hint');
   const btnAiAi = document.getElementById('btn-ai-vs-ai');
   const btnHuman = document.getElementById('btn-ai-vs-human');
@@ -556,14 +694,9 @@ function updateModeBar() {
   const starting = isGameStarting();
   const busy = starting || inProgress;
 
-  if (modeBarSim) modeBarSim.classList.toggle('hidden', !sim);
-  if (hwBanner) hwBanner.classList.toggle('hidden', sim);
+  updateHardwareModeHint();
 
-  if (!sim && state.game_mode === 'ai_vs_ai') {
-    state.game_mode = 'ai_vs_human';
-  }
-
-  const modeLocked = sim && (!canChangeMode() || starting);
+  const modeLocked = !canChangeMode() || starting;
   if (lockHint) {
     lockHint.classList.toggle('hidden', !modeLocked);
     lockHint.textContent = starting ? 'Starting…' : 'Locked while playing';
@@ -584,47 +717,59 @@ function updateModeBar() {
   if (stopBtn) stopBtn.disabled = !busy || !!state.estop_active;
   if (resetBtn) resetBtn.disabled = !!state.estop_active;
 
+  updateConfirmMoveButton();
+
   updateEngineSelectors();
 
   const canvasEl = document.getElementById('board-canvas');
-  const isHumanMode = sim && (state.game_mode === 'ai_vs_human');
-  const isRedHuman = state.is_red_turn;
-  const humanTurn = isHumanMode && isRedHuman
-    && (state.game_status || '').toLowerCase() === 'waiting_human'
-    && !state.estop_active;
+  const isHumanMode = state.game_mode === 'ai_vs_human';
+  const humanTurn =
+    isHumanPlayersTurn() && !state.estop_active && !starting;
+  const simHumanTurn = sim && humanTurn;
 
-  if (canvasEl) canvasEl.classList.toggle('selectable', humanTurn && !starting);
+  if (canvasEl) canvasEl.classList.toggle('selectable', simHumanTurn);
 
-  // Turn indicator
+  // Turn indicator (prefer game_status over raw is_red_turn for AI vs Human)
   const turnDot   = document.getElementById('turn-dot');
   const turnLabel = document.getElementById('turn-label');
-  turnDot.className = 'turn-dot ' + (state.is_red_turn ? 'red' : 'black');
+  const moveCountEl = document.getElementById('move-count-label');
   const gs = (state.game_status || '').toLowerCase();
   const phase = getGamePhase();
+  let turnSideIsRed = state.is_red_turn;
+  if (isHumanMode && gs === 'waiting_human') {
+    turnSideIsRed = humanTurn ? humanColor === 'red' : humanColor !== 'red';
+  }
+  turnDot.className = 'turn-dot ' + (turnSideIsRed ? 'red' : 'black');
   if (phase === 'starting') {
-    turnLabel.textContent = 'Starting game — please wait…';
+    turnLabel.textContent = 'Starting game - please wait…';
   } else if (phase === 'setup') {
     turnLabel.textContent = 'Choose mode, then Start Game';
   } else if (phase === 'estop') {
-    turnLabel.textContent = 'E-STOP — game halted';
+    turnLabel.textContent = 'E-STOP - game halted';
   } else if (phase === 'over') {
     const { title } = formatGameResult(state.game_result, state.game_result_reason);
     turnLabel.textContent = title;
   } else if (gs === 'computing_ai') {
     turnLabel.textContent =
-      state.game_mode === 'ai_vs_ai' ? 'AI vs AI — thinking…' : 'AI thinking…';
+      state.game_mode === 'ai_vs_ai' ? 'AI vs AI - thinking…' : 'AI thinking…';
   } else if (gs === 'game_over') {
     turnLabel.textContent = 'Game over';
-  } else if (humanTurn && !starting) {
+  } else if (isHumanMode && gs === 'waiting_human') {
     const humanSide = humanColor === 'red' ? 'Red' : 'Black';
-    turnLabel.textContent = `Your move — click a ${humanSide} piece`;
-  } else if (isHumanMode && gs === 'waiting_human' && !humanTurn) {
     const aiSide = humanColor === 'red' ? 'Black' : 'Red';
-    turnLabel.textContent = `AI thinking (${aiSide})…`;
+    if (humanTurn) {
+      turnLabel.textContent = sim
+        ? `Waiting for you (${humanSide}) - click a piece`
+        : `Waiting for you (${humanSide})`;
+    } else {
+      turnLabel.textContent = `AI thinking (${aiSide})…`;
+    }
   } else {
     turnLabel.textContent = state.is_red_turn ? 'Red to move' : 'Black to move';
   }
-  document.getElementById('move-count-label').textContent = `Move ${state.move_count}`;
+  if (moveCountEl) {
+    moveCountEl.textContent = `· Move ${state.move_count || 0}`;
+  }
 
   // Last move
   const hist = state.move_history;
@@ -632,15 +777,11 @@ function updateModeBar() {
     const last = hist[hist.length - 1];
     document.getElementById('last-move-label').textContent =
       `Last: ${last.move} (${last.is_red ? 'Red' : 'Black'})`;
-    // Update lastMove highlight
-    if (last.move && last.move.length >= 4) {
-      const fromFile = last.move.charCodeAt(0) - 97;
-      const fromRank = parseInt(last.move[1]) - 1;
-      const toFile   = last.move.charCodeAt(2) - 97;
-      const toRank   = parseInt(last.move[3]) - 1;
+    const parsed = parseUciMove(last.move);
+    if (parsed) {
       lastMove = {
-        from: coordToGridIdx(fromFile, fromRank),
-        to:   coordToGridIdx(toFile,   toRank),
+        from: coordToGridIdx(parsed.fromFile, parsed.fromRank),
+        to:   coordToGridIdx(parsed.toFile, parsed.toRank),
       };
     }
   } else {
@@ -658,7 +799,7 @@ function updateFlowBanner() {
   el.className = 'flow-banner phase-' + phase;
 
   if (state.estop_active) {
-    textEl.textContent = 'E-STOP active — release E-Stop, then Start Game';
+    textEl.textContent = 'E-STOP active - release E-Stop, then Start Game';
     return;
   }
 
@@ -676,12 +817,14 @@ function updateFlowBanner() {
   if (phase === 'setup') {
     textEl.textContent = simHint()
       ? `1) ${mode}  2) Engine Setup (right)  3) Start Game`
-      : 'Press Start Game (human vs AI on physical board)';
+      : state.game_mode === 'ai_vs_ai'
+        ? `1) ${mode}  2) Engine Setup (right)  3) Start Game`
+        : `1) ${mode}  2) Engine Setup - choose your color  3) Start Game`;
     return;
   }
   if (phase === 'over') {
     const { title, detail } = formatGameResult(state.game_result, state.game_result_reason);
-    textEl.textContent = `Finished (${mode}) — ${title}${detail ? ' · ' + detail : ''}. Change mode or New Game.`;
+    textEl.textContent = `Finished (${mode}) - ${title}${detail ? ' · ' + detail : ''}. Change mode or New Game.`;
     return;
   }
 
@@ -697,9 +840,11 @@ function updateFlowBanner() {
     textEl.textContent = `${mode}: AI (${aiSide}) is thinking…`;
   } else if (gs === 'waiting_human') {
     const humanSide = humanColor === 'red' ? 'Red' : 'Black';
-    textEl.textContent = `${mode}: your turn — click a ${humanSide} piece on the board`;
+    textEl.textContent = `${mode}: your turn - click a ${humanSide} piece on the board`;
   } else if (gs === 'executing_move') {
-    textEl.textContent = `${mode}: robot executing move…`;
+    textEl.textContent = state.game_mode === 'ai_vs_ai'
+      ? `${mode}: robot moving pieces…`
+      : `${mode}: robot executing move…`;
   } else {
     textEl.textContent = `${mode}: ${formatActivity(gs)}`;
   }
@@ -809,8 +954,6 @@ function updateEngineSelectors() {
   const cfg = document.getElementById('engine-config');
   const selRed = document.getElementById('sel-red-engine');
   const selBlack = document.getElementById('sel-black-engine');
-  const lockBadge = document.getElementById('engine-setup-lock');
-  const hint = document.getElementById('engine-setup-hint');
   const matchup = document.getElementById('engine-matchup-label');
   const diffRow = document.getElementById('stockfish-difficulty-row');
   const diffSlider = document.getElementById('sel-stockfish-difficulty');
@@ -818,7 +961,7 @@ function updateEngineSelectors() {
 
   const sim = !!state.simulation_mode;
   const humanMode = state.game_mode === 'ai_vs_human';
-  const locked = sim && (!canChangeMode() || isGameStarting() || isGameInProgress());
+  const locked = isEngineSetupLocked();
   const humanIsRed = humanColor === 'red';
   const redVal = selRed.value;
   const blackVal = selBlack.value;
@@ -826,11 +969,18 @@ function updateEngineSelectors() {
     ? engineUsesStockfish(humanIsRed ? blackVal : redVal, humanIsRed ? blackVal : redVal)
     : engineUsesStockfish(redVal, blackVal);
 
-  if (panel) panel.classList.toggle('hidden', !sim);
+  if (panel) {
+    panel.classList.remove('hidden');
+    panel.classList.toggle('panel-locked', locked);
+  }
 
-  // Color picker — only in human mode
+  // Color picker - only in human mode
   const colorRow = document.getElementById('human-color-row');
+  const btnPlayRed = document.getElementById('btn-play-red');
+  const btnPlayBlack = document.getElementById('btn-play-black');
   if (colorRow) colorRow.classList.toggle('hidden', !humanMode);
+  if (btnPlayRed) btnPlayRed.disabled = locked;
+  if (btnPlayBlack) btnPlayBlack.disabled = locked;
 
   // Per-side visibility: human side shows "(you)", AI side shows selector
   const youRedEl  = document.getElementById('engine-you-red');
@@ -857,7 +1007,6 @@ function updateEngineSelectors() {
   }
   updateDifficultyDisplay();
 
-  if (lockBadge) lockBadge.classList.toggle('hidden', !locked);
   if (matchup) matchup.textContent = engineMatchupLabel();
 
   if (state.red_engine && selRed.value !== state.red_engine) selRed.value = state.red_engine;
@@ -867,15 +1016,19 @@ function updateEngineSelectors() {
 function updateAIPanel() {
   const rawCp = state.evaluation_cp || 0;
   const cp = clampEvalCp(rawCp);
-  const pawns = cp != null ? (cp / 100).toFixed(2) : '—';
+  const pawns = cp != null ? (cp / 100).toFixed(2) : '-';
 
   const gs = (state.game_status || '').toLowerCase();
   let engineLabel = engineMatchupLabel();
   if (gs === 'computing_ai') {
     const sideEngine = state.is_red_turn ? state.red_engine : state.black_engine;
     const side = state.is_red_turn ? 'Red' : 'Black';
-    if (state.game_mode === 'ai_vs_human' && state.is_red_turn) {
-      engineLabel = 'Waiting for you';
+    if (isHumanPlayersTurn()) {
+      const side = humanColor === 'red' ? 'Red' : 'Black';
+      engineLabel = `Waiting for you (${side})`;
+    } else if (state.game_mode === 'ai_vs_human') {
+      const aiSide = humanColor === 'red' ? 'Black' : 'Red';
+      engineLabel = `AI (${aiSide}) thinking`;
     } else {
       engineLabel = `${side} · ${formatEngineShort(sideEngine)}`;
     }
@@ -889,12 +1042,12 @@ function updateAIPanel() {
   document.getElementById('eval-bar-red').style.width   = redPct + '%';
   document.getElementById('eval-bar-black').style.width = blackPct + '%';
   document.getElementById('eval-label').textContent =
-    cp != null ? ((cp >= 0 ? '+' : '') + pawns) : '—';
+    cp != null ? ((cp >= 0 ? '+' : '') + pawns) : '-';
   const hintEl = document.getElementById('eval-score-hint');
   if (hintEl) hintEl.textContent = evalScoreHint();
 
   document.getElementById('ai-eval').textContent =
-    cp != null ? ((cp >= 0 ? '+' : '') + cp + ' cp') : (Math.abs(rawCp) > 50000 ? 'Mate/score' : '—');
+    cp != null ? ((cp >= 0 ? '+' : '') + cp + ' cp') : (Math.abs(rawCp) > 50000 ? 'Mate/score' : '-');
   document.getElementById('ai-depth').textContent    = state.depth_reached || '--';
   document.getElementById('ai-time').textContent     = (state.thinking_time || 0) + ' s';
   document.getElementById('ai-bestmove').textContent = state.best_move || '--';
@@ -1022,9 +1175,7 @@ canvas.addEventListener('click', (e) => {
     return;
   }
   if (state.game_mode !== 'ai_vs_human') return;
-  if ((state.game_status || '').toLowerCase() !== 'waiting_human') return;
-  const humanIsRed2 = humanColor === 'red';
-  if (humanIsRed2 ? !state.is_red_turn : state.is_red_turn) return;
+  if (!isHumanPlayersTurn()) return;
 
   const rect = canvas.getBoundingClientRect();
   const scaleX = canvas.width  / rect.width;
@@ -1062,7 +1213,7 @@ canvas.addEventListener('click', (e) => {
       selectedIdx = null;
       legalDests  = [];
     } else {
-      // Click elsewhere — deselect
+      // Click elsewhere - deselect
       selectedIdx = null;
       legalDests  = [];
       drawBoard();
@@ -1139,7 +1290,7 @@ function onDifficultyInput() {
 }
 
 function onDifficultyChange() {
-  if (!canChangeMode() || isGameStarting() || isGameInProgress()) {
+  if (isEngineSetupLocked()) {
     updateEngineSelectors();
     return;
   }
@@ -1162,7 +1313,7 @@ function onDifficultyChange() {
 }
 
 function onEngineChange() {
-  if (!canChangeMode() || isGameStarting() || isGameInProgress()) {
+  if (isEngineSetupLocked()) {
     updateEngineSelectors();
     return;
   }
@@ -1194,10 +1345,6 @@ function setMode(mode) {
     showToast('Mode is locked during a game. Wait for game over or finish the current game.');
     return;
   }
-  if (!state.simulation_mode && mode === 'ai_vs_ai') {
-    showToast('AI vs AI is only available in simulation mode');
-    return;
-  }
   fetch('/api/set_mode', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1225,7 +1372,7 @@ function newGame() {
     return;
   }
   if (isGameInProgress()) {
-    showToast('Game in progress — use Stop or Reset');
+    showToast('Game in progress - use Stop or Reset');
     return;
   }
   selectedIdx = null;
@@ -1272,7 +1419,7 @@ function stopGame() {
   renderAll();
   fetch('/api/stop_game', { method: 'POST' })
     .then(() => {
-      showToast('Stopped — board reset. Press Start for a new game.');
+      showToast('Stopped - board reset. Press Start for a new game.');
       renderAll();
     })
     .catch(() => showToast('Failed to stop game'));
@@ -1306,6 +1453,31 @@ function resetGame() {
 }
 
 let estopActive = false;
+function confirmHumanMove() {
+  fetch('/api/human_ready', { method: 'POST' })
+    .then((r) => r.json())
+    .then((d) => {
+      if (d.ok) {
+        showToast('Confirming your move…');
+      }
+    })
+    .catch(() => showToast('Confirm move request failed'));
+}
+
+function syncBoardFromCamera() {
+  fetch('/api/sync_board', { method: 'POST' })
+    .then((r) => r.json())
+    .then((d) => {
+      if (d.ok) {
+        showToast('Syncing board from camera (move history is kept)…');
+        setTimeout(() => fetchStateSnapshot().catch(() => {}), 800);
+      } else {
+        showToast(d.error || 'Sync failed');
+      }
+    })
+    .catch(() => showToast('Sync board request failed'));
+}
+
 function toggleEstop() {
   const next = !state.estop_active;
   fetch('/api/emergency_stop', {
@@ -1320,9 +1492,9 @@ function toggleEstop() {
       endGameStart();
       selectedIdx = null;
       legalDests = [];
-      showToast('E-STOP engaged — release when safe, then New Game');
+      showToast('E-STOP engaged - release when safe, then New Game');
     } else {
-      showToast('E-Stop released — press New Game to continue');
+      showToast('E-Stop released - press New Game to continue');
     }
     renderAll();
   })

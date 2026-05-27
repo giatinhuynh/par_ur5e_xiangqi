@@ -1,7 +1,10 @@
 {
   "permissions": {
     "allow": [
-      "Bash(wsl *)"
+      "Bash(wsl *)",
+      "Bash(xargs cat -n)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 *)"
     ]
   }
 }

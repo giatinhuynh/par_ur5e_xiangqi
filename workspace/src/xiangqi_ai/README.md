@@ -6,10 +6,15 @@
 
 Central **finite-state machine** over `GameState` (`IDLE`, `WAITING_HUMAN`, `DETECTING_MOVE`, `COMPUTING_AI`, `EXECUTING_MOVE`, `GAME_OVER`, …).
 
-**Flow (typical, robot plays Red):**
+**Game modes** (dashboard `/xiangqi/game_mode`):
 
-1. `/xiangqi/new_game` resets FEN to standard Xiangqi start, history, and either jumps to **AI first move** or waits for human depending on `robot_plays_red`.
-2. After the robot finishes a move, state → `WAITING_HUMAN`; publishes `/xiangqi/start_watching` so vision arms the turn detector.
+- **`ai_vs_human`**: Human moves on the physical board (vision) or in simulation (board clicks). Robot plays the opposite color.
+- **`ai_vs_ai`**: Robot plays both sides on the physical board (or applies moves instantly in simulation).
+
+**Flow (typical, AI vs Human, human plays Red):**
+
+1. `/xiangqi/new_game` scans the physical board (hardware) or resets to start (sim), then either jumps to **AI first move** or waits for human depending on `robot_plays_red` / human color.
+2. After the robot finishes a move, state → `WAITING_HUMAN`; publishes `/xiangqi/start_watching` so vision arms the turn detector (not used in AI vs AI).
 3. When `/xiangqi/human_move_detected` is true, the manager takes the latest `BoardState` grid and **`_infer_move_from_board`**: enumerate **legal** moves with **pyffish**, apply each to get a candidate FEN, convert that FEN to the same `int8[90]` encoding as vision, and pick the move whose grid **matches** observation. If none match, publish an illegal/ambiguous alert and return to watching.
 4. On success, **apply** the human move to internal FEN/history via pyffish, check terminal conditions, then call **`GetBestMove`** on `ai_engine_node`.
 5. On AI reply, the manager **does not** apply the AI move to FEN yet: it calls **`get_best_move`** asynchronously (no blocking spin) so **`/xiangqi/estop`** and timers still run. It snapshots `fen_at_request` for that async call and uses it when generating `expected_fen`. It then publishes **`/xiangqi/ai_move_command`** (`xiangqi_msgs/AiMoveCommand`), starts a short **planner-ack timeout**, sets state to `EXECUTING_MOVE`, and stores the move as pending until step 6. Failures (no service, timeout, bad response, FEN error) return to **`WAITING_HUMAN`** with **`/xiangqi/illegal_move_alert`**. E-stop during **`COMPUTING_AI`** cancels the pending RPC and returns to **`WAITING_HUMAN`**.

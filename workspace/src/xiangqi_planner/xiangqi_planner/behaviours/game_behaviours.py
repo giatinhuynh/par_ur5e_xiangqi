@@ -32,6 +32,38 @@ def _bb_get(bb, key: str, default=None):
         return default
 
 
+def _parse_uci_square(move: str, start: int) -> tuple[int, int, int] | None:
+    """Return (file, rank_1based, next_index) for UCI square at move[start:]."""
+    if start >= len(move):
+        return None
+    f = ord(move[start]) - 97
+    if not (0 <= f < 9):
+        return None
+    if start + 2 < len(move) and move[start + 1] == '1' and move[start + 2] == '0':
+        return f, 10, start + 3
+    if start + 1 < len(move) and move[start + 1].isdigit():
+        return f, int(move[start + 1]), start + 2
+    return None
+
+
+def uci_move_critical_indices(move: str) -> set[int]:
+    """Grid indices for from/to squares of a coordinate move (e.g. d4e4)."""
+    if not move:
+        return set()
+    a = _parse_uci_square(move, 0)
+    if not a:
+        return set()
+    from_file, from_rank, next_i = a
+    b = _parse_uci_square(move, next_i)
+    if not b:
+        return set()
+    to_file, to_rank, _ = b
+    return {
+        (from_rank - 1) * 9 + from_file,
+        (to_rank - 1) * 9 + to_file,
+    }
+
+
 def fen_to_grid(fen: str) -> list[int]:
     """Parse Xiangqi FEN board part to int8[90] grid (same indexing as vision / game_manager)."""
     grid = [0] * 90
@@ -168,14 +200,14 @@ class GoToScanPose(py_trees.behaviour.Behaviour):
         self._future = None
         if not self._cli.service_is_ready():
             self._node.get_logger().warn(
-                'move_to_scan_pose service not ready — skipping scan pose'
+                'move_to_scan_pose service not ready - skipping scan pose'
             )
             return
         self._future = self._cli.call_async(Trigger.Request())
 
     def update(self) -> py_trees.common.Status:
         if self._future is None:
-            # Service not available — degrade gracefully
+            # Service not available - degrade gracefully
             return py_trees.common.Status.FAILURE
         if not self._future.done():
             return py_trees.common.Status.RUNNING
@@ -214,9 +246,11 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             is_capture = _bb_get(self._bb, 'is_capture', False)
             if is_capture:
                 self._bb.set('capture_pick_pose', place)  # The destination has the capturable piece
-                graveyard = translator.graveyard_pose(
-                    is_red_piece=not _bb_get(self._bb, 'robot_is_red', True)
-                )
+                # Post-move FEN: if Red to move next, Black just captured a Red piece (and vice versa).
+                expected_fen = _bb_get(self._bb, 'expected_board_fen', '') or ''
+                parts = expected_fen.split()
+                captured_is_red = len(parts) > 1 and parts[1].strip().lower() == 'w'
+                graveyard = translator.graveyard_pose(is_red_piece=captured_is_red)
                 self._bb.set('graveyard_pose', graveyard)
 
             return py_trees.common.Status.SUCCESS
@@ -263,7 +297,7 @@ class FinalizeRobotMoveAfterVerify(py_trees.behaviour.Behaviour):
             fail.message = 'board mismatch after retries'
             self._result_pub.publish(fail)
             self._node.get_logger().warn(
-                'Board verification failed after retries — publishing board_verify_failed'
+                'Board verification failed after retries - publishing board_verify_failed'
             )
 
         bb.set('ai_move', None)
@@ -314,7 +348,7 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
         bb.set('current_dispatch_id', None)
         bb.set('verification_passed', False)
         self._node.get_logger().error(
-            'Move subtree failed (setup / capture / manipulation) — publishing ai_motion_failed'
+            'Move subtree failed (setup / capture / manipulation) - publishing ai_motion_failed'
         )
         self._done = True
         return py_trees.common.Status.SUCCESS
@@ -368,11 +402,25 @@ class VerifyBoardState(py_trees.behaviour.Behaviour):
 
         observed = list(resp.board_state.grid)
         expected = fen_to_grid(expected_fen)
-        tol = int(_bb_get(self._bb, 'verify_grid_tolerance', 0))
+        tol = int(_bb_get(self._bb, 'verify_grid_tolerance', 6))
+        move = _bb_get(self._bb, 'ai_move') or ''
+        critical = uci_move_critical_indices(move)
+
+        if critical:
+            bad_critical = [i for i in critical if observed[i] != expected[i]]
+            if bad_critical:
+                self.feedback_message = (
+                    f'move squares mismatch: {len(bad_critical)} of {len(critical)} '
+                    f'critical cells (move={move})'
+                )
+                return py_trees.common.Status.FAILURE
+
         mismatches = sum(1 for a, b in zip(observed, expected) if a != b)
         if mismatches <= tol:
             self._bb.set('verification_passed', True)
-            self.feedback_message = 'board matches expected FEN'
+            self.feedback_message = (
+                f'board matches expected FEN (diff={mismatches}, tol={tol})'
+            )
             return py_trees.common.Status.SUCCESS
 
         self.feedback_message = f'board mismatch: {mismatches} cells differ (tol={tol})'

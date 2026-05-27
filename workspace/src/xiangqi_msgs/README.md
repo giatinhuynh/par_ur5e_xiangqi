@@ -1,6 +1,6 @@
 # xiangqi_msgs
 
-ROS 2 interface definitions shared by vision, AI, planner, manipulation, and dashboard. There is **no executable logic** here—only types that encode the data contract between nodes.
+ROS 2 interface definitions shared by vision, AI, planner, manipulation, and dashboard. There is **no executable logic** here-only types that encode the data contract between nodes.
 
 ## Messages
 
@@ -8,7 +8,7 @@ ROS 2 interface definitions shared by vision, AI, planner, manipulation, and das
 |---------|------|
 | `BoardState` | Flat `int8[90]` grid (9×10, index `rank * 9 + file`; rank 0 = robot/red side). `0` = empty; `±1…±7` = piece type (General…Soldier), sign = side. Includes optional FEN/turn fields and mean YOLO confidence. |
 | `GameStatus` | High-level FSM string from game manager (`idle`, `waiting_human`, `computing_ai`, …), current FEN, move count, active engine type. |
-| `PieceDetection` | Single detection (type, image/world coords, confidence)—used where per-piece telemetry is needed. |
+| `PieceDetection` | Single detection (type, image/world coords, confidence)-used where per-piece telemetry is needed. |
 | `MoveHistory` | One move record for the log: coordinate move, side, engine metadata (depth, centipawns, time). |
 | `EngineInfo` | Live AI telemetry (engine name, depth, eval, best/ponder moves) for the dashboard. |
 

@@ -33,6 +33,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Python packages ---
+# Clean up conflicting user-level packages in the base image (which may have pre-baked numpy 2.x and opencv 4.13)
+RUN if id -u rosuser >/dev/null 2>&1; then \
+        su rosuser -c "pip3 uninstall -y numpy opencv-python opencv-python-headless" || true; \
+    fi \
+    && pip3 uninstall -y numpy opencv-python opencv-python-headless || true
+
 # pymodbus: required by onrobot_rg2_driver (Modbus TCP to RG2 via EyeBox)
 # ultralytics: YOLOv8n for piece detection
 # flask/flask-socketio/eventlet/flask-cors: web dashboard
@@ -46,7 +52,7 @@ RUN pip3 install --no-cache-dir \
     flask-socketio \
     eventlet \
     scipy \
-    opencv-python-headless \
+    'opencv-python>=4.6.0,<4.10.0' \
     'numpy>=1.23,<2'
 
 # YOLO weights: place xiangqi_kaggle_v1_best.pt under workspace/src/xiangqi_vision/models/

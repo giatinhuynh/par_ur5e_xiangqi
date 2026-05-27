@@ -8,37 +8,58 @@
 #   - Xiangqi pieces: lab set (~20 mm diameter)
 #   - Board mat: 4×A3 assembly (docs/board_mat_4xA3_BR.svg), grid_spacing_mm: 61.25
 #
-# Arm motion: lab's /par_moveit/waypoint_move action server (par_moveit_config)
+# Arm motion:
+#   Homing (initial/scan pose): joint-space via /move_action (deterministic, no IK ambiguity).
+#     Joint positions loaded from scan_joint_positions in board_calibration.yaml (Step 1 teach-in).
+#     Falls back to OMPL Cartesian if joint positions not present in calibration.
+#   Pick/place transits + approach heights: OMPL via /move_action (large moves, any path).
+#   Descend/lift (over piece): Cartesian via /par_moveit/waypoint_move (straight-line, no lateral sweep).
+# Requires moveit_config_driver + moveit_action_server before manipulation_node.
 
 manipulation_node:
   ros__parameters:
     simulation_mode: false
+    move_group_action: /move_action
+    move_group_name: ur_manipulator_end_effector
+    end_effector_link: end_effector_link
+    planning_frame: base_link
+    max_velocity_scaling_factor: 0.05
+    max_acceleration_scaling_factor: 0.05
+    allowed_planning_time: 5.0
+    num_planning_attempts: 10
+    planner_id: RRTConnectkConfigDefault
+    pipeline_id: move_group
+    move_max_retries: 2
+    startup_move_max_retries: 3
     # Lab pieces ~20 mm diameter + 4×A3 mat (see docs/board_geometry_4xA3.yaml)
     piece_diameter_mm:     20.0
     grid_spacing_mm:     61.25
     grasp_compression_mm:  2.0
-    # Gripper widths (mm) — sized for piece_diameter_mm
+    # Gripper widths (mm) - sized for piece_diameter_mm
     open_width:    50.0   # ~2.5× diameter (clearance)
     grasp_width:   18.0   # diameter − compression
     release_width: 34.0   # ~1.7× diameter
     grasp_force:   15.0   # Gripping force in Newtons
     grasp_height:   0.010 # TCP height above board surface for side grip (metres)
-    # Calibration file — used to derive scan pose from board centre when use_manual_scan_pose is false.
+    # Calibration file - used to derive scan pose from board centre when use_manual_scan_pose is false.
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     # Use the taught scan pose below (base_link, metres / radians) instead of board centre.
     use_manual_scan_pose: true
-    # Rest / scan pose taught on UR pendant (horizontal board layout):
-    #   x=41.11 mm, y=-357.06 mm, z=459.54 mm
-    #   RX=0.012 rad, RY=3.167 rad, RZ=-0.339 rad
-    # par_moveit WaypointPose only has one rotation field (maps to RZ); roll/pitch are fixed in the lab driver.
-    initial_pose_x:    0.04111     # 41.11 mm
-    initial_pose_y:   -0.35706     # -357.06 mm
-    initial_pose_z:    0.45954     # 459.54 mm (absolute TCP height in base_link)
-    initial_pose_yaw: -0.339       # RZ (rad)
-    scan_pose_x:       0.04111
-    scan_pose_y:      -0.35706
-    scan_pose_z:       0.45954
-    scan_pose_yaw:    -0.339
+    # Rest / scan pose (2026-05-23 calibration_tool Step 1, CurrentWaypointPose). Same TCP.
+    #   x=108.10 mm, y=183.45 mm, z=665.71 mm, yaw=-1.2335 rad
+    # Joint-space homing is preferred - loaded automatically from scan_joint_positions
+    # in board_calibration.yaml. These Cartesian values are the fallback only.
+    initial_pose_x:    0.10810
+    initial_pose_y:    0.18345
+    initial_pose_z:    0.66571
+    initial_pose_yaw: -1.23353
+    scan_pose_x:       0.10810
+    scan_pose_y:       0.18345
+    scan_pose_z:       0.66571
+    scan_pose_yaw:    -1.23353
+    # Move to initial_pose once after stack launch (hardware only; needs Play on pendant).
+    move_to_initial_pose_on_startup: true
+    startup_move_delay_sec: 5.0
 
 gripper_controller_node:
   ros__parameters:

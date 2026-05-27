@@ -22,7 +22,8 @@ class SafetyMonitorNode(Node):
     def __init__(self):
         super().__init__('safety_monitor_node')
 
-        self._estop_active = False
+        self._dashboard_estop = False
+        self._ur_safety_estop = False
 
         # Subscribe to UR safety state
         if UR_DASHBOARD_OK:
@@ -43,25 +44,36 @@ class SafetyMonitorNode(Node):
 
     def _safety_mode_cb(self, msg) -> None:
         # SafetyMode values: NORMAL=1, REDUCED=2, PROTECTIVE_STOP=3, etc.
-        if hasattr(msg, 'mode') and msg.mode not in (1, 2):
-            if not self._estop_active:
-                self.get_logger().warn(f'Safety mode: {msg.mode} -- issuing e-stop')
-            self._estop_active = True
-        else:
-            self._estop_active = False
+        ur_stop = hasattr(msg, 'mode') and msg.mode not in (1, 2)
+        if ur_stop and not self._ur_safety_estop:
+            self.get_logger().warn(f'UR safety mode: {msg.mode} - software e-stop')
+        self._ur_safety_estop = ur_stop
 
     def _estop_cb(self, msg: Bool) -> None:
-        if msg.data and not self._estop_active:
-            self.get_logger().warn('Emergency stop triggered via dashboard')
-        self._estop_active = msg.data
+        """Dashboard toggle - software halt for the Xiangqi stack (not the teach pendant)."""
+        if msg.data and not self._dashboard_estop:
+            self.get_logger().warn('Emergency stop triggered via dashboard (software)')
+        self._dashboard_estop = bool(msg.data)
+
+    @property
+    def _estop_active(self) -> bool:
+        return self._dashboard_estop or self._ur_safety_estop
 
     def _heartbeat(self) -> None:
+        active = self._estop_active
         msg = Bool()
-        msg.data = self._estop_active
+        msg.data = active
         self._estop_pub.publish(msg)
 
         status = String()
-        status.data = 'ESTOP_ACTIVE' if self._estop_active else 'OK'
+        if self._dashboard_estop and self._ur_safety_estop:
+            status.data = 'ESTOP_ACTIVE (dashboard + UR)'
+        elif self._dashboard_estop:
+            status.data = 'ESTOP_ACTIVE (dashboard)'
+        elif self._ur_safety_estop:
+            status.data = 'ESTOP_ACTIVE (UR safety)'
+        else:
+            status.data = 'OK'
         self._status_pub.publish(status)
 
 

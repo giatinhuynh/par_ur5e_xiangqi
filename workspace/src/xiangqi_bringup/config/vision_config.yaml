@@ -1,11 +1,25 @@
 # vision_config.yaml: Vision node and board calibration parameters
 vision_node:
   ros__parameters:
-    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v1_best.pt"
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt"
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     require_yolo_weights: true
     yolo_download_url: ""
     confidence_threshold: 0.5
-    stability_frames: 8           # Frames to confirm a stable board state (~2s at 4Hz)
+    stability_frames: 5           # Frames to confirm a stable human move (~1.2s at 4Hz)
     poll_rate_hz: 4.0
     camera_topic: "/camera/camera/color/image_raw"
+
+    # Piece preprocessing (warped board -> YOLO). Off by default; enable when tuning lighting.
+    piece_preprocess_enabled: false
+    piece_preprocess_preset: "none"   # none | bright | bright_sharp (dim+soft) | clahe | lab_default | ...
+    piece_gamma: 1.0
+    piece_brightness: 0
+    piece_contrast: 1.0
+    piece_use_clahe: false
+    piece_clahe_clip_limit: 2.0
+    piece_use_denoise: false
+    piece_use_sharpen: false
+    piece_saturation_scale: 1.0
+    piece_use_white_balance: false
+    debug_show_preprocess: false      # true: /xiangqi/debug_image shows warped | preprocessed | YOLO

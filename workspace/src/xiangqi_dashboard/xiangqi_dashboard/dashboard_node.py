@@ -44,7 +44,7 @@ DEFAULT_STOCKFISH_SKILL = 20  # UCI Skill Level 1–20
 
 
 def fen_to_grid(fen: str) -> list:
-    """Parse FEN to flat int8[90] grid — always works without vision."""
+    """Parse FEN to flat int8[90] grid - always works without vision."""
     if not fen:
         return [0] * 90
     grid = [0] * 90
@@ -71,8 +71,9 @@ def fen_to_grid(fen: str) -> list:
 
 # Shared application state (updated by ROS callbacks, read by Flask)
 _state = {
-    'board_grid': fen_to_grid(STARTING_FEN),
+    'board_grid': [0] * 90,  # empty until vision or sim populates it
     'fen': STARTING_FEN,
+    'game_fen': STARTING_FEN,  # authoritative FEN from game manager only (never from vision)
     'game_status': 'idle',
     'is_red_turn': True,
     'move_count': 0,
@@ -93,7 +94,7 @@ _state = {
     'game_result': 'ongoing',
     'game_result_reason': '',
     'simulation_mode': True,
-    'game_mode': 'ai_vs_human',   # 'ai_vs_ai' (sim only) | 'ai_vs_human'
+    'game_mode': 'ai_vs_human',   # 'ai_vs_ai' | 'ai_vs_human'
     'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
     '_dirty': False,
@@ -138,12 +139,14 @@ _flask_app = Flask(
 _flask_app.config['SECRET_KEY'] = 'xiangqi_dashboard_2025'
 CORS(_flask_app)
 # threading: safe to emit from ROS callback/timer threads (eventlet breaks under fast AI play)
+# allow_upgrades=False: werkzeug dev server can't handle WebSocket protocol upgrades; polling works fine
 _socketio = SocketIO(
     _flask_app,
     cors_allowed_origins='*',
     async_mode='threading',
     ping_timeout=60,
     ping_interval=25,
+    allow_upgrades=False,
 )
 
 # ROS publisher/client references (set in DashboardNode.__init__)
@@ -177,8 +180,9 @@ def _cancel_pending_new_game() -> None:
 
 def _apply_idle_board_state() -> None:
     with _state_lock:
-        _state['board_grid'] = fen_to_grid(STARTING_FEN)
-        _state['fen'] = STARTING_FEN
+        if _state.get('simulation_mode', False):
+            _state['board_grid'] = fen_to_grid(STARTING_FEN)
+            _state['fen'] = STARTING_FEN
         _state['move_history'] = []
         _state['move_count'] = 0
         _state['game_status'] = 'idle'
@@ -200,8 +204,11 @@ def _queue_new_game(mode: str) -> None:
     _apply_fairy_stockfish_skill()
     _pending_new_game_mode = mode
     with _state_lock:
-        _state['board_grid'] = fen_to_grid(STARTING_FEN)
-        _state['fen'] = STARTING_FEN
+        # Sim: show logical start position. Hardware: keep live vision grid until next
+        # /xiangqi/board_state (pressing Start was resetting the UI to empty start FEN).
+        if _state.get('simulation_mode', False):
+            _state['board_grid'] = fen_to_grid(STARTING_FEN)
+            _state['fen'] = STARTING_FEN
         _state['move_history'] = []
         _state['move_count'] = 0
         _state['game_result'] = 'ongoing'
@@ -217,7 +224,7 @@ def api_new_game():
         if status not in ('idle', 'game_over'):
             return jsonify({
                 'ok': False,
-                'error': 'Game in progress — use Stop or Reset.',
+                'error': 'Game in progress - use Stop or Reset.',
             }), 409
         mode = _state.get('game_mode', 'ai_vs_human')
     _queue_new_game(mode)
@@ -266,6 +273,16 @@ def api_human_ready():
     pub = _ros_publishers.get('human_ready')
     if pub:
         pub.publish(Empty())
+    return jsonify({'ok': True})
+
+
+@_flask_app.route('/api/sync_board', methods=['POST'])
+def api_sync_board():
+    """Ask game_manager to adopt the latest camera grid as authoritative FEN."""
+    pub = _ros_publishers.get('resync')
+    if pub is None:
+        return jsonify({'ok': False, 'error': 'Resync not available'}), 503
+    pub.publish(Empty())
     return jsonify({'ok': True})
 
 
@@ -353,6 +370,11 @@ def api_set_human_color():
     color = (data.get('color') or '').strip().lower()
     if color not in ('red', 'black'):
         return jsonify({'ok': False, 'error': 'color must be red or black'}), 400
+    if not _mode_change_allowed():
+        return jsonify({
+            'ok': False,
+            'error': 'Cannot change side during a game. Stop or wait for game over.',
+        }), 409
     with _state_lock:
         _state['human_color'] = color
         _state['_dirty'] = True
@@ -443,7 +465,7 @@ def _mode_change_allowed() -> bool:
 
 @_flask_app.route('/api/set_mode', methods=['POST'])
 def api_set_mode():
-    """Switch game mode (simulation only). Hardware is always human vs AI on the physical board."""
+    """Switch game mode before Start or after game over (sim and hardware)."""
     data = request.json or {}
     mode = data.get('mode', 'ai_vs_human')
     if mode not in ('ai_vs_ai', 'ai_vs_human'):
@@ -453,15 +475,6 @@ def api_set_mode():
             'ok': False,
             'error': 'Cannot change mode during a game. Finish the game or press New Game after game over.',
         }), 409
-    with _state_lock:
-        sim = _state.get('simulation_mode', False)
-    if not sim:
-        if mode == 'ai_vs_ai':
-            return jsonify({
-                'ok': False,
-                'error': 'AI vs AI is only available in simulation. On hardware, play on the physical board.',
-            }), 403
-        mode = 'ai_vs_human'
     with _state_lock:
         _state['game_mode'] = mode
         _state['_dirty'] = True
@@ -620,6 +633,20 @@ class DashboardNode(Node):
         self._mode_sync_timer = self.create_timer(1.0, self._sync_game_mode_once)
         self._mode_synced = False
 
+        # --- Glitch-filter state (hardware mode) ---
+        # Board grid hold: only push a new grid to the UI after it has been
+        # seen in N consecutive vision messages (or confidence is high).
+        self._prev_board_grid: list | None = None
+        self._board_grid_repeat: int = 0
+        self._BOARD_GRID_HOLD = 2        # consecutive identical msgs before UI update
+        self._BOARD_CONF_BYPASS = 0.65   # high-confidence frames skip the hold
+
+        # Detecting-move debounce: suppress the 'detecting_move' label until
+        # it has been the reported state for >= N seconds.  This hides the
+        # flicker caused by false human-move triggers.
+        self._detecting_move_first_seen: float = 0.0
+        self._DETECTING_MOVE_DEBOUNCE = 0.4  # seconds
+
     def _sync_game_mode_once(self) -> None:
         if self._mode_synced:
             return
@@ -629,7 +656,14 @@ class DashboardNode(Node):
         _publish_game_mode(mode)
         _publish_ai_engines()
         _apply_fairy_stockfish_skill()
-        self.get_logger().info(f'Synced game mode to game_manager: {mode}')
+        with _state_lock:
+            color = _state.get('human_color', 'red')
+        pub = _ros_publishers.get('human_color')
+        if pub:
+            msg = String()
+            msg.data = color
+            pub.publish(msg)
+        self.get_logger().info(f'Synced game mode to game_manager: {mode} (human={color})')
 
     # ------------------------------------------------------------------
     # Timers
@@ -670,7 +704,7 @@ class DashboardNode(Node):
             self.get_logger().info(f'[Dashboard] Human move submitted: {move}')
 
     # ------------------------------------------------------------------
-    # ROS callbacks — update shared state
+    # ROS callbacks - update shared state
     # ------------------------------------------------------------------
 
     def _board_state_cb(self, msg: BoardState) -> None:
@@ -681,16 +715,63 @@ class DashboardNode(Node):
             # publishes the logical board from FEN after each move.
             if sim and piece_count < 8:
                 return
-            _state['board_grid'] = [int(x) for x in msg.grid]
+            # On hardware, apply a hold filter: only update the displayed grid
+            # when the same grid arrives in N consecutive messages OR confidence
+            # is high enough to trust a single frame.
+            new_grid = [int(x) for x in msg.grid]
+            conf = float(msg.detection_confidence)
+            if not sim and conf >= 0.999:
+                # Authoritative logical board from game manager (post-move FEN).
+                _state['board_grid'] = new_grid
+                _state['board_source'] = 'game'
+                if msg.fen:
+                    _state['fen'] = msg.fen
+                _state['detection_confidence'] = conf
+                self._prev_board_grid = new_grid
+                self._board_grid_repeat = self._BOARD_GRID_HOLD
+                _state['_dirty'] = True
+                return
+            if not sim:
+                if new_grid == self._prev_board_grid:
+                    self._board_grid_repeat += 1
+                else:
+                    self._board_grid_repeat = 0
+                    self._prev_board_grid = new_grid
+                # Suppress the UI update unless the grid is stable or high-confidence
+                if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
+                    # Still update non-grid metadata (confidence) but not the grid.
+                    # Do not copy is_red_turn from vision - BoardState from camera often
+                    # leaves it unset; game_status is authoritative for side to move.
+                    _state['detection_confidence'] = conf
+                    if msg.fen:
+                        _state['fen'] = msg.fen
+                    _state['_dirty'] = True
+                    return
+            _state['board_grid'] = new_grid
+            _state['board_source'] = 'vision'
             if msg.fen:
                 _state['fen'] = msg.fen
-            _state['is_red_turn'] = msg.is_red_turn
-            _state['detection_confidence'] = float(msg.detection_confidence)
+            _state['detection_confidence'] = conf
             _state['_dirty'] = True
 
     def _game_status_cb(self, msg: GameStatus) -> None:
         with _state_lock:
-            _state['game_status'] = msg.status
+            new_status = msg.status
+
+            # Debounce 'detecting_move': only show this transient label after
+            # it has been the reported state for long enough.  False detections
+            # from vision glitches typically flip in and out in < 0.2 s, so
+            # they are invisible to the user.
+            if new_status == 'detecting_move':
+                if self._detecting_move_first_seen == 0.0:
+                    self._detecting_move_first_seen = time.time()
+                if time.time() - self._detecting_move_first_seen < self._DETECTING_MOVE_DEBOUNCE:
+                    # Within debounce window - keep whatever was shown before
+                    new_status = _state.get('game_status', new_status)
+            else:
+                self._detecting_move_first_seen = 0.0
+
+            _state['game_status'] = new_status
             _state['is_red_turn'] = msg.is_red_turn
             prev_moves = _state.get('move_count', 0)
             _state['move_count'] = msg.move_count
@@ -707,10 +788,14 @@ class DashboardNode(Node):
             _state['system_state'] = msg.system_state
             _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
             _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
-            # Always update FEN and derive grid (works without vision in sim mode)
+            # Sim: logical FEN drives the board (no camera). Hardware: vision drives the grid;
+            # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
                 _state['fen'] = msg.current_fen
-                _state['board_grid'] = fen_to_grid(msg.current_fen)
+                _state['game_fen'] = msg.current_fen
+                if _state.get('simulation_mode', False) or msg.move_count > prev_moves:
+                    _state['board_grid'] = fen_to_grid(msg.current_fen)
+                    _state['board_source'] = 'fen'
             _state['_dirty'] = True
 
     def _move_history_cb(self, msg: MoveHistory) -> None:

@@ -18,56 +18,54 @@ from typing import List, Tuple, Optional
 import cv2
 
 try:
+    import torch
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+try:
     from ultralytics import YOLO
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
 
+
+class _nullctx:
+    def __enter__(self): return self
+    def __exit__(self, *_): pass
+
 BOARD_FILES = 9
 BOARD_RANKS = 10
 
 # (class_id -> (is_red, piece_code))
+# Kaggle model classes are alphabetically ordered within each color group:
+#   0-6: black advisor, cannon, chariot, elephant, general, horse, soldier
+#   7-13: red advisor, cannon, chariot, elephant, general, horse, soldier
 CLASS_MAP = {
-    0:  (True,  1),   # red general
-    1:  (True,  2),   # red advisor
-    2:  (True,  3),   # red elephant
-    3:  (True,  4),   # red horse
-    4:  (True,  5),   # red chariot
-    5:  (True,  6),   # red cannon
-    6:  (True,  7),   # red soldier
-    7:  (False, 1),   # black general
-    8:  (False, 2),   # black advisor
-    9:  (False, 3),   # black elephant
-    10: (False, 4),   # black horse
-    11: (False, 5),   # black chariot
-    12: (False, 6),   # black cannon
-    13: (False, 7),   # black soldier
+    0:  (False, 2),   # black advisor
+    1:  (False, 6),   # black cannon
+    2:  (False, 5),   # black chariot
+    3:  (False, 3),   # black elephant
+    4:  (False, 1),   # black general
+    5:  (False, 4),   # black horse
+    6:  (False, 7),   # black soldier
+    7:  (True,  2),   # red advisor
+    8:  (True,  6),   # red cannon
+    9:  (True,  5),   # red chariot
+    10: (True,  3),   # red elephant
+    11: (True,  1),   # red general
+    12: (True,  4),   # red horse
+    13: (True,  7),   # red soldier
 }
 
 CLASS_NAMES = [
-    'red_general', 'red_advisor', 'red_elephant', 'red_horse',
-    'red_chariot', 'red_cannon', 'red_soldier',
-    'black_general', 'black_advisor', 'black_elephant', 'black_horse',
-    'black_chariot', 'black_cannon', 'black_soldier',
+    'black_advisor', 'black_cannon', 'black_chariot', 'black_elephant',
+    'black_general', 'black_horse', 'black_soldier',
+    'red_advisor', 'red_cannon', 'red_chariot', 'red_elephant',
+    'red_general', 'red_horse', 'red_soldier',
 ]
 
-# Normalised board image dimensions (must match BoardDetector)
-NORM_W = 800
-NORM_H = 890
-MARGIN = 44
-
-
-def _pixel_to_grid(px: float, py: float) -> Tuple[int, int]:
-    """Convert a pixel in the normalised board image to (file, rank)."""
-    spacing_x = (NORM_W - 2 * MARGIN) / (BOARD_FILES - 1)
-    spacing_y = (NORM_H - 2 * MARGIN) / (BOARD_RANKS - 1)
-    file_f = (px - MARGIN) / spacing_x
-    rank_f = (py - MARGIN) / spacing_y
-    file_idx = int(round(file_f))
-    rank_idx = int(round(rank_f))
-    if 0 <= file_idx < BOARD_FILES and 0 <= rank_idx < BOARD_RANKS:
-        return file_idx, rank_idx
-    return -1, -1
+from xiangqi_vision.board_layout import NORM_W, NORM_H, MARGIN, pixel_to_grid as _pixel_to_grid
 
 
 class Detection:
@@ -110,12 +108,22 @@ class PieceDetector:
         Returns:
             (detections, annotated_image)
         """
-        results = self._model.predict(
-            board_image,
-            conf=self._conf_threshold,
-            verbose=False,
-            imgsz=board_image.shape[:2],
-        )
+        # Cap at 640 - YOLO resizes internally, and 640px is more than enough resolution
+        # for a Xiangqi board (each grid square ~70px at this size). Passing the full
+        # 890x800 warp to YOLO was causing ~2s/frame on CPU; 640 brings it to ~300-500ms.
+        MAX_INFER_SIZE = 640
+        h, w = board_image.shape[:2]
+        scale = min(MAX_INFER_SIZE / h, MAX_INFER_SIZE / w, 1.0)
+        infer_h = int(round(h * scale / 32) * 32) or 32
+        infer_w = int(round(w * scale / 32) * 32) or 32
+        ctx = torch.no_grad() if TORCH_AVAILABLE else _nullctx()
+        with ctx:
+            results = self._model.predict(
+                board_image,
+                conf=self._conf_threshold,
+                verbose=False,
+                imgsz=(infer_h, infer_w),
+            )
 
         detections: List[Detection] = []
         if results and results[0].boxes is not None:

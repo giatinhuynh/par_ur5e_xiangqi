@@ -5,6 +5,9 @@ chinese-chess-robot-main/
 fairy-stockfish-master/
 Fairy-Stockfish-master/
 
+# YOLO weights >100 MB (GitHub limit); copy to lab manually — see workspace/models/README.md
+workspace/models/xiangqi_kaggle_v3_best.pt
+
 # ROS 2 colcon
 workspace/build/
 workspace/install/
@@ -21,8 +24,3 @@ __pycache__/
 Dockerfile.wsl.tmp
 docker-compose.yml.tmp
 setup.cfg.tmp
-
-# Other YOLO weights (project default is tracked below)
-workspace/src/xiangqi_vision/models/*.pt
-!workspace/src/xiangqi_vision/models/xiangqi_kaggle_v1_best.pt
-workspace/models/

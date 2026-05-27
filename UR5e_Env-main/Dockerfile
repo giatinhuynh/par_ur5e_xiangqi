@@ -67,11 +67,12 @@ RUN sudo apt-get update && sudo apt-get install -y ros-$ROS_DISTRO-moveit
 
 # Install Realsense Drivers for camera
 RUN sudo mkdir -p /etc/apt/keyrings
-RUN curl -sSf https://librealsense.intel.com/Debian/librealsense.pgp | sudo tee /etc/apt/keyrings/librealsense.pgp > /dev/null
-RUN echo "deb [signed-by=/etc/apt/keyrings/librealsense.pgp] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | \
+RUN curl -fsSL "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xFB0B24895113F120" | \
+    gpg --dearmor | sudo tee /etc/apt/keyrings/librealsense.gpg > /dev/null
+RUN echo "deb [signed-by=/etc/apt/keyrings/librealsense.gpg] https://librealsense.intel.com/Debian/apt-repo `lsb_release -cs` main" | \
     sudo tee /etc/apt/sources.list.d/librealsense.list
 RUN sudo apt-get update
-RUN sudo apt-get install -y librealsense2-dkms librealsense2-utils
+RUN sudo apt-get install -y librealsense2-utils
 RUN sudo apt-get install -y ros-$ROS_DISTRO-realsense2-camera-msgs ros-$ROS_DISTRO-realsense2-camera ros-$ROS_DISTRO-realsense2-description ros-$ROS_DISTRO-realsense2-camera-msgs-dbgsym ros-$ROS_DISTRO-realsense2-camera-dbgsym ros-$ROS_DISTRO-diagnostic-updater
 
 # Install RVIZ

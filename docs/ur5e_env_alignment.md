@@ -34,12 +34,12 @@ Older lab text may say **`ur_driver`**; current drivers entrypoint is **`arm_dri
 
 ## ROS interfaces used by Xiangqi (verified against `UR5e_Env-main`)
 
-### MoveIt waypoint action
+### MoveIt arm motion
 
 | | UR5e_Env source | Xiangqi consumer |
 |---|-----------------|------------------|
-| Action name | **`/par_moveit/waypoint_move`** ([`moveit_action_server_node.cpp`](../UR5e_Env-main/workspace/src/par_moveit_config/src/moveit_action_server_node.cpp)) | [`manipulation_node.py`](../workspace/src/xiangqi_manipulation/xiangqi_manipulation/manipulation_node.py) `WaypointMove` client |
-| Type | `par_interfaces/action/WaypointMove` | Same (`WaypointPose target_pose`) |
+| **OMPL (all moves)** | **`move_group`** → **`/move_action`** (`moveit_msgs/action/MoveGroup`) — same as RViz | [`moveit_ompl_client.py`](../workspace/src/xiangqi_manipulation/xiangqi_manipulation/moveit_ompl_client.py) |
+| Not used by Xiangqi | **`/par_moveit/waypoint_move`** (Cartesian only; lab legacy) | — |
 
 ### RG2 gripper
 
@@ -62,7 +62,7 @@ Drivers are launched from **`par_pkg`** when **`enable_camera:=true`** in `arm_d
 **Copy from this repo** into `workspace/src/`:  
 `xiangqi_*` packages only ([`README.md`](../README.md) Quick start).
 
-`xiangqi_manipulation/package.xml` declares a dependency on **`par_interfaces`** — that package must remain built from UR5e_Env.
+`xiangqi_vision` still uses **`par_interfaces/srv/CurrentWaypointPose`** (optional calibration fallback). **`par_interfaces`** must remain built from UR5e_Env. Xiangqi arm motion uses **`moveit_msgs`** + **`/move_action`**, not `WaypointMove`.
 
 ---
 

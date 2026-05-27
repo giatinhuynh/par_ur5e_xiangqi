@@ -15,12 +15,20 @@
 - REST-style POST endpoints (e.g. `/api/new_game`, `/api/emergency_stop`) trigger the ROS publishers above.
 - Socket.IO pushes live updates to browsers (`async_mode='threading'`).
 
+## Game modes (simulation and hardware)
+
+- **AI vs Human**: Choose **You play as** Red or Black in Engine Setup. On hardware, move pieces on the physical board and use **Confirm move** when needed.
+- **AI vs AI**: Robot plays both sides on the physical board (or moves are applied instantly in simulation). Pick Red and Black engines in Engine Setup, then **Start**.
+
+Mode is locked while a game is in progress. `/api/set_mode` publishes `/xiangqi/game_mode` for `game_manager_node`.
+
 ## Configuration
 
 - Default listen **port 5000**, `0.0.0.0` (parameter `port` in launch).
+- `simulation_mode` launch parameter: simulation defaults to AI vs AI; hardware defaults to AI vs Human.
 
 ## `SetEngine`
 
 The node may expose engine switching through the web layer by calling the **`SetEngine`** service on `ai_engine_node` (see `dashboard_node.py` for routes and client setup).
 
-This package does **not** implement game rules or vision—it only reflects and triggers the running stack.
+This package does **not** implement game rules or vision-it only reflects and triggers the running stack.

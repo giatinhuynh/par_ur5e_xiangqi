@@ -1,4 +1,4 @@
-# Single source for robot side — merge-order after game_config / planner_config.
+# Single source for robot side - merge-order after game_config / planner_config.
 # Both nodes must agree on `robot_plays_red` for graveyard colour and turn logic.
 task_planner_node:
   ros__parameters:

@@ -143,6 +143,10 @@ class GameManagerNode(Node):
             10,
             callback_group=cb_group,
         )
+        self._starting_fen_sub = self.create_subscription(
+            String, '/xiangqi/starting_fen', self._starting_fen_cb, 10,
+            callback_group=cb_group,
+        )
         # Planner execution feedback (ID-scoped JSON: status + dispatch_id)
         self._ai_exec_result_sub = self.create_subscription(
             AiExecutionResult,
@@ -209,12 +213,22 @@ class GameManagerNode(Node):
         self._ai_fen_at_request: str | None = None
         self._game_result: str = "ongoing"
         self._game_result_reason: str = ""
+        # FEN forwarded by dashboard after a successful Scan Board press.
+        # Consumed once in _begin_new_game to skip the startup rescan.
+        self._prescan_fen: str | None = None
 
         self.get_logger().info('game_manager_node started -- waiting for /xiangqi/new_game')
 
     # ------------------------------------------------------------------
     # Callbacks
     # ------------------------------------------------------------------
+
+    def _starting_fen_cb(self, msg: String) -> None:
+        """Dashboard sends the Scan Board result here just before publishing new_game."""
+        fen = (msg.data or '').strip()
+        if fen:
+            self._prescan_fen = fen
+            self.get_logger().info(f'Received pre-scanned FEN from dashboard: {fen}')
 
     def _board_state_cb(self, msg: BoardState) -> None:
         # Ignore logical snapshots we publish ourselves (confidence 1.0).
@@ -415,6 +429,9 @@ class GameManagerNode(Node):
             return False
         return val > 0 if human_red else val < 0
 
+    _HUMAN_SCAN_ROUNDS = 3       # scans to accumulate before inferring human move
+    _HUMAN_SCAN_INTERVAL = 0.20  # seconds between scans
+
     def _begin_human_move_detection(self) -> None:
         """Transition to DETECTING_MOVE and refresh vision before move inference."""
         self._tell_vision_to_watch(False)
@@ -426,6 +443,11 @@ class GameManagerNode(Node):
         if not self._get_board_state_cli.service_is_ready():
             self._process_human_move()
             return
+        self._human_move_scan_grids: list = []
+        self._human_scan_retry_timer = None
+        self._do_human_move_scan()
+
+    def _do_human_move_scan(self) -> None:
         req = GetBoardState.Request()
         req.force_rescan = True
         future = self._get_board_state_cli.call_async(req)
@@ -437,10 +459,98 @@ class GameManagerNode(Node):
         try:
             resp = future.result()
             if resp is not None and resp.success and resp.board_state is not None:
-                self._latest_board_state = resp.board_state
+                self._human_move_scan_grids.append(list(resp.board_state.grid))
         except Exception as e:
             self.get_logger().warn(f'Human-move rescan failed: {e}')
+
+        n = len(self._human_move_scan_grids)
+        if n < self._HUMAN_SCAN_ROUNDS:
+            # Schedule next scan - gives camera time to deliver a fresh frame
+            self._human_scan_retry_timer = self.create_timer(
+                self._HUMAN_SCAN_INTERVAL, self._on_human_scan_timer
+            )
+            return
+
+        # All rounds done - merge and run move inference
+        if self._human_move_scan_grids:
+            merged = self._merge_startup_grids(self._human_move_scan_grids)
+            # Inject the merged grid as the board state for move inference
+            synthetic = BoardState()
+            synthetic.grid = [int(v) for v in merged]
+            synthetic.fen = self._grid_to_fen(merged, self._current_fen)
+            synthetic.detection_confidence = 0.5
+            self._latest_board_state = synthetic
         self._process_human_move()
+
+    def _on_human_scan_timer(self) -> None:
+        if hasattr(self, '_human_scan_retry_timer') and self._human_scan_retry_timer:
+            self.destroy_timer(self._human_scan_retry_timer)
+            self._human_scan_retry_timer = None
+        if self._game_state != GameState.DETECTING_MOVE:
+            return
+        self._do_human_move_scan()
+
+    # ------------------------------------------------------------------
+    # AI verify-failure recovery via multi-scan
+    # ------------------------------------------------------------------
+
+    _AI_VERIFY_SCAN_ROUNDS = 3
+    _AI_VERIFY_SCAN_INTERVAL = 0.20
+
+    def _do_ai_verify_scan(self) -> None:
+        if not self._get_board_state_cli.service_is_ready():
+            self._finish_ai_verify_recovery()
+            return
+        req = GetBoardState.Request()
+        req.force_rescan = True
+        future = self._get_board_state_cli.call_async(req)
+        future.add_done_callback(self._on_ai_verify_scan_done)
+
+    def _on_ai_verify_scan_done(self, future) -> None:
+        if self._game_state != GameState.EXECUTING_MOVE:
+            return
+        try:
+            resp = future.result()
+            if resp is not None and resp.success and resp.board_state is not None:
+                self._ai_verify_scan_grids.append(list(resp.board_state.grid))
+        except Exception as e:
+            self.get_logger().warn(f'AI verify rescan failed: {e}')
+
+        if len(self._ai_verify_scan_grids) < self._AI_VERIFY_SCAN_ROUNDS:
+            self._ai_verify_scan_timer = self.create_timer(
+                self._AI_VERIFY_SCAN_INTERVAL, self._on_ai_verify_scan_timer
+            )
+            return
+        self._finish_ai_verify_recovery()
+
+    def _on_ai_verify_scan_timer(self) -> None:
+        if hasattr(self, '_ai_verify_scan_timer') and self._ai_verify_scan_timer:
+            self.destroy_timer(self._ai_verify_scan_timer)
+            self._ai_verify_scan_timer = None
+        if self._game_state != GameState.EXECUTING_MOVE:
+            return
+        self._do_ai_verify_scan()
+
+    def _finish_ai_verify_recovery(self) -> None:
+        """Use merged multi-scan grid to retry AI move verification after BOARD_VERIFY_FAILED."""
+        if self._ai_verify_scan_grids:
+            merged = self._merge_startup_grids(self._ai_verify_scan_grids)
+            synthetic = BoardState()
+            synthetic.grid = [int(v) for v in merged]
+            synthetic.fen = self._grid_to_fen(merged, self._current_fen)
+            synthetic.detection_confidence = 0.5
+            self._latest_board_state = synthetic
+
+        if self._commit_pending_ai_after_robot(
+            'Board verify failed - committing pending AI move (trust_robot)'
+        ):
+            return
+        if self._recover_ai_move_after_verify_failure():
+            return
+        self._discard_pending_ai_after_planner_abort(
+            'Board verification failed after robot move (FEN unchanged)',
+            'Robot move could not be confirmed by vision - use Sync Board or New Game',
+        )
 
     def _ai_execution_result_cb(self, msg: AiExecutionResult) -> None:
         """Handle planner feedback with dispatch_id guard against stale callbacks."""
@@ -499,16 +609,11 @@ class GameManagerNode(Node):
             return
 
         if status == AiExecutionResult.BOARD_VERIFY_FAILED:
-            if self._commit_pending_ai_after_robot(
-                'Board verify failed - committing pending AI move (trust_robot)'
-            ):
-                return
-            if self._recover_ai_move_after_verify_failure():
-                return
-            self._discard_pending_ai_after_planner_abort(
-                'Board verification failed after robot move (FEN unchanged)',
-                'Robot move could not be confirmed by vision - use Sync Board or New Game',
-            )
+            # Don't immediately use the stale/jittery _latest_board_state.
+            # Scan multiple fresh frames first, then retry verification.
+            self._ai_verify_scan_grids: list = []
+            self._ai_verify_scan_timer = None
+            self._do_ai_verify_scan()
             return
 
         if status == AiExecutionResult.AI_MOTION_FAILED:
@@ -781,28 +886,50 @@ class GameManagerNode(Node):
             return
 
         # ── Hardware mode ────────────────────────────────────────────────
-        # Scan the physical board so the AI operates on what is *actually*
-        # placed on the table, not the standard starting position.
         self._apply_dashboard_mode(self._dashboard_mode)
-        # Leave idle immediately so the dashboard clears "Starting game…" while
-        # the camera scan runs (status stays idle until kick_off otherwise).
         if self._self_play:
             self._game_state = GameState.COMPUTING_AI
         else:
             self._game_state = GameState.WAITING_HUMAN
         self._publish_status()
 
+        # If the dashboard Scan Board button already established a position, use it.
+        # _prescan_fen is intentionally NOT cleared here so that Restart also
+        # reuses the same scanned position without triggering another vision scan.
+        # It is only overwritten when the user presses Scan Board again.
+        if self._prescan_fen:
+            repaired = self._sanitize_fen_for_engine(self._prescan_fen)
+            if repaired != self._prescan_fen:
+                self.get_logger().warn(
+                    f'Pre-scanned FEN repaired (missing king). '
+                    f'Raw: {self._prescan_fen}  Repaired: {repaired}'
+                )
+            else:
+                self.get_logger().info(
+                    f'Using pre-scanned FEN from Scan Board: {repaired}'
+                )
+            self._current_fen = repaired
+            self._move_history = []
+            self._move_count = 0
+            self._kick_off_game()
+            return
+
+        # Fallback: no pre-scan available — scan the physical board now.
         if self._get_board_state_cli.service_is_ready():
             self.get_logger().info(
-                'New game (hardware): scanning physical board for starting position…'
+                'New game (hardware): no pre-scan — scanning physical board for starting position…'
             )
             self._startup_scan_retries = 0
+            self._startup_scan_grids: list = []
             self._do_startup_scan()
         else:
             self.get_logger().warn(
                 'Vision service not ready - starting from STARTING_FEN (place pieces first)'
             )
             self._kick_off_game()
+
+    _STARTUP_SCAN_ROUNDS = 7      # how many frames to accumulate
+    _STARTUP_SCAN_INTERVAL = 0.35  # seconds between scans (> camera period at 4 Hz)
 
     def _do_startup_scan(self):
         req = GetBoardState.Request()
@@ -816,55 +943,87 @@ class GameManagerNode(Node):
             self._startup_retry_timer = None
         self._do_startup_scan()
 
-    def _on_startup_board_scan_done(self, future) -> None:
-        """Apply the vision-scanned FEN and begin game play.
+    @staticmethod
+    def _merge_startup_grids(grids: list) -> list:
+        """Majority-vote merge across all N scans (zeros count as votes too).
 
-        Even if the scanned board is incomplete (missing kings, wrong
-        piece count due to YOLO glitching), we repair it to be minimally
-        legal rather than falling back to STARTING_FEN.  This way the AI
-        always operates on what is *actually* on the table.
+        Used for short multi-scan windows (human-move detection, AI verify) where
+        a coherent single frame is not guaranteed.
+        """
+        merged = [0] * 90
+        for i in range(90):
+            values = [g[i] for g in grids]
+            merged[i] = max(set(values), key=values.count)
+        return merged
+
+    @staticmethod
+    def _best_frame_grid(grids: list) -> list:
+        """Return the single frame that detected the most pieces.
+
+        Produces a coherent real snapshot instead of a cell-by-cell reconstruction
+        that can mix detections from different moments.
+        """
+        return max(grids, key=lambda g: sum(1 for v in g if v != 0))
+
+    def _on_startup_board_scan_done(self, future) -> None:
+        """Accumulate vision grids over _STARTUP_SCAN_ROUNDS frames, then pick the best.
+
+        The densest frame (most pieces detected) is used as the starting FEN so
+        the board state is a coherent snapshot rather than a majority-vote hybrid.
         """
         try:
             resp = future.result()
         except Exception as e:
-            self.get_logger().warn(
-                f'Startup board scan failed ({e}) - using STARTING_FEN'
-            )
+            self.get_logger().warn(f'Startup board scan failed ({e}) - using STARTING_FEN')
             self._kick_off_game()
-        else:
-            if resp is not None and resp.success:
-                # vision_node publishes grid, not fen, so we construct it
-                raw_fen = resp.board_state.fen
-                if not raw_fen:
-                    raw_fen = GameManagerNode._grid_to_fen(resp.board_state.grid, STARTING_FEN)
-                
-                repaired_fen = self._sanitize_fen_for_engine(raw_fen)
-                if repaired_fen != raw_fen:
-                    self.get_logger().warn(
-                        f'Vision FEN was incomplete (missing king(s)) - '
-                        f'repaired for engine.  Raw: {raw_fen}  '
-                        f'Repaired: {repaired_fen}'
-                    )
-                else:
-                    self.get_logger().info(
-                        f'Board scan OK - game starting from: {repaired_fen}'
-                    )
-                self._current_fen = repaired_fen
-                self._move_history = []
-                self._move_count = 0
-                self._kick_off_game()
+            return
+
+        if resp is None or not resp.success:
+            if self._startup_scan_retries < 6:
+                self._startup_scan_retries += 1
+                self.get_logger().info(
+                    f'Vision not ready, retrying ({self._startup_scan_retries}/6) in 0.5s...'
+                )
+                self._startup_retry_timer = self.create_timer(0.5, self._retry_startup_scan)
             else:
-                if self._startup_scan_retries < 6:
-                    self._startup_scan_retries += 1
-                    self.get_logger().info(
-                        f'Vision not ready, retrying ({self._startup_scan_retries}/6) in 0.5s...'
-                    )
-                    self._startup_retry_timer = self.create_timer(0.5, self._retry_startup_scan)
-                else:
-                    self.get_logger().warn(
-                        'Board scan failed after retries - using STARTING_FEN'
-                    )
-                    self._kick_off_game()
+                self.get_logger().warn('Board scan failed after retries - using STARTING_FEN')
+                self._kick_off_game()
+            return
+
+        frame_pieces = sum(1 for v in resp.board_state.grid if v != 0)
+        self._startup_scan_grids.append(list(resp.board_state.grid))
+        n = len(self._startup_scan_grids)
+        self.get_logger().info(
+            f'Startup scan {n}/{self._STARTUP_SCAN_ROUNDS} complete '
+            f'(pieces detected: {frame_pieces})'
+        )
+
+        if n < self._STARTUP_SCAN_ROUNDS:
+            # Schedule next scan after a short delay so camera delivers a fresh frame
+            self._startup_retry_timer = self.create_timer(
+                self._STARTUP_SCAN_INTERVAL, self._retry_startup_scan
+            )
+            return
+
+        # All rounds done — pick the densest frame and commit
+        best_grid = self._best_frame_grid(self._startup_scan_grids)
+        raw_fen = GameManagerNode._grid_to_fen(best_grid, STARTING_FEN)
+        repaired_fen = self._sanitize_fen_for_engine(raw_fen)
+        piece_count = sum(1 for v in best_grid if v != 0)
+        if repaired_fen != raw_fen:
+            self.get_logger().warn(
+                f'Best-frame FEN was incomplete (missing king(s)) - repaired. '
+                f'Pieces found: {piece_count}  Raw: {raw_fen}  Repaired: {repaired_fen}'
+            )
+        else:
+            self.get_logger().info(
+                f'Startup scan complete (best frame: {piece_count} pieces '
+                f'from {self._STARTUP_SCAN_ROUNDS} candidates). FEN: {repaired_fen}'
+            )
+        self._current_fen = repaired_fen
+        self._move_history = []
+        self._move_count = 0
+        self._kick_off_game()
 
     def _kick_off_game(self) -> None:
         """Transition into the first game state and begin play."""
@@ -986,6 +1145,36 @@ class GameManagerNode(Node):
         base_tol = int(self.get_parameter('human_move_grid_tolerance').value)
         ref_grid = self._human_watch_reference_grid
         ref_for_side = ref_grid if ref_grid is not None else self._fen_to_grid(self._current_fen)
+        human_sign = 1 if human_red else -1
+        opp_sign   = -human_sign
+
+        # Early guard: if an opponent's piece clearly moved (disappeared from one square,
+        # appeared at another), call illegal immediately — BEFORE move inference so a
+        # coincidentally low-mismatch legal move cannot mask the wrong-color violation.
+        appeared_opp = [
+            i for i in range(90)
+            if (grid[i] * opp_sign > 0) and not (ref_for_side[i] * opp_sign > 0)
+        ]
+        disappeared_opp = [
+            i for i in range(90)
+            if (ref_for_side[i] * opp_sign > 0) and grid[i] == 0
+        ]
+        if len(appeared_opp) == 1 and len(disappeared_opp) == 1:
+            ap_i  = appeared_opp[0]
+            ap_sq = f"{chr(ord('a') + ap_i % 9)}{ap_i // 9 + 1}"
+            self.get_logger().warn(
+                f'Human moved opponent piece to {ap_sq} — illegal, game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                f"Illegal move: you moved your opponent's piece to {ap_sq} — game over."
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
+
         detected_move = self._infer_move_from_board(
             self._current_fen,
             grid,
@@ -1021,6 +1210,41 @@ class GameManagerNode(Node):
                 'press Confirm move in the dashboard, or Sync board'
             )
             return
+
+        # Validate: if vision unambiguously shows the human's piece appeared at exactly one
+        # square AND that square doesn't match the inferred destination, the human placed the
+        # piece illegally (e.g. horse to f2 instead of g3).  Reject the move so the human
+        # can redo it rather than silently executing a different legal move.
+        appeared_human = [
+            i for i in range(90)
+            if (grid[i] * human_sign > 0) and not (ref_for_side[i] * human_sign > 0)
+        ]
+        if len(appeared_human) == 1:
+            try:
+                parsed = _resolver_parse_move(detected_move)
+                if parsed is not None:
+                    _, (to_file_ch, to_rank_1based) = parsed
+                    inferred_dest_idx = (to_rank_1based - 1) * 9 + (ord(to_file_ch) - ord('a'))
+                    if appeared_human[0] != inferred_dest_idx:
+                        ap_i  = appeared_human[0]
+                        ap_sq = f"{chr(ord('a') + ap_i % 9)}{ap_i // 9 + 1}"
+                        self.get_logger().warn(
+                            f'Illegal placement: piece appeared at {ap_sq}, '
+                            f'but inferred move {detected_move} would go to '
+                            f'{to_file_ch}{to_rank_1based} — rejecting'
+                        )
+                        result = 'black_wins' if human_red else 'red_wins'
+                        self._declare_game_over(result, 'illegal_move')
+                        alert = String()
+                        alert.data = (
+                            f'Illegal move: {detected_move[:2].upper()}→{ap_sq} is not a '
+                            'legal destination for that piece — game over.'
+                        )
+                        self._illegal_move_pub.publish(alert)
+                        self._publish_status()
+                        return
+            except Exception as e:
+                self.get_logger().warn(f'Illegal placement check error: {e}')
 
         self.get_logger().info(f'Human move detected: {detected_move}')
         self._apply_move(detected_move, is_ai=False)
@@ -1499,12 +1723,25 @@ class GameManagerNode(Node):
                 if not pool:
                     return None
 
+            # Authoritative grid from FEN: pieces that should be on the board.
+            # Used to distinguish "vision missed a stable piece" from "piece actually moved".
+            auth_grid = self._fen_to_grid(fen)
+
             best_move: str | None = None
             best_mismatches = 91
             for move in pool:
                 candidate_fen = sf.get_fen(VARIANT, fen, [move])
                 candidate_grid = self._fen_to_grid(candidate_fen)
-                mismatches = self._grid_mismatch_count(candidate_grid, new_grid)
+                critical = move_critical_indices(move)
+                # Robust mismatch: skip cells where vision shows 0 but the authoritative
+                # FEN had a piece AND the move doesn't touch that cell.  These are missed
+                # detections (YOLO jitter), not real captures — ignoring them prevents a
+                # spurious capture from looking like the best match.
+                mismatches = sum(
+                    1 for i in range(90)
+                    if candidate_grid[i] != new_grid[i]
+                    and not (new_grid[i] == 0 and auth_grid[i] != 0 and i not in critical)
+                )
                 if mismatches < best_mismatches:
                     best_mismatches = mismatches
                     best_move = move

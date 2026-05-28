@@ -28,7 +28,9 @@ from rclpy.node import Node
 from std_msgs.msg import Bool, Empty, String
 
 from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory, EngineInfo
+from std_srvs.srv import Trigger
 from xiangqi_msgs.srv import SetEngine
+from xiangqi_msgs.srv import GetBoardState
 
 from flask import Flask, render_template, request, jsonify
 from flask_socketio import SocketIO, emit
@@ -41,6 +43,32 @@ PIECE_CODES_FEN = {
 
 STARTING_FEN = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1'
 DEFAULT_STOCKFISH_SKILL = 20  # UCI Skill Level 1–20
+
+
+def _grid_to_fen_str(grid: list, template_fen: str) -> str:
+    """Rebuild a FEN board-part from a flat int8[90] grid; keep template_fen's metadata tail."""
+    PIECE_CHARS = {1: 'K', 2: 'A', 3: 'B', 4: 'N', 5: 'R', 6: 'C', 7: 'P'}
+    rows = []
+    for rank in range(9, -1, -1):
+        row = ''
+        empty = 0
+        for file in range(9):
+            val = grid[rank * 9 + file]
+            if val == 0:
+                empty += 1
+            else:
+                if empty:
+                    row += str(empty)
+                    empty = 0
+                ch = PIECE_CHARS.get(abs(val), '?')
+                row += ch if val > 0 else ch.lower()
+        if empty:
+            row += str(empty)
+        rows.append(row)
+    board_part = '/'.join(rows)
+    parts = (template_fen or STARTING_FEN).split()
+    parts[0] = board_part
+    return ' '.join(parts)
 
 
 def fen_to_grid(fen: str) -> list:
@@ -73,7 +101,7 @@ def fen_to_grid(fen: str) -> list:
 _state = {
     'board_grid': [0] * 90,  # empty until vision or sim populates it
     'fen': STARTING_FEN,
-    'game_fen': STARTING_FEN,  # authoritative FEN from game manager only (never from vision)
+    'game_fen': '',  # authoritative FEN from game manager only; empty until first status msg
     'game_status': 'idle',
     'is_red_turn': True,
     'move_count': 0,
@@ -97,6 +125,9 @@ _state = {
     'game_mode': 'ai_vs_human',   # 'ai_vs_ai' | 'ai_vs_human'
     'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
+    # Board scan (hardware pre-game calibration check)
+    'board_scan_status': 'none',   # 'none' | 'scanning' | 'ok' | 'fail'
+    'board_scan_pieces': 0,
     '_dirty': False,
 }
 _state_lock = threading.Lock()
@@ -193,6 +224,9 @@ def _apply_idle_board_state() -> None:
         _state['evaluation_cp'] = 0
         _state['depth_reached'] = 0
         _state['thinking_time'] = 0.0
+        if not _state.get('simulation_mode', False):
+            _state['board_scan_status'] = 'none'
+            _state['game_fen'] = ''
         _state['_dirty'] = True
 
 
@@ -283,6 +317,126 @@ def api_sync_board():
     if pub is None:
         return jsonify({'ok': False, 'error': 'Resync not available'}), 503
     pub.publish(Empty())
+    return jsonify({'ok': True})
+
+
+_SCAN_ROUNDS = 7
+_SCAN_INTERVAL = 0.35  # seconds between rounds (matches game_manager startup scan)
+
+
+def _best_frame_grid(grids: list) -> list:
+    """Return the single frame that detected the most pieces.
+
+    Using the densest frame avoids majority-vote artifacts where pieces detected
+    in most-but-not-all frames get zeroed out, and keeps the board coherent (a
+    real snapshot rather than a cell-by-cell reconstruction).
+    """
+    return max(grids, key=lambda g: sum(1 for v in g if v != 0))
+
+
+def _call_get_board_state(cli, timeout: float = 4.0):
+    """Call GetBoardState synchronously from a Flask thread; returns response or None."""
+    result_holder = [None]
+    done_event = threading.Event()
+    req = GetBoardState.Request()
+    req.force_rescan = True
+    future = cli.call_async(req)
+
+    def _on_done(fut):
+        try:
+            result_holder[0] = fut.result()
+        except Exception:
+            pass
+        done_event.set()
+
+    future.add_done_callback(_on_done)
+    done_event.wait(timeout=timeout)
+    return result_holder[0]
+
+
+@_flask_app.route('/api/scan_board', methods=['POST'])
+def api_scan_board():
+    """Multi-round scan of the physical board; majority-vote merge for robustness."""
+    with _state_lock:
+        if _state.get('simulation_mode', False):
+            return jsonify({'ok': False, 'error': 'Scan not needed in simulation mode'}), 400
+        status = (_state.get('game_status') or 'idle').lower()
+        if status not in ('idle', 'game_over'):
+            return jsonify({'ok': False, 'error': 'Cannot scan during a game'}), 409
+    cli = _ros_publishers.get('get_board_state_cli')
+    if cli is None or not cli.service_is_ready():
+        with _state_lock:
+            _state['board_scan_status'] = 'fail'
+            _state['_dirty'] = True
+        return jsonify({'ok': False, 'error': 'Vision service not ready'}), 503
+
+    with _state_lock:
+        _state['board_scan_status'] = 'scanning'
+        _state['_dirty'] = True
+
+    grids: list = []
+    last_fen: str = ''
+    for i in range(_SCAN_ROUNDS):
+        if i > 0:
+            time.sleep(_SCAN_INTERVAL)
+        resp = _call_get_board_state(cli)
+        if resp is not None and resp.success and resp.board_state is not None:
+            grids.append(list(resp.board_state.grid))
+            if resp.board_state.fen:
+                last_fen = resp.board_state.fen
+
+    if not grids:
+        with _state_lock:
+            _state['board_scan_status'] = 'fail'
+            _state['_dirty'] = True
+        return jsonify({'ok': False, 'error': 'Board not detected — check camera and ArUco markers'}), 503
+
+    best_grid = _best_frame_grid(grids)
+    piece_count = sum(1 for x in best_grid if x != 0)
+
+    # Rebuild FEN from best frame, using the last scanned FEN for the metadata tail
+    scanned_fen = _grid_to_fen_str(best_grid, last_fen or STARTING_FEN)
+
+    with _state_lock:
+        _state['board_scan_status'] = 'ok'
+        _state['board_scan_pieces'] = piece_count
+        _state['game_fen'] = scanned_fen
+        _state['_dirty'] = True
+    return jsonify({'ok': True, 'pieces': piece_count, 'fen': scanned_fen, 'rounds': len(grids)})
+
+
+@_flask_app.route('/api/move_to_scan_pose', methods=['POST'])
+def api_move_to_scan_pose():
+    """Command the robot arm to move to the scan (camera) pose."""
+    with _state_lock:
+        if _state.get('simulation_mode', False):
+            return jsonify({'ok': False, 'error': 'Not applicable in simulation mode'}), 400
+        status = (_state.get('game_status') or 'idle').lower()
+        if status not in ('idle', 'game_over'):
+            return jsonify({'ok': False, 'error': 'Cannot move arm during an active game'}), 409
+    cli = _ros_publishers.get('move_to_scan_pose_cli')
+    if cli is None or not cli.service_is_ready():
+        return jsonify({'ok': False, 'error': 'move_to_scan_pose service not ready'}), 503
+
+    result_holder = [None]
+    done_event = threading.Event()
+    future = cli.call_async(Trigger.Request())
+
+    def _on_done(fut):
+        try:
+            result_holder[0] = fut.result()
+        except Exception:
+            pass
+        done_event.set()
+
+    future.add_done_callback(_on_done)
+    done_event.wait(timeout=30.0)
+
+    resp = result_holder[0]
+    if resp is None:
+        return jsonify({'ok': False, 'error': 'Timed out waiting for arm'}), 504
+    if not resp.success:
+        return jsonify({'ok': False, 'error': resp.message or 'Arm move failed'}), 500
     return jsonify({'ok': True})
 
 
@@ -579,6 +733,10 @@ class DashboardNode(Node):
         with _state_lock:
             _state['simulation_mode'] = sim_mode
             _state['game_mode'] = 'ai_vs_ai' if sim_mode else 'ai_vs_human'
+            # Sim: game manager is co-located so STARTING_FEN is valid immediately.
+            # Hardware: leave game_fen empty until the game manager sends the real board.
+            if sim_mode:
+                _state['game_fen'] = STARTING_FEN
 
         # --- Subscriptions (no duplicates) ---
         self.create_subscription(BoardState, '/xiangqi/board_state', self._board_state_cb, 10)
@@ -600,6 +758,7 @@ class DashboardNode(Node):
         self._stop_game_pub = self.create_publisher(Empty, '/xiangqi/stop_game', 10)
         self._reset_game_pub = self.create_publisher(Empty, '/xiangqi/reset_game', 10)
         self._human_color_pub = self.create_publisher(String, '/xiangqi/human_color', 10)
+        self._starting_fen_pub = self.create_publisher(String, '/xiangqi/starting_fen', 10)
 
         _ros_publishers['new_game'] = self._new_game_pub
         _ros_publishers['stop_game'] = self._stop_game_pub
@@ -610,7 +769,12 @@ class DashboardNode(Node):
         _ros_publishers['estop'] = self._estop_pub
         _ros_publishers['resync'] = self._resync_pub
         _ros_publishers['human_color'] = self._human_color_pub
+        _ros_publishers['starting_fen'] = self._starting_fen_pub
         _ros_publishers['set_engine_cli'] = self.create_client(SetEngine, 'set_engine')
+        _ros_publishers['get_board_state_cli'] = self.create_client(GetBoardState, 'get_board_state')
+        _ros_publishers['move_to_scan_pose_cli'] = self.create_client(
+            Trigger, '/xiangqi/move_to_scan_pose'
+        )
 
         # Push state to browsers (threading async_mode allows emit from this ROS thread)
         self._push_timer = self.create_timer(0.2, self._timer_push_state)
@@ -638,6 +802,11 @@ class DashboardNode(Node):
         self._board_grid_repeat: int = 0
         self._BOARD_GRID_HOLD = 2        # consecutive identical msgs before UI update
         self._BOARD_CONF_BYPASS = 0.65   # high-confidence frames skip the hold
+        # Post-move lock: after the game manager publishes an authoritative board
+        # (conf=1.0), suppress all vision grid updates for this many seconds so
+        # jittery YOLO frames can't overwrite the clean post-move display.
+        self._post_move_lock_until: float = 0.0
+        self._POST_MOVE_LOCK_SECS = 5.0
 
         # Detecting-move debounce: suppress the 'detecting_move' label until
         # it has been the reported state for >= N seconds.  This hides the
@@ -687,6 +856,19 @@ class DashboardNode(Node):
         _pending_new_game_mode = None
         _publish_game_mode(mode)
         _publish_ai_engines()
+        # Hardware: if the user pressed Scan Board before Start, forward the
+        # resulting FEN so game_manager skips its own 10-round startup rescan.
+        with _state_lock:
+            is_sim = _state.get('simulation_mode', False)
+            scan_ok = _state.get('board_scan_status') == 'ok'
+            game_fen = _state.get('game_fen', '')
+        if not is_sim and scan_ok and game_fen:
+            pub = _ros_publishers.get('starting_fen')
+            if pub:
+                msg = String()
+                msg.data = game_fen
+                pub.publish(msg)
+                self.get_logger().info(f'Forwarding pre-scanned FEN to game_manager: {game_fen}')
         self._new_game_pub.publish(Empty())
         self.get_logger().info(f'Starting game: mode={mode}')
 
@@ -727,9 +909,15 @@ class DashboardNode(Node):
                 _state['detection_confidence'] = conf
                 self._prev_board_grid = new_grid
                 self._board_grid_repeat = self._BOARD_GRID_HOLD
+                self._post_move_lock_until = time.time() + self._POST_MOVE_LOCK_SECS
                 _state['_dirty'] = True
                 return
             if not sim:
+                # Suppress vision grid updates during post-move lock window
+                if time.time() < self._post_move_lock_until:
+                    _state['detection_confidence'] = conf
+                    _state['_dirty'] = True
+                    return
                 if new_grid == self._prev_board_grid:
                     self._board_grid_repeat += 1
                 else:
@@ -790,8 +978,15 @@ class DashboardNode(Node):
             # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
                 _state['fen'] = msg.current_fen
-                _state['game_fen'] = msg.current_fen
-                if _state.get('simulation_mode', False) or msg.move_count > prev_moves:
+                is_sim = _state.get('simulation_mode', False)
+                # Hardware: only update game_fen when a game is actually running or has been
+                # played (move_count > 0). This prevents the game manager's idle 1-second
+                # status tick (which publishes STARTING_FEN) from overwriting the pre-scan
+                # empty state or the scan-preview FEN set by /api/scan_board.
+                game_active = msg.status not in ('idle', 'game_over') or msg.move_count > 0
+                if is_sim or game_active:
+                    _state['game_fen'] = msg.current_fen
+                if is_sim or msg.move_count > prev_moves:
                     _state['board_grid'] = fen_to_grid(msg.current_fen)
                     _state['board_source'] = 'fen'
             _state['_dirty'] = True

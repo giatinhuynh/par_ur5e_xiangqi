@@ -497,8 +497,28 @@ function drawFenBoard() {
   c.fillStyle = 'rgba(0,0,0,.08)';
   c.fillRect(MARGIN_X, MARGIN_Y + 4 * CELL_H, W - 2 * MARGIN_X, CELL_H);
 
-  // Pieces from FEN
-  const grid = fenToGrid(state.game_fen || state.fen);
+  // Pieces from FEN - only render once the game manager has sent an authoritative FEN
+  if (!state.game_fen) {
+    c.fillStyle = 'rgba(0,0,0,0.35)';
+    c.font = 'bold 14px Inter, sans-serif';
+    c.textAlign = 'center';
+    c.fillText('Waiting for game manager…', W / 2, H / 2);
+    return;
+  }
+
+  // Highlight last-move squares (same as vision board)
+  if (lastMove) {
+    for (const idx of [lastMove.from, lastMove.to]) {
+      if (idx == null) continue;
+      const { x, y } = gridIdxToPixel(idx);
+      c.fillStyle = 'rgba(255,200,0,.22)';
+      c.beginPath();
+      c.arc(x, y, PIECE_R + 4, 0, Math.PI * 2);
+      c.fill();
+    }
+  }
+
+  const grid = fenToGrid(state.game_fen);
   for (let i = 0; i < 90; i++) {
     const code = grid[i];
     if (code === 0) continue;
@@ -619,6 +639,7 @@ function renderAll() {
   drawFenBoard();
   updateHeader();
   updateBoardLoading();
+  updateVisionBoardHint();
   updateModeBar();
   updateFlowBanner();
   updateGameResultBanner();
@@ -651,6 +672,18 @@ function updateHeader() {
     sysLabel.textContent = 'Starting game…';
   } else if (socket.connected) {
     sysLabel.textContent = state.system_state || 'Connected';
+  }
+}
+
+function updateVisionBoardHint() {
+  const el = document.getElementById('vision-board-hint');
+  if (!el) return;
+  const sim = !!state.simulation_mode;
+  const gs = (state.game_status || '').toLowerCase();
+  const show = !sim && gs === 'waiting_human' && isHumanPlayersTurn();
+  el.classList.toggle('hidden', !show);
+  if (show) {
+    el.textContent = 'Move your piece on the board, wait for the robot to see it update above, then press Confirm Move.';
   }
 }
 
@@ -709,10 +742,42 @@ function updateModeBar() {
     btnHuman.classList.toggle('active', state.game_mode === 'ai_vs_human');
     btnHuman.disabled = modeLocked;
   }
+  // Scan pose button — hardware only, disabled during active game
+  const scanPoseBtn = document.getElementById('btn-scan-pose');
+  if (scanPoseBtn) {
+    scanPoseBtn.classList.toggle('hidden', sim);
+    scanPoseBtn.disabled = busy;
+  }
+
+  // Scan board button — hardware only, visible when idle/game_over
+  const scanBtn = document.getElementById('btn-scan-board');
+  const scanStatusEl = document.getElementById('board-scan-status');
+  const scanStatus = state.board_scan_status || 'none';
+  const needsScan = !sim && scanStatus !== 'ok';
+  if (scanBtn) {
+    scanBtn.classList.toggle('hidden', sim || busy);
+    scanBtn.disabled = busy || scanStatus === 'scanning';
+    scanBtn.textContent = scanStatus === 'scanning' ? 'Scanning…'
+                        : scanStatus === 'ok'       ? 'Re-scan Board'
+                        : 'Scan Board';
+  }
+  if (scanStatusEl) {
+    if (sim || busy) {
+      scanStatusEl.classList.add('hidden');
+    } else {
+      scanStatusEl.classList.remove('hidden');
+      if (scanStatus === 'none')     { scanStatusEl.textContent = 'Scan the board before starting'; scanStatusEl.className = 'board-scan-status scan-none'; }
+      else if (scanStatus === 'scanning') { scanStatusEl.textContent = 'Scanning…'; scanStatusEl.className = 'board-scan-status scan-scanning'; }
+      else if (scanStatus === 'ok')  { scanStatusEl.textContent = `✓ Board ready — ${state.board_scan_pieces} pieces detected`; scanStatusEl.className = 'board-scan-status scan-ok'; }
+      else                           { scanStatusEl.textContent = '✗ Scan failed — check camera and ArUco markers'; scanStatusEl.className = 'board-scan-status scan-fail'; }
+    }
+  }
   if (newGameBtn) {
-    newGameBtn.disabled = !!state.estop_active || busy;
+    const blockedByScan = !sim && needsScan && !busy;
+    newGameBtn.disabled = !!state.estop_active || busy || blockedByScan;
     newGameBtn.classList.toggle('is-loading', starting);
     newGameBtn.textContent = starting ? 'Starting…' : 'Start';
+    newGameBtn.title = blockedByScan ? 'Scan the board first' : '';
   }
   if (stopBtn) stopBtn.disabled = !busy || !!state.estop_active;
   if (resetBtn) resetBtn.disabled = !!state.estop_active;
@@ -1356,6 +1421,43 @@ function setMode(mode) {
 }
 
 // ── Game Controls ─────────────────────────────────────────────────
+
+function moveToScanPose() {
+  if (state.simulation_mode) return;
+  const btn = document.getElementById('btn-scan-pose');
+  if (btn) { btn.disabled = true; btn.textContent = 'Moving…'; }
+  fetch('/api/move_to_scan_pose', { method: 'POST' })
+    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (btn) { btn.disabled = false; btn.textContent = 'Scan Pose'; }
+      showToast(ok && d.ok ? 'Arm at scan pose' : ((d && d.error) || 'Move failed'));
+    })
+    .catch(() => {
+      if (btn) { btn.disabled = false; btn.textContent = 'Scan Pose'; }
+      showToast('Scan pose request failed');
+    });
+}
+
+function scanBoard() {
+  if (state.simulation_mode) return;
+  const btn = document.getElementById('btn-scan-board');
+  if (btn) { btn.disabled = true; btn.textContent = 'Scanning…'; }
+  fetch('/api/scan_board', { method: 'POST' })
+    .then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (btn) { btn.disabled = false; btn.textContent = 'Scan Board'; }
+      if (ok && d.ok) {
+        showToast(`Board detected — ${d.pieces} pieces found`);
+      } else {
+        showToast((d && d.error) || 'Scan failed — check camera and markers');
+      }
+      renderAll();
+    })
+    .catch(() => {
+      if (btn) { btn.disabled = false; btn.textContent = 'Scan Board'; }
+      showToast('Scan request failed');
+    });
+}
 
 function newGame() {
   if (state.estop_active) {

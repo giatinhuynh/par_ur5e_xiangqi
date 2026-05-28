@@ -441,6 +441,40 @@ body {
 }
 #board-canvas.selectable { cursor: pointer; }
 
+.scan-board-btn { background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border); }
+.scan-board-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.scan-pose-btn { background: var(--bg-elevated); color: var(--text-primary); border: 1px solid var(--border); }
+.scan-pose-btn:hover:not(:disabled) { background: var(--bg-hover); }
+
+.board-scan-status {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 12px;
+  border-radius: 99px;
+  margin-top: 2px;
+}
+.board-scan-status.scan-none     { color: var(--text-muted); }
+.board-scan-status.scan-scanning { color: var(--accent); }
+.board-scan-status.scan-ok       { color: #22c55e; }
+.board-scan-status.scan-fail     { color: #ef4444; }
+
+.vision-board-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-align: center;
+}
+.vision-board-hint {
+  font-size: 12px;
+  color: var(--accent);
+  text-align: center;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  max-width: 480px;
+}
 .fen-board-section {
   display: flex;
   flex-direction: column;

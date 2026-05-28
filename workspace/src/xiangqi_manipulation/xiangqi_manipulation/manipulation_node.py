@@ -65,7 +65,7 @@ except ImportError:
 # Gripper widths in millimetres
 OPEN_WIDTH    = 50.0   # Clearance width before descending onto piece
 GRASP_WIDTH   = 18.0   # Grip width for ~20 mm diameter Xiangqi piece
-RELEASE_WIDTH = 34.0   # Width after releasing piece at destination
+RELEASE_WIDTH = 50.0   # Full open at release so piece drops cleanly (same as OPEN_WIDTH)
 GRASP_FORCE   = 15.0   # Newtons - firm grip without crushing
 OPEN_FORCE    = 10.0   # Newtons - gentle open
 

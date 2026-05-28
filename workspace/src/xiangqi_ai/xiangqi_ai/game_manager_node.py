@@ -844,7 +844,7 @@ class GameManagerNode(Node):
         self._clear_planner_ack_timer()
         self._ai_service_retry_count = 0
         self._ai_fail_streak = 0
-        self._current_fen = STARTING_FEN
+        self._current_fen = self._prescan_fen if self._prescan_fen else STARTING_FEN
         self._move_history = []
         self._move_count = 0
         self._game_result = 'ongoing'

@@ -128,6 +128,7 @@ _state = {
     # Board scan (hardware pre-game calibration check)
     'board_scan_status': 'none',   # 'none' | 'scanning' | 'ok' | 'fail'
     'board_scan_pieces': 0,
+    'prescan_fen': '',             # FEN captured by last successful Scan Board; cleared on new scan
     '_dirty': False,
 }
 _state_lock = threading.Lock()
@@ -209,7 +210,7 @@ def _cancel_pending_new_game() -> None:
     _pending_new_game_mode = None
 
 
-def _apply_idle_board_state() -> None:
+def _apply_idle_board_state(preserve_scan: bool = False) -> None:
     with _state_lock:
         if _state.get('simulation_mode', False):
             _state['board_grid'] = fen_to_grid(STARTING_FEN)
@@ -225,8 +226,18 @@ def _apply_idle_board_state() -> None:
         _state['depth_reached'] = 0
         _state['thinking_time'] = 0.0
         if not _state.get('simulation_mode', False):
-            _state['board_scan_status'] = 'none'
-            _state['game_fen'] = ''
+            if preserve_scan:
+                # Restore to the pre-game scanned position; keep board_scan_status intact
+                prescan = _state.get('prescan_fen', '')
+                if prescan:
+                    _state['game_fen'] = prescan
+                else:
+                    _state['board_scan_status'] = 'none'
+                    _state['game_fen'] = ''
+            else:
+                _state['board_scan_status'] = 'none'
+                _state['prescan_fen'] = ''
+                _state['game_fen'] = ''
         _state['_dirty'] = True
 
 
@@ -271,7 +282,7 @@ def api_stop_game():
     pub = _ros_publishers.get('stop_game')
     if pub:
         pub.publish(Empty())
-    _apply_idle_board_state()
+    _apply_idle_board_state(preserve_scan=True)
     return jsonify({'ok': True})
 
 
@@ -372,6 +383,7 @@ def api_scan_board():
 
     with _state_lock:
         _state['board_scan_status'] = 'scanning'
+        _state['prescan_fen'] = ''
         _state['_dirty'] = True
 
     grids: list = []
@@ -401,6 +413,7 @@ def api_scan_board():
         _state['board_scan_status'] = 'ok'
         _state['board_scan_pieces'] = piece_count
         _state['game_fen'] = scanned_fen
+        _state['prescan_fen'] = scanned_fen
         _state['_dirty'] = True
     return jsonify({'ok': True, 'pieces': piece_count, 'fen': scanned_fen, 'rounds': len(grids)})
 
@@ -889,18 +902,16 @@ class DashboardNode(Node):
 
     def _board_state_cb(self, msg: BoardState) -> None:
         with _state_lock:
-            sim = _state.get('simulation_mode', False)
-            piece_count = sum(1 for x in msg.grid if x != 0)
-            # In sim, vision often publishes an empty grid (no camera/YOLO). Game manager
-            # publishes the logical board from FEN after each move.
-            if sim and piece_count < 8:
+            # In sim mode the board is driven exclusively by _game_status_cb (logical FEN).
+            # Ignore all /xiangqi/board_state messages to avoid camera data leaking in.
+            if _state.get('simulation_mode', False):
                 return
             # On hardware, apply a hold filter: only update the displayed grid
             # when the same grid arrives in N consecutive messages OR confidence
             # is high enough to trust a single frame.
             new_grid = [int(x) for x in msg.grid]
             conf = float(msg.detection_confidence)
-            if not sim and conf >= 0.999:
+            if conf >= 0.999:
                 # Authoritative logical board from game manager (post-move FEN).
                 _state['board_grid'] = new_grid
                 _state['board_source'] = 'game'
@@ -912,27 +923,26 @@ class DashboardNode(Node):
                 self._post_move_lock_until = time.time() + self._POST_MOVE_LOCK_SECS
                 _state['_dirty'] = True
                 return
-            if not sim:
-                # Suppress vision grid updates during post-move lock window
-                if time.time() < self._post_move_lock_until:
-                    _state['detection_confidence'] = conf
-                    _state['_dirty'] = True
-                    return
-                if new_grid == self._prev_board_grid:
-                    self._board_grid_repeat += 1
-                else:
-                    self._board_grid_repeat = 0
-                    self._prev_board_grid = new_grid
-                # Suppress the UI update unless the grid is stable or high-confidence
-                if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
-                    # Still update non-grid metadata (confidence) but not the grid.
-                    # Do not copy is_red_turn from vision - BoardState from camera often
-                    # leaves it unset; game_status is authoritative for side to move.
-                    _state['detection_confidence'] = conf
-                    if msg.fen:
-                        _state['fen'] = msg.fen
-                    _state['_dirty'] = True
-                    return
+            # Suppress vision grid updates during post-move lock window
+            if time.time() < self._post_move_lock_until:
+                _state['detection_confidence'] = conf
+                _state['_dirty'] = True
+                return
+            if new_grid == self._prev_board_grid:
+                self._board_grid_repeat += 1
+            else:
+                self._board_grid_repeat = 0
+                self._prev_board_grid = new_grid
+            # Suppress the UI update unless the grid is stable or high-confidence
+            if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
+                # Still update non-grid metadata (confidence) but not the grid.
+                # Do not copy is_red_turn from vision - BoardState from camera often
+                # leaves it unset; game_status is authoritative for side to move.
+                _state['detection_confidence'] = conf
+                if msg.fen:
+                    _state['fen'] = msg.fen
+                _state['_dirty'] = True
+                return
             _state['board_grid'] = new_grid
             _state['board_source'] = 'vision'
             if msg.fen:

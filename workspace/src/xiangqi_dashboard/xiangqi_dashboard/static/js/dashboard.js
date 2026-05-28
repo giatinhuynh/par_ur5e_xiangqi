@@ -1243,10 +1243,12 @@ canvas.addEventListener('click', (e) => {
   if (clickedIdx === null) return;
 
   const clickedCode = state.board_grid[clickedIdx];
+  const humanIsRed = humanColor === 'red';
+  const isHumanPiece = humanIsRed ? clickedCode > 0 : clickedCode < 0;
 
   if (selectedIdx === null) {
     // Select a piece belonging to the human's color (positive = red, negative = black)
-    if (humanIsRed2 ? clickedCode > 0 : clickedCode < 0) {
+    if (isHumanPiece) {
       selectedIdx = clickedIdx;
       fetchLegalDests(clickedIdx);
     }
@@ -1256,8 +1258,8 @@ canvas.addEventListener('click', (e) => {
       selectedIdx = null;
       legalDests  = [];
       drawBoard();
-    } else if (clickedCode > 0) {
-      // Select different Red piece
+    } else if (isHumanPiece) {
+      // Select a different piece of the human's own color
       selectedIdx = clickedIdx;
       fetchLegalDests(clickedIdx);
     } else if (legalDests.includes(clickedIdx)) {

@@ -7,7 +7,7 @@ Launch files and YAML parameters. No algorithms — wires the other packages tog
 | File | Purpose |
 |------|---------|
 | `launch/xiangqi_system.launch.py` | Full stack: `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`. Args: `simulation_mode`, `engine_type`, `difficulty`, `self_play`, `robot_plays_red`, `vision_config_file`, `move_to_initial_pose_on_startup`. Does **not** start UR5e, MoveIt, or camera — use lab `arm_drivers` and `moveit_config_driver` first. |
-| `launch/xiangqi_sim.launch.py` | Same as above with `simulation_mode:=true` and `vision_config_sim.yaml`. Defaults: `engine_type:=minimax`, `difficulty:=20`. See [README §8b](../../../README.md#8b-simulation-mode-setup-and-instructions). |
+| `launch/xiangqi_sim.launch.py` | Same as above with `simulation_mode:=true` and `vision_config_sim.yaml`. Defaults: `engine_type:=minimax`, `difficulty:=20`. See [README — Simulation mode](../../../README.md#simulation-mode). |
 
 ## Config (`config/`)
 

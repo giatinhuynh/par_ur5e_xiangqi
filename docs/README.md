@@ -1,8 +1,6 @@
 # Documentation index
 
-**Setup and launch:** [repository README](../README.md) (Docker, calibration, drivers, sim §8b).
-
-**System design:** [.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md](../.cursor/plans/xiangqi_robot_system_plan_64c0c1b9.plan.md).
+**Full system design, architecture, interfaces, and setup:** [repository README](../README.md).
 
 ## Physical setup
 
@@ -17,22 +15,15 @@
 | Document | Description |
 |----------|-------------|
 | [vision_training_guide.md](vision_training_guide.md) | YOLOv8 dataset, training, deployment, class map |
-| [sim_mode.md](sim_mode.md) | Simulation architecture, config, troubleshooting |
+| [sim_mode.md](sim_mode.md) | Simulation vs hardware, config, troubleshooting |
 
 ## Lab integration
 
 | Document | Description |
 |----------|-------------|
-| [ur5e_env_alignment.md](ur5e_env_alignment.md) | UR5e_Env vs this repo: MoveIt, RG2, aliases, workspace layout |
+| [ur5e_env_alignment.md](ur5e_env_alignment.md) | UR5e_Env vs this repo: MoveIt, RG2, aliases |
 | [lab_docker_deps.md](lab_docker_deps.md) | Docker / dependency notes |
 | [ur5evxlabdoc.md](../ur5evxlabdoc.md) | VXLab IPs, pendant, driver commands |
-
-## Course / report
-
-| Document | Description |
-|----------|-------------|
-| [assignment_rubric_checklist.md](assignment_rubric_checklist.md) | §4.8 mapping, report checklist, rubric readiness |
-| [assignment.md](../assignment.md) | Official brief |
 
 ## Host tools (`../tools/`)
 

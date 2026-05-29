@@ -1,6 +1,6 @@
 # Simulation mode guide
 
-Full **setup and run instructions** are in the root [README.md](../README.md#simulation-no-robot). This document explains how simulation works, how it differs from hardware play, and how to debug common issues.
+Full **setup and run instructions** are in the root [README.md](../README.md#simulation-mode). This document explains how simulation works, how it differs from hardware play, and how to debug common issues.
 
 ---
 

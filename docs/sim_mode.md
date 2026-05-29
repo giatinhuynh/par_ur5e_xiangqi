@@ -1,6 +1,6 @@
 # Simulation mode guide
 
-Full **setup and run instructions** are in the root [README.md](../README.md) (§8b). This document explains how simulation works, how it differs from hardware play, and how to debug common issues.
+Full **setup and run instructions** are in the root [README.md](../README.md#simulation-no-robot). This document explains how simulation works, how it differs from hardware play, and how to debug common issues.
 
 ---
 
@@ -13,7 +13,7 @@ The full node graph still starts (`game_manager`, `ai_engine`, `task_planner`, `
 - **Board state** is a logical Xiangqi position updated by **pyffish** inside `game_manager_node`.
 - **Moves** from the AI are applied in software immediately (no `AiMoveCommand` → arm).
 - **Human moves** in AI vs Human come from **dashboard clicks** (`/api/simulate_move`), not from the camera.
-- **AI vs AI** is enabled from the dashboard; hardware mode forces human vs robot only.
+- **AI vs AI** and **AI vs Human** are both available from the dashboard (hardware runs the full arm loop for AI vs AI).
 
 Use simulation to develop and test: rules, engines (Minimax / Fairy-Stockfish), game-end detection, dashboard UI, and ROS message flow—without the UR5e, RealSense, MoveIt, or RG2.
 
@@ -28,7 +28,7 @@ Use simulation to develop and test: rules, engines (Minimax / Fairy-Stockfish), 
 | Robot execution | Skipped (instant FEN update) | Behaviour tree → `PickAndPlace` → MoveIt + gripper |
 | Required drivers | None | `arm_drivers`, `moveit_config_driver`, RealSense |
 | Vision config | `vision_config_sim.yaml` (YOLO optional) | `vision_config.yaml` + `board_calibration.yaml` + weights |
-| Game modes | AI vs AI, AI vs Human | Human vs AI only |
+| Game modes | AI vs AI, AI vs Human | AI vs AI, AI vs Human |
 | Default think time cap | `sim_ai_time_limit` (3 s) | `ai_time_limit` (5 s) |
 | Scan pose / planner | BT runs but arm not needed for moves | Full pick-and-place pipeline |
 
@@ -150,4 +150,4 @@ Mate scores from Stockfish; UI may clamp the bar. Move history may still show ra
 - Camera lighting, ArUco detection, or YOLO generalization on the physical mat.
 - Latency and failure modes of MoveIt / Modbus gripper.
 
-Validate those on hardware using [README.md](../README.md) steps 4–8 and [vision_training_guide.md](vision_training_guide.md).
+Validate those on hardware using [README.md](../README.md#quick-start-lab-docker) and [vision_training_guide.md](vision_training_guide.md).

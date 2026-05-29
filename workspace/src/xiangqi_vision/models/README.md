@@ -1,13 +1,13 @@
-# YOLO weights (`*.pt`)
+# YOLO weights (package `share`)
 
-Place your trained Xiangqi piece detector here as **`xiangqi_kaggle_v1_best.pt`** (or set `model_path` in `vision_config.yaml`). After `colcon build`, files in this directory are installed to `share/xiangqi_vision/models/` and picked up automatically when the workspace path does not exist.
+Files here install to `share/xiangqi_vision/models/` after `colcon build`.
 
-**Download at runtime (optional):** set ROS parameter `yolo_download_url` on `vision_node`, or environment variable **`XIANGQI_YOLO_DOWNLOAD_URL`**, to an `http(s)` URL pointing at a `.pt` file. On startup the node downloads into the package models directory (see `xiangqi_vision/weights_util.py`).
+| File | In git | Notes |
+|------|--------|--------|
+| `xiangqi_kaggle_v1_best.pt` | yes | Default for **sim** / offline when no lab `workspace/models/` copy |
 
-**One-shot fetch from the shell:**
+**Lab hardware** usually overrides `model_path` in `vision_config.yaml` to `/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt` (see [workspace/models/README.md](../../../../workspace/models/README.md)).
 
-```bash
-python3 tools/fetch_yolo_weights.py --url 'https://example.com/your_weights.pt' --dest workspace/src/xiangqi_vision/models/xiangqi_kaggle_v1_best.pt
-```
+**Optional download:** set `yolo_download_url` on `vision_node` or use `tools/fetch_yolo_weights.py`. See `weights_util.py`.
 
-Training and export are described in `docs/vision_training_guide.md`.
+Training: [docs/vision_training_guide.md](../../../../docs/vision_training_guide.md).

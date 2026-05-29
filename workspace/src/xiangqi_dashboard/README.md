@@ -1,34 +1,42 @@
 # xiangqi_dashboard
 
-**Cross-cutting HMI**: Flask + SocketIO web UI bridged to ROS 2 in a single `dashboard_node`.
+**Cross-cutting HMI**: Flask + Socket.IO in `dashboard_node` (ROS spin + web server thread).
 
-## Architecture
+Does not implement rules or vision — reflects and triggers the running stack.
 
-- **`dashboard_node`** spins `rclpy` and starts the Flask app in a **background thread** so callbacks can update shared Python state under a lock.
-- **Subscriptions** populate UI state: `/xiangqi/board_state`, `/xiangqi/game_status`, `/xiangqi/move_history`, `/xiangqi/engine_info`, `/xiangqi/gripper_active`, `/xiangqi/safety_status`.
-- **Publishers** for user actions: `/xiangqi/new_game` (`Empty`), `/xiangqi/emergency_stop` (`Bool`), `/xiangqi/human_ready` (`Empty`).
+## ROS I/O
 
-## HTTP / Socket.IO
+**Subscriptions:** `/xiangqi/board_state`, `/xiangqi/game_status`, `/xiangqi/move_history`, `/xiangqi/engine_info`, `/xiangqi/gripper_active`, `/xiangqi/safety_status`.
 
-- `/` serves `templates/index.html` with static CSS/JS.
-- `/api/state` returns JSON snapshot for polling clients.
-- REST-style POST endpoints (e.g. `/api/new_game`, `/api/emergency_stop`) trigger the ROS publishers above.
-- Socket.IO pushes live updates to browsers (`async_mode='threading'`).
+**Publishers:** `/xiangqi/new_game`, `/xiangqi/emergency_stop`, `/xiangqi/human_ready`, `/xiangqi/game_mode`.
 
-## Game modes (simulation and hardware)
+**Services (via HTTP):** `SetEngine` on `ai_engine_node` for engine and Stockfish skill.
 
-- **AI vs Human**: Choose **You play as** Red or Black in Engine Setup. On hardware, move pieces on the physical board and use **Confirm move** when needed.
-- **AI vs AI**: Robot plays both sides on the physical board (or moves are applied instantly in simulation). Pick Red and Black engines in Engine Setup, then **Start**.
+## Board display stability
 
-Mode is locked while a game is in progress. `/api/set_mode` publishes `/xiangqi/game_mode` for `game_manager_node`.
+The UI does not mirror every raw `BoardState` message:
 
-## Configuration
+- Grid updates require **N consecutive identical grids** or **high** `detection_confidence` (see `dashboard_node.py`).
+- Short **`detecting_move`** labels are debounced to reduce flicker when vision jitters.
 
-- Default listen **port 5000**, `0.0.0.0` (parameter `port` in launch).
-- `simulation_mode` launch parameter: simulation defaults to AI vs AI; hardware defaults to AI vs Human.
+Tune upstream: `grid_smooth_frames` and `confidence_threshold` in `vision_config.yaml`.
 
-## `SetEngine`
+## Web UI
 
-The node may expose engine switching through the web layer by calling the **`SetEngine`** service on `ai_engine_node` (see `dashboard_node.py` for routes and client setup).
+- **URL:** `http://<host>:5000/` (parameter `port`, bind `0.0.0.0`).
+- **Modes:** AI vs AI, AI vs Human; per-side engine (Minimax / Stockfish); Stockfish skill 1–20.
+- **Hardware:** AI vs Human — move pieces on the mat; **Confirm move** / `/xiangqi/human_ready` if needed.
+- **Simulation:** board clicks for human side; robot moves applied in software.
 
-This package does **not** implement game rules or vision-it only reflects and triggers the running stack.
+Default mode: simulation → AI vs AI; hardware → AI vs Human (overridable before **Start Game**).
+
+## API (selected)
+
+| Route | Effect |
+|-------|--------|
+| `GET /api/state` | JSON snapshot |
+| `POST /api/new_game` | `/xiangqi/new_game` |
+| `POST /api/emergency_stop` | `/xiangqi/emergency_stop` |
+| `POST /api/set_mode` | `/xiangqi/game_mode` |
+
+Socket.IO pushes live updates (`async_mode='threading'`).

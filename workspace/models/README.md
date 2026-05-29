@@ -1,21 +1,20 @@
 # Lab YOLO weights (`workspace/models/`)
 
-`vision_config.yaml` loads **`xiangqi_kaggle_v5_best.pt`** from this folder on the robot PC (`/home/rosuser/workspace/models/`).
+Mounted in Docker as `/home/rosuser/workspace/models/`. Referenced by `xiangqi_bringup/config/vision_config.yaml`.
 
 | File | In git | Notes |
 |------|--------|--------|
-| `xiangqi_kaggle_v1_best.pt` | yes (~6 MB) | Legacy |
-| `xiangqi_kaggle_v2_best.pt` | yes (~21 MB) | Legacy |
-| `xiangqi_kaggle_v3_best.pt` | **no** (~130 MB) | Exceeds GitHub 100 MB limit — **not pushed** |
-| `xiangqi_kaggle_v4_best.pt` | yes (~49 MB) | Previous default |
-| `xiangqi_kaggle_v5_best.pt` | yes (~49 MB) | **Current** default for `vision_node` |
+| `xiangqi_kaggle_v1_best.pt` | yes | Legacy / backup |
+| `xiangqi_kaggle_v2_best.pt` | yes | Legacy |
+| `xiangqi_kaggle_v4_best.pt` | yes | **Current default** in `vision_config.yaml` |
+| `xiangqi_kaggle_v3_best.pt` | no | Too large for GitHub (>100 MB) — keep locally or fetch via URL |
 
-## Deploy v5 to the lab
-
-Copy from your machine (after training or from Kaggle):
+Copy to the lab dev box:
 
 ```bash
-scp workspace/models/xiangqi_kaggle_v5_best.pt vxlab@10.234.7.84:/home/rosuser/workspace/models/
+scp workspace/models/xiangqi_kaggle_v4_best.pt vxlab@10.234.7.84:/home/rosuser/workspace/models/
 ```
 
-Or use `tools/fetch_yolo_weights.py` with a download URL and set `yolo_download_url` in `vision_config.yaml`.
+Or: `tools/fetch_yolo_weights.py` + `yolo_download_url` in `vision_config.yaml`.
+
+Package-bundled weights (v1): [../src/xiangqi_vision/models/README.md](../src/xiangqi_vision/models/README.md).

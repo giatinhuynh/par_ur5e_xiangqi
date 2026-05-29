@@ -1,37 +1,44 @@
 # xiangqi_planner
 
-**Tier 2 (sequencing)**: a **py_trees** / **py_trees_ros** behaviour tree ticks at 10 Hz and turns high-level “execute this coordinate move” commands into **PickAndPlace** action goals.
+**Tier 2 (sequencing)**: `py_trees` / `py_trees_ros` behaviour tree (~10 Hz) executing robot moves after the game manager dispatches them.
 
-## Data flow
+Human move detection and pyffish validation live in **`game_manager_node`**, not here. This node runs only after `/xiangqi/ai_move_command`.
 
-- Subscribes to `/xiangqi/ai_move_command` (`xiangqi_msgs/AiMoveCommand`): atomic **`dispatch_id`**, **`move`**, **`is_capture`**, **`expected_fen`**. Ignores overlapping commands while a move is in flight (different `dispatch_id`).
-- Publishes `/xiangqi/ai_command_ack` (`xiangqi_msgs/AiCommandAck`). Sends `accepted=false` when busy so the manager can abort quickly.
-- Subscribes to `/xiangqi/estop`, `/xiangqi/game_status`. On e-stop, clears move blackboard so the BT stops ticking a stale goal.
-- The tree only ticks when `ai_move` is non-null.
+## Interfaces
 
-## Tree structure (actual code)
+| Direction | Topic / type | Notes |
+|-----------|----------------|-------|
+| In | `/xiangqi/ai_move_command` (`AiMoveCommand`) | `dispatch_id`, `move`, `is_capture`, `expected_fen` |
+| Out | `/xiangqi/ai_command_ack` (`AiCommandAck`) | `accepted=false` when busy |
+| Out | `/xiangqi/ai_execution_result` (`AiExecutionResult`) | Always reached via finalize behaviours |
+| In | `/xiangqi/estop`, `/xiangqi/game_status` | E-stop clears blackboard move |
 
-Roughly:
+Action clients: `/xiangqi/pick_and_place`. Service client: `get_board_state` on `vision_node`.
 
-1. **Root `Sequence`**: e-stop guard, then **`Selector` `MotionOrAbortReport`** (outer fallback).
-2. **E-stop guard**: `Inverter(IsEstopActive)` - if safety publishes e-stop, the branch fails fast.
-3. **First child - `MoveSequence` (`Sequence`, memory=True)**  
-   - **`SetupMoveCoordinates`**: reads `ai_move` and **`move_translator`** from the blackboard; calls `MoveTranslator.move_to_poses(move)` to fill `pick_pose`, `place_pose`, approach/transit heights; if **`is_capture`** is true, sets `capture_pick_pose` and `graveyard_pose`. **`is_capture`** and **`expected_board_fen`** come from the same **`/xiangqi/ai_move_command`** message as **`ai_move`**.  
-   - **Capture subtree (`Selector`)**: if `IsCapture` succeeds on the blackboard, run `PlaceInGraveyardBehaviour` (PickAndPlace from capture square to graveyard); otherwise skip.  
-   - **`PickPieceBehaviour`**: sends one **`PickAndPlace`** goal using blackboard pick/place poses (full pick-and-place sequence inside `manipulation_node`).  
-   - **`VerifyBoardState`** (+ **`Retry`** inside **`VerifyBestEffort` / `FailureIsSuccess`**): service call to `get_board_state`; compares grid to **`expected_board_fen`** on the blackboard (from **`ai_move_command`**).  
-   - **`FinalizeRobotMoveAfterVerify`**: publishes **`/xiangqi/ai_execution_result`** (`xiangqi_msgs/AiExecutionResult`) with current `dispatch_id` + status enum.  
-4. **Second child - `AiMotionFailureFinalizer`**: runs only if the inner sequence fails (bad calibration poses, capture arm failure, aborted PickAndPlace, etc.). Publishes **`/xiangqi/ai_execution_result`** with `status=AI_MOTION_FAILED` and clears move-related blackboard keys so the game manager can abandon the pending AI move without updating FEN.
+## Tree structure (`task_planner_node.py`)
 
-Behaviours live under `xiangqi_planner/behaviours/`:
+```
+Root (Sequence)
+├── EStopGuard (fail if /xiangqi/estop active)
+└── Selector MotionOrAbortReport
+    ├── Sequence MoveSequence
+    │   ├── SetupMoveCoordinates      → move_translator → blackboard poses
+    │   ├── CaptureOrSkip             → graveyard PickAndPlace if is_capture
+    │   ├── PickAIPiece               → main PickAndPlace
+    │   ├── GoToScanPose              → FailureIsSuccess → /xiangqi/move_to_scan_pose
+    │   ├── VerifyBestEffort          → Retry VerifyBoardState (grid vs expected_fen)
+    │   └── FinalizeRobotMoveAfterVerify → AiExecutionResult
+    └── AiMotionFailureFinalizer      → AI_MOTION_FAILED if inner sequence fails
+```
 
-- `game_behaviours.py` - conditions (`IsCapture`, `IsEstopActive`, …), `SetupMoveCoordinates`, verification helper, completion publisher.
-- `pick_and_place.py` - `py_trees_ros` action clients targeting `/xiangqi/pick_and_place`.
+`VerifyBoardState` tolerance: `verify_grid_tolerance` in `planner_config.yaml`.
 
-## Calibration
+## Modules
 
-`task_planner_node` builds **`MoveTranslator`** from **`calibration_file`** (see `planner_config.yaml` / launch) using the same YAML as vision; if the file or `board_to_base_tf` is missing, **`move_translator`** stays `None` and **`SetupMoveCoordinates`** fails (triggering **`/xiangqi/ai_motion_failed`**).
+| Path | Role |
+|------|------|
+| `task_planner_node.py` | Builds tree, ticks when `ai_move` set, constructs `MoveTranslator` from `calibration_file` |
+| `behaviours/game_behaviours.py` | Setup, capture, verify, scan pose, finalize, e-stop |
+| `behaviours/pick_and_place.py` | `py_trees_ros` action clients for `/xiangqi/pick_and_place` |
 
-## Unused / auxiliary behaviours
-
-Some behaviours (e.g. `WaitForHumanMove`, `IsHumanMovePending`) support alternative tree shapes; the tree built in `task_planner_node.py` is the authoritative one for launch.
+If calibration is missing or `move_translator` cannot load, `SetupMoveCoordinates` fails and the failure finalizer reports `AI_MOTION_FAILED`.

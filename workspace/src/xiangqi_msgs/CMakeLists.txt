@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AiCommandAck.msg"
   "msg/AiExecutionResult.msg"
   "srv/GetBoardState.srv"
+  "srv/GetBoardTransform.srv"
   "srv/GetBestMove.srv"
   "srv/GripperControl.srv"
   "srv/SetEngine.srv"

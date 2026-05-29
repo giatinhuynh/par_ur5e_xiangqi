@@ -1,21 +1,24 @@
 # xiangqi_bringup
 
-**Bringup only**: launch files and YAML parameters. No runtime algorithms-this package wires the other packages together.
+Launch files and YAML parameters. No algorithms — wires the other packages together.
 
 ## Launch files
 
-| File | Behaviour |
-|------|-----------|
-| `launch/xiangqi_system.launch.py` | Starts the full Xiangqi stack: `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`. Launch arguments: `simulation_mode`, `engine_type`, `difficulty`. **Does not** start UR5e, MoveIt, or camera drivers-those are started separately via the lab (`arm_drivers`, `moveit_config_driver`). |
-| `launch/xiangqi_sim.launch.py` | Includes `xiangqi_system.launch.py` with `simulation_mode:=true`, `vision_config_sim.yaml`, and launch args `engine_type` (default `minimax`), `difficulty` (default `20` for Stockfish). Use for dashboard / AI testing without hardware. See root [README.md](../../../README.md) §8b. |
+| File | Purpose |
+|------|---------|
+| `launch/xiangqi_system.launch.py` | Full stack: `vision_node`, `manipulation_node`, `gripper_controller_node`, `safety_monitor_node`, `task_planner_node`, `ai_engine_node`, `game_manager_node`, `dashboard_node`. Args: `simulation_mode`, `engine_type`, `difficulty`, `self_play`, `robot_plays_red`, `vision_config_file`, `move_to_initial_pose_on_startup`. Does **not** start UR5e, MoveIt, or camera — use lab `arm_drivers` and `moveit_config_driver` first. |
+| `launch/xiangqi_sim.launch.py` | Same as above with `simulation_mode:=true` and `vision_config_sim.yaml`. Defaults: `engine_type:=minimax`, `difficulty:=20`. See [README §8b](../../../README.md#8b-simulation-mode-setup-and-instructions). |
 
 ## Config (`config/`)
 
-| File | Contents |
-|------|----------|
-| `vision_config.yaml` | Camera topic, YOLO `model_path`, `calibration_file`, detection thresholds, turn-detector stability and poll rate. |
-| `game_config.yaml` | Engine defaults, AI time limits / depth, robot side, etc. (merged with launch args where overlapped). |
-| `manipulation_config.yaml` | Gripper widths/force, approach/transit heights, simulation flag passthrough. |
-| `board_calibration.yaml` | **Template** in package share; the **real** file is produced under `workspace/config/` by `calibration_tool` and must match `vision_config.yaml`’s `calibration_file`. |
+| File | Purpose |
+|------|---------|
+| `vision_config.yaml` | Hardware: camera topic, YOLO `model_path`, `calibration_file`, `confidence_threshold`, `grid_smooth_frames`, `stability_frames`, `poll_rate_hz`, piece preprocessing toggles. |
+| `vision_config_sim.yaml` | Simulation vision defaults (lighter polling / thresholds). |
+| `game_config.yaml` | Engine type, AI time limits, `human_move_grid_tolerance`, `trust_robot_move_after_verify_fail`. |
+| `robot_side.yaml` | `robot_plays_red` — shared by game manager and planner. |
+| `manipulation_config.yaml` | Gripper widths/force, MoveIt scaling, scan/initial pose, `calibration_file`, startup homing. |
+| `planner_config.yaml` | `calibration_file`, `verify_grid_tolerance` for post-move board check. |
+| `board_calibration.yaml` | **Template** in package share; runtime file is written to `workspace/config/board_calibration.yaml` by `calibration_tool` and must match paths in vision/manipulation YAML. |
 
-Install rules copy these into the package share directory so `get_package_share_directory('xiangqi_bringup')` resolves them at launch.
+Configs install to `share/xiangqi_bringup/config/` for `get_package_share_directory('xiangqi_bringup')`.

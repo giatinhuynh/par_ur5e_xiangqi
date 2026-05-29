@@ -1,0 +1,4 @@
+---
+bool success
+string message
+float64[16] board_to_base

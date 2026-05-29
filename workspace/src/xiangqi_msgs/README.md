@@ -1,31 +1,41 @@
 # xiangqi_msgs
 
-ROS 2 interface definitions shared by vision, AI, planner, manipulation, and dashboard. There is **no executable logic** here-only types that encode the data contract between nodes.
+ROS 2 interface definitions shared by vision, AI, planner, manipulation, and dashboard. No runtime logic — only the data contract between nodes.
+
+Authoritative field lists: `msg/`, `srv/`, `action/`. System overview: [repository README](../../../README.md).
 
 ## Messages
 
 | Message | Role |
 |---------|------|
-| `BoardState` | Flat `int8[90]` grid (9×10, index `rank * 9 + file`; rank 0 = robot/red side). `0` = empty; `±1…±7` = piece type (General…Soldier), sign = side. Includes optional FEN/turn fields and mean YOLO confidence. |
-| `GameStatus` | High-level FSM string from game manager (`idle`, `waiting_human`, `computing_ai`, …), current FEN, move count, active engine type. |
-| `PieceDetection` | Single detection (type, image/world coords, confidence)-used where per-piece telemetry is needed. |
-| `MoveHistory` | One move record for the log: coordinate move, side, engine metadata (depth, centipawns, time). |
-| `EngineInfo` | Live AI telemetry (engine name, depth, eval, best/ponder moves) for the dashboard. |
+| `BoardState` | Flat `int8[90]` grid (`rank * 9 + file`; rank 0 = Red / robot side). `0` = empty; `±1…±7` = piece type, sign = side. Optional FEN/turn fields and mean YOLO confidence. |
+| `GameStatus` | FSM string (`idle`, `waiting_human`, `detecting_move`, `computing_ai`, `executing_move`, `game_over`, …), `current_fen`, `engine_type`, `game_result` / `game_result_reason`. |
+| `MoveHistory` | One log line: coordinate move, side, `thinking_time_sec`, `search_depth`, `evaluation_cp`, `engine_used`. |
+| `EngineInfo` | Live AI telemetry for the dashboard (engine, depth, eval, ponder). |
+| `PieceDetection` | Single detection record (optional per-piece telemetry). |
+| `AiMoveCommand` | Game manager → planner: `dispatch_id`, `move`, `is_capture`, `expected_fen`. |
+| `AiCommandAck` | Planner → game manager: `dispatch_id`, `accepted`, `reason`. |
+| `AiExecutionResult` | Planner → game manager: `dispatch_id`, `status` (`ROBOT_MOVE_COMPLETE` \| `BOARD_VERIFY_FAILED` \| `AI_MOTION_FAILED`), `message`. |
 
 ## Services
 
 | Service | Role |
 |---------|------|
-| `GetBoardState` | On-demand board snapshot from vision (`force_rescan` can bypass cache). |
-| `GetBestMove` | Request best move from `ai_engine_node`: FEN, depth or time limit, optional engine override; returns UCI-style coordinate move plus search stats. |
-| `GripperControl` | Thin command surface for open/close semantics used by higher-level code (implemented by `gripper_controller_node`). |
-| `SetEngine` | Switch engine type (`fairystockfish` / `minimax`) and difficulty at runtime. |
+| `GetBoardState` | On-demand board snapshot from `vision_node` (`force_rescan` bypasses cache). |
+| `GetBoardTransform` | Board pose / transform helper for calibration consumers. |
+| `GetBestMove` | FEN + depth/time + optional engine → move + search stats (`ai_engine_node`). |
+| `GripperControl` | Target width/force (mm, N) → RG2 via `gripper_controller_node`. |
+| `SetEngine` | Runtime switch `fairystockfish` \| `minimax` + difficulty. |
 
 ## Actions
 
 | Action | Role |
 |--------|------|
-| `PickAndPlace` | **Primary motion primitive**: pick pose, place pose, approach/transit heights in `base_link`. `manipulation_node` expands this into waypoint + gripper steps. Feedback reports named phases. |
-| `ExecuteMove` | Higher-level “full move” action (move string + FEN + capture hint). Defined for extensibility; the live stack mainly uses `PickAndPlace` from the behaviour tree. |
+| `PickAndPlace` | **Primary motion primitive** — pick/place poses and heights in `base_link`; `manipulation_node` runs the full sequence. |
+| `ExecuteMove` | Higher-level move string + FEN + capture hint. Defined for extensibility; the live stack uses `PickAndPlace` + `AiMoveCommand` instead. |
 
-See the `.msg`, `.srv`, and `.action` files under `msg/`, `srv/`, and `action/` for exact fields.
+## Standard services (not in this package)
+
+| Service | Server | Role |
+|---------|--------|------|
+| `std_srvs/Trigger` | `manipulation_node` | `/xiangqi/move_to_scan_pose`, `/xiangqi/move_to_initial_pose` |

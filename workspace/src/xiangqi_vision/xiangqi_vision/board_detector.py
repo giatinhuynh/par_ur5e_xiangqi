@@ -349,6 +349,106 @@ class BoardDetector:
         self._draw_status(debug, 'BOARD DETECTED', 'Press SPACE to capture', True)
         return True, H, debug
 
+    def detect_full(
+        self, image: np.ndarray
+    ) -> Tuple[bool, Optional[np.ndarray], np.ndarray, Optional[list], Optional[np.ndarray]]:
+        """Like detect() but also returns raw corners and ids for 3D pose estimation.
+
+        Returns:
+            (success, homography_3x3, debug_image, raw_corners, raw_ids)
+        raw_corners / raw_ids are the direct outputs of detectMarkers(); None on failure.
+        """
+        debug = image.copy()
+        corners, ids = self._detect_markers(image)
+
+        all_ids = [] if ids is None else sorted(int(x) for x in ids.flatten())
+        id_to_corner = {}
+        if ids is not None:
+            for i, marker_id in enumerate(ids.flatten()):
+                if marker_id in self.REQUIRED_MARKER_IDS:
+                    centre = corners[i][0].mean(axis=0)
+                    id_to_corner[int(marker_id)] = centre
+
+        missing = [mid for mid in self.REQUIRED_MARKER_IDS if mid not in id_to_corner]
+        self._last_detect_diag = (
+            f'markers in frame: {len(all_ids)}  ids: {all_ids}\n'
+            f'corner IDs 0-3: {sorted(id_to_corner.keys())}  missing: {missing or "none"}'
+        )
+
+        if len(id_to_corner) < 4:
+            hint = 'Need ALL four ArUco IDs 0,1,2,3 at mat outer corners (4xA3: tape full mat).'
+            if missing:
+                hint += f' Missing ID(s): {missing}.'
+            if len(all_ids) == 0:
+                hint += ' None detected - check print scale 100%, DICT_4X4_50, no glare.'
+            self._draw_status(debug, 'BOARD NOT FOUND', self._last_detect_diag + '\n' + hint, False)
+            if corners is not None and ids is not None:
+                cv2.aruco.drawDetectedMarkers(debug, corners, ids)
+            return False, None, debug, None, None
+
+        cv2.aruco.drawDetectedMarkers(debug, corners, ids)
+
+        src_pts = np.float32([
+            id_to_corner[0],
+            id_to_corner[1],
+            id_to_corner[2],
+            id_to_corner[3],
+        ])
+
+        H, _ = cv2.findHomography(src_pts, self._dst_corners, cv2.RANSAC, 5.0)
+        if H is None:
+            self._draw_status(debug, 'BOARD NOT FOUND', self._last_detect_diag + '\nhomography failed', False)
+            return False, None, debug, None, None
+
+        self._draw_status(debug, 'BOARD DETECTED', '', True)
+        return True, H, debug, corners, ids
+
+    def estimate_corner_positions_3d(
+        self,
+        corners_raw: list,
+        ids_raw: np.ndarray,
+        camera_matrix: np.ndarray,
+        dist_coeffs: np.ndarray,
+        marker_length_m: float = 0.038,
+    ) -> Optional[dict]:
+        """Estimate 3D centre positions of the 4 ArUco corner markers in camera frame.
+
+        Uses cv2.solvePnP with IPPE_SQUARE for each marker independently.
+        Returns {id: np.ndarray([x, y, z])} for IDs 0–3, or None on failure.
+        """
+        if corners_raw is None or ids_raw is None:
+            return None
+
+        half = marker_length_m / 2.0
+        obj_pts = np.array([
+            [-half,  half, 0.0],
+            [ half,  half, 0.0],
+            [ half, -half, 0.0],
+            [-half, -half, 0.0],
+        ], dtype=np.float32)
+
+        result = {}
+        for i, marker_id in enumerate(ids_raw.flatten()):
+            mid = int(marker_id)
+            if mid not in self.REQUIRED_MARKER_IDS:
+                continue
+            img_pts = corners_raw[i][0].astype(np.float32)
+            try:
+                ok, rvec, tvec = cv2.solvePnP(
+                    obj_pts, img_pts, camera_matrix, dist_coeffs,
+                    flags=cv2.SOLVEPNP_IPPE_SQUARE,
+                )
+            except cv2.error:
+                ok, rvec, tvec = cv2.solvePnP(
+                    obj_pts, img_pts, camera_matrix, dist_coeffs,
+                )
+            if ok:
+                result[mid] = tvec.flatten().astype(float)
+
+        if not all(mid in result for mid in self.REQUIRED_MARKER_IDS):
+            return None
+        return result
+
     def warp_board(self, image: np.ndarray, H: np.ndarray) -> np.ndarray:
         """Apply homography to get a top-down normalised board image."""
         return cv2.warpPerspective(image, H, (self._norm_w, self._norm_h))

@@ -9,12 +9,117 @@ Xiangqi coordinate notation (coordinate-style):
 """
 
 from __future__ import annotations
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from geometry_msgs.msg import Pose, Point, Quaternion
 from dataclasses import dataclass
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# 4×A3 mat geometry — mirrors board_layout._compute_4xa3_grid_mm() exactly
+# ---------------------------------------------------------------------------
+
+def _compute_4xa3_fractions() -> Tuple[float, float, float, float, float]:
+    """Return (u_file0, u_file8, v_rank0, v_rank9, grid_spacing_m) for the 4×A3 Xiangqi mat.
+
+    u / v are bilinear fractions within the ArUco marker-centre quadrilateral:
+      u=0,v=0 → M3 centre (file0-side, rank0-side marker)
+      u=1,v=0 → M2 centre (file8-side, rank0-side marker)
+      u=1,v=1 → M1 centre (file8-side, rank9-side marker)
+      u=0,v=1 → M0 centre (file0-side, rank9-side marker)
+
+    Grid intersections a0/i0/a9/i9 are INSIDE the marker quad (the grid starts at the
+    inner band boundary, 25 mm past each marker centre). This is NOT the same as the
+    v values used by board_layout.norm_pixel_at_intersection which uses the inner-band
+    origin as u=0,v=0 and is suitable only for pixel snapping, not 3D positioning.
+    """
+    page_h = 840.0
+    page_w = 594.0
+    aruco_page_inset = 8.0
+    aruco_size = 38.0
+    band = 6.0
+    graveyard_w = 85.0
+    graveyard_gap = 5.0
+
+    marker_inset = aruco_page_inset + aruco_size / 2.0  # 27.0 mm from sheet corner to marker centre
+
+    inner = aruco_page_inset + aruco_size + band          # 52.0 mm (inner band boundary)
+    inner_top = inner
+    inner_bottom = page_h - inner                          # 788.0 mm
+    board_top = inner_top + graveyard_w + graveyard_gap   # 142.0 mm
+    board_bottom = inner_bottom - graveyard_w - graveyard_gap  # 698.0 mm
+    bh = board_bottom - board_top                          # 556.0 mm
+    bw = page_w - 2.0 * inner                             # 490.0 mm
+    cell = min(bw / 8.0, bh / 9.0)                       # 61.25 mm
+    v_lo = board_top + (bh - cell * 9) / 2.0             # 144.375 mm from page top (rank-9 grid row)
+    bb_grid = v_lo + cell * 9                             # 695.625 mm from page top (rank-0 grid row)
+
+    # Physical offsets from the rank-0/file-0 marker centre (M3) to the a0 grid intersection.
+    # M3 is at (marker_inset, page_h - marker_inset) from the sheet BL corner (Y-up sheet frame).
+    # a0 is at (inner, page_h - bb_grid) in the same frame.
+    delta_x = inner - marker_inset               # 52 - 27 = 25 mm
+    delta_y = (page_h - bb_grid) - marker_inset  # 144.375 - 27 = 117.375 mm
+
+    marker_span_x = page_w - 2.0 * marker_inset  # 540 mm centre-to-centre
+    marker_span_y = page_h - 2.0 * marker_inset  # 786 mm centre-to-centre
+
+    u_file0 = delta_x / marker_span_x                      # ≈ 0.04630
+    u_file8 = (delta_x + 8.0 * cell) / marker_span_x      # ≈ 0.95370
+    v_rank0 = delta_y / marker_span_y                      # ≈ 0.14932
+    v_rank9 = (delta_y + 9.0 * cell) / marker_span_y      # ≈ 0.85068
+
+    return u_file0, u_file8, v_rank0, v_rank9, cell / 1000.0
+
+
+_MAT_U_FILE0, _MAT_U_FILE8, _MAT_V_RANK0, _MAT_V_RANK9, _MAT_GRID_SPACING_M = (
+    _compute_4xa3_fractions()
+)
+
+
+class FlatBoardLocator:
+    """Compute board cell XYZ analytically from 4 ArUco marker-centre 3D positions.
+
+    The board is assumed flat (constant Z). XY for any cell is computed by
+    bilinear interpolation between the 4 ArUco marker centres using exact physical
+    offsets from the 4×A3 mat geometry.
+
+    Marker ordering (same as board_detector.py REQUIRED_MARKER_IDS):
+      ID 0 = file 0, rank 9  (black/far side, top-left on mat)
+      ID 1 = file 8, rank 9  (black/far side, top-right)
+      ID 2 = file 8, rank 0  (robot/near side, bottom-right)
+      ID 3 = file 0, rank 0  (robot/near side, bottom-left)
+
+    The marker centres define a quadrilateral (u=0,v=0 at M3; u=1,v=1 at M1).
+    Grid intersections are offset from the markers because the grid starts at the
+    inner-band boundary (25 mm past each marker centre in the file direction).
+    """
+
+    U_FILE0 = _MAT_U_FILE0  # ≈ 0.04630 — bilinear u for file=0 (a-file)
+    U_FILE8 = _MAT_U_FILE8  # ≈ 0.95370 — bilinear u for file=8 (i-file)
+    V_RANK0 = _MAT_V_RANK0  # ≈ 0.14932 — bilinear v for rank=0 (robot side)
+    V_RANK9 = _MAT_V_RANK9  # ≈ 0.85068 — bilinear v for rank=9 (black side)
+
+    def __init__(self, marker_centres_base: List[List[float]]):
+        """Initialise from a flat 12-element list: [M0.x,M0.y,M0.z, M1.x,..., M3.z]."""
+        flat = list(marker_centres_base)
+        if len(flat) != 12:
+            raise ValueError(f'Expected 12 values (4×xyz), got {len(flat)}')
+        self._M = [np.array(flat[i*3:(i+1)*3]) for i in range(4)]
+        self._board_z = float(np.mean([m[2] for m in self._M]))
+
+    def cell_xyz(self, file: int, rank: int) -> np.ndarray:
+        """Return 3D board-surface position for grid intersection (base_link, metres)."""
+        M0, M1, M2, M3 = self._M
+        u = self.U_FILE0 + file * (self.U_FILE8 - self.U_FILE0) / 8.0
+        v = self.V_RANK0 + rank * (self.V_RANK9 - self.V_RANK0) / 9.0
+        return (1.0 - u) * (1.0 - v) * M3 + u * (1.0 - v) * M2 + u * v * M1 + (1.0 - u) * v * M0
+
+    @property
+    def board_z(self) -> float:
+        """Mean Z of the 4 ArUco marker centres (board surface, base_link metres)."""
+        return self._board_z
 
 
 @dataclass
@@ -309,6 +414,66 @@ class BoardCalibration:
         names = self.graveyard_joint_names
         return (names, approach), (names, grasp)
 
+    def grid_fraction_to_world(self, file_f: float, rank_f: float) -> np.ndarray:
+        """Bilinear TCP position for fractional grid coords (0–8 file, 0–9 rank).
+
+        Corners: a0 (0,0), i0 (8,0), i9 (8,9), a9 (0,9) — same order as calibration_corners_*.
+        """
+        if self.calibration_corners_base is None or len(self.calibration_corners_base) != 4:
+            raise RuntimeError(
+                'calibration_corners_base required for grid_fraction_to_world'
+            )
+        C00, C80, C89, C09 = [np.array(c) for c in self.calibration_corners_base]
+        u = max(0.0, min(8.0, float(file_f))) / 8.0
+        v = max(0.0, min(9.0, float(rank_f))) / 9.0
+        return (1 - u) * (1 - v) * C00 + u * (1 - v) * C80 + u * v * C89 + (1 - u) * v * C09
+
+    def world_xy_to_grid_fraction(
+        self, x: float, y: float, max_xy_error_m: float = 0.05
+    ) -> Optional[Tuple[float, float]]:
+        """Inverse map base_link XY to fractional (file, rank) on the bilinear board grid."""
+        if self.calibration_corners_base is None or len(self.calibration_corners_base) != 4:
+            return None
+
+        def _search(
+            file_min: float, file_max: float, rank_min: float, rank_max: float, step: float
+        ) -> tuple[float, float, float]:
+            best_f, best_r, best_d2 = 0.0, 0.0, float('inf')
+            f = file_min
+            while f <= file_max + 1e-9:
+                r = rank_min
+                while r <= rank_max + 1e-9:
+                    xyz = self.grid_fraction_to_world(f, r)
+                    d2 = (float(xyz[0]) - x) ** 2 + (float(xyz[1]) - y) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_f, best_r = f, r
+                    r += step
+                f += step
+            return best_f, best_r, best_d2
+
+        file_f, rank_f, best_d2 = _search(0.0, 8.0, 0.0, 9.0, 0.5)
+        file_f, rank_f, best_d2 = _search(
+            max(0.0, file_f - 0.5), min(8.0, file_f + 0.5),
+            max(0.0, rank_f - 0.5), min(9.0, rank_f + 0.5),
+            0.05,
+        )
+        if best_d2 > max_xy_error_m ** 2:
+            return None
+        return file_f, rank_f
+
+    def ik_seed_joints(
+        self, x: float, y: float, for_approach: bool
+    ) -> Optional[Tuple[list, list]]:
+        """IK seed from 4-corner (plus midpoint) taught joints at the board cell nearest (x, y)."""
+        frac = self.world_xy_to_grid_fraction(x, y)
+        if frac is None:
+            return None
+        file_f, rank_f = frac
+        if for_approach:
+            return self.interpolate_approach_joints(file_f, rank_f)
+        return self.interpolate_board_joints(file_f, rank_f)
+
     def grid_to_world(self, file_idx: int, rank_idx: int) -> np.ndarray:
         """
         Convert grid coordinates to robot world-frame position (metres).
@@ -318,11 +483,7 @@ class BoardCalibration:
         at interior points for a flat board). Falls back to rigid transform for old calibrations.
         """
         if self.calibration_corners_base is not None and len(self.calibration_corners_base) == 4:
-            # Corners in order: (0,0), (8,0), (8,9), (0,9)
-            C00, C80, C89, C09 = [np.array(c) for c in self.calibration_corners_base]
-            u = file_idx / 8.0
-            v = rank_idx / 9.0
-            return (1 - u) * (1 - v) * C00 + u * (1 - v) * C80 + u * v * C89 + (1 - u) * v * C09
+            return self.grid_fraction_to_world(float(file_idx), float(rank_idx))
 
         # Fallback: rigid-body transform (calibrations without corner data)
         if self.board_to_base_tf is None:
@@ -381,12 +542,36 @@ def _make_pose(x: float, y: float, z: float) -> Pose:
 class MoveTranslator:
     """Converts Xiangqi board coordinates to robot workspace Cartesian poses."""
 
-    def __init__(self, calibration: BoardCalibration):
+    def __init__(
+        self,
+        calibration: BoardCalibration,
+        graveyard_slot_x: float = 0.25,
+        graveyard_slot_z: float = 0.02,
+    ):
         self._cal = calibration
-        self._red_graveyard = list(DEFAULT_RED_GRAVEYARD)
-        self._black_graveyard = list(DEFAULT_BLACK_GRAVEYARD)
+        self._red_graveyard = self._build_graveyard_slots(
+            'red', graveyard_slot_x, graveyard_slot_z, DEFAULT_RED_GRAVEYARD, calibration
+        )
+        self._black_graveyard = self._build_graveyard_slots(
+            'black', graveyard_slot_x, graveyard_slot_z, DEFAULT_BLACK_GRAVEYARD, calibration
+        )
         self._red_graveyard_idx = 0
         self._black_graveyard_idx = 0
+
+    @staticmethod
+    def _build_graveyard_slots(
+        side: str,
+        slot_x: float,
+        slot_z: float,
+        default_slots: list,
+        cal: BoardCalibration,
+    ) -> list:
+        """Build drop-slot list from taught graveyard_{red|black}_y in calibration YAML."""
+        y = getattr(cal, f'graveyard_{side}_y', None)
+        if y is None:
+            return list(default_slots)
+        y = float(y)
+        return [(float(slot_x) + i * 0.05, y, float(slot_z)) for i in range(16)]
 
     def reset_graveyards(self) -> None:
         self._red_graveyard_idx = 0
@@ -407,32 +592,47 @@ class MoveTranslator:
         approach_height: float | None = None,
         grasp_height: float | None = None,
         transit_height: float | None = None,
+        flat_locator: Optional['FlatBoardLocator'] = None,
     ) -> Tuple[Pose, Pose, Pose, Pose, Pose]:
+        """Convert a 4-char move to the 5 key waypoint poses:
+          (approach_pick, grasp, lift, approach_place, place)
+
+        When flat_locator is provided the board is treated as flat: XY is computed
+        analytically from the ArUco-derived marker positions and Z is the fixed board
+        surface (flat_locator.board_z) plus the configured height offsets.
+        """
         if approach_height is None:
             approach_height = self._approach_height_m()
         if grasp_height is None:
             grasp_height = self._grasp_height_m()
         if transit_height is None:
             transit_height = self._transit_height_m()
-        """
-        Convert a 4-char move to the 5 key waypoint poses:
-          (approach_pick, grasp, lift, approach_place, place)
-        """
+
         from_file, from_rank, to_file, to_rank = _parse_move(move)
 
-        pick_xyz = self._cal.grid_to_world(from_file, from_rank)
-        place_xyz = self._cal.grid_to_world(to_file, to_rank)
+        if flat_locator is not None:
+            board_z = flat_locator.board_z
+            pick_xyz  = np.array([*flat_locator.cell_xyz(from_file, from_rank)[:2], board_z])
+            place_xyz = np.array([*flat_locator.cell_xyz(to_file,   to_rank)[:2],  board_z])
+        else:
+            pick_xyz  = self._cal.grid_to_world(from_file, from_rank)
+            place_xyz = self._cal.grid_to_world(to_file,   to_rank)
+            board_z   = float(pick_xyz[2])
 
-        approach_pick  = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + approach_height)
-        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + grasp_height)
-        lift_pose      = _make_pose(pick_xyz[0],  pick_xyz[1],  pick_xyz[2]  + transit_height)
-        approach_place = _make_pose(place_xyz[0], place_xyz[1], place_xyz[2] + approach_height)
-        place_pose     = _make_pose(place_xyz[0], place_xyz[1], place_xyz[2] + grasp_height)
+        approach_pick  = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + approach_height)
+        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + grasp_height)
+        lift_pose      = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + transit_height)
+        approach_place = _make_pose(place_xyz[0], place_xyz[1], board_z + approach_height)
+        place_pose     = _make_pose(place_xyz[0], place_xyz[1], board_z + grasp_height)
 
         return approach_pick, grasp_pose, lift_pose, approach_place, place_pose
 
     def graveyard_pose(self, is_red_piece: bool) -> Pose:
-        """Return the next available graveyard position for a captured piece."""
+        """Return the next available graveyard position for a captured piece.
+
+        Red captured pieces go to the red graveyard zone; black pieces to the black zone.
+        Slot XY comes from calibration ``graveyard_{red|black}_y`` when taught.
+        """
         if is_red_piece:
             slots = self._red_graveyard
             idx = self._red_graveyard_idx % len(slots)

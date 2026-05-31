@@ -443,11 +443,11 @@ def api_move_to_scan_pose():
         done_event.set()
 
     future.add_done_callback(_on_done)
-    done_event.wait(timeout=30.0)
+    done_event.wait(timeout=120.0)
 
     resp = result_holder[0]
     if resp is None:
-        return jsonify({'ok': False, 'error': 'Timed out waiting for arm'}), 504
+        return jsonify({'ok': False, 'error': 'Timed out waiting for arm (120s)'}), 504
     if not resp.success:
         return jsonify({'ok': False, 'error': resp.message or 'Arm move failed'}), 500
     return jsonify({'ok': True})

@@ -2,10 +2,14 @@
 manipulation_node: Pick-and-place action server for Xiangqi pieces.
 
 Arm motion (hardware):
-    Homing:           joint-space via /move_action (deterministic, joints from calibration).
-    Transit/approach: OMPL via /move_action - large moves where any path is acceptable.
-    Descend/lift:     Cartesian via /par_moveit/waypoint_move - straight-line vertical
-                      motion over pieces to avoid lateral sweep knocking neighbours.
+    Homing:      joint-space via /move_action (scan_joint_positions from YAML).
+    Board cells: taught joint-space for approach / lift / transit; Cartesian (or IK) only for
+                 the short vertical descend to grasp or release. Graveyard legs stay all joint.
+    Board XY/Z from ArUco-derived board frame (FlatBoardLocator / board_to_base_tf).
+
+Board frame: derived at startup by calling the vision node GetBoardTransform service.
+             The vision node uses cv2.solvePnP on detected ArUco markers and transforms
+             via a static TF (camera_config.yaml) to give 4 marker 3D positions in base_link.
 
 The RG2 gripper is controlled via (from onrobot_rg2_driver):
 
@@ -15,14 +19,13 @@ The RG2 gripper is controlled via (from onrobot_rg2_driver):
         result: float32 final_width    (mm)
 
 This node accepts xiangqi_msgs/action/PickAndPlace goals (in robot base frame
-metres) and executes the full 8-step pick-and-place sequence.
+metres) and executes the full pick-and-place sequence.
 
 Coordinate conventions:
     - pick_pose / place_pose are geometry_msgs/Pose in the robot base_link frame.
     - Only position (x, y, z) is used; orientation is ignored because Xiangqi
       pieces are round and the gripper is always pointing straight down.
-    - approach_height and transit_height are z offsets added on top of
-      pick/place z values.
+    - approach_height and transit_height are z offsets added on top of board_z.
 
 Gripper widths (all in mm):
     OPEN_WIDTH    = 50   Pre-grasp open; fingers clear around a ~20 mm piece
@@ -36,18 +39,26 @@ import os
 import threading
 import time
 
+import numpy as np
+
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer, ActionClient, CancelResponse, GoalResponse
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
+from sensor_msgs.msg import JointState as SensorJointState
 from std_srvs.srv import Trigger
+from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.msg import PositionIKRequest, RobotState as MoveItRobotState, MoveItErrorCodes
 
 from xiangqi_msgs.action import PickAndPlace
-from xiangqi_manipulation.move_translator import BoardCalibration
+from xiangqi_msgs.srv import GetBoardTransform
+from xiangqi_manipulation.move_translator import BoardCalibration, FlatBoardLocator
 from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
-from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient, _wait_on_future
+from xiangqi_manipulation.moveit_ompl_client import (
+    MoveGroupOmplClient, _wait_on_future, yaw_to_downward_quaternion
+)
 
 try:
     from onrobot_rg2_msgs.action import GripperSetWidth
@@ -101,12 +112,20 @@ class ManipulationNode(Node):
         self.declare_parameter('move_group_name', 'ur_manipulator_end_effector')
         self.declare_parameter('end_effector_link', 'end_effector_link')
         self.declare_parameter('planning_frame', 'base_link')
-        self.declare_parameter('max_velocity_scaling_factor', 0.05)
-        self.declare_parameter('max_acceleration_scaling_factor', 0.05)
+        self.declare_parameter('max_velocity_scaling_factor', 0.2)
+        self.declare_parameter('max_acceleration_scaling_factor', 0.2)
         self.declare_parameter('allowed_planning_time', 5.0)
         self.declare_parameter('num_planning_attempts', 10)
         self.declare_parameter('planner_id', 'RRTConnectkConfigDefault')
         self.declare_parameter('pipeline_id', 'move_group')
+        # Height of gripper centre above board surface when grasping a piece (mm).
+        # Typically piece_height / 2; for 20mm pieces side-gripped ≈ 10mm.
+        self.declare_parameter('grasp_height_mm', 2.0)
+        # Graveyard positions: fixed XY in base_link (Z = board_z + grasp_height)
+        self.declare_parameter('graveyard_red_x',    0.25)
+        self.declare_parameter('graveyard_red_y',   -0.30)
+        self.declare_parameter('graveyard_black_x',  0.25)
+        self.declare_parameter('graveyard_black_y',  0.30)
 
         self._sim_mode      = self.get_parameter('simulation_mode').value
         self._move_max_retries = int(self.get_parameter('move_max_retries').value)
@@ -121,6 +140,22 @@ class ManipulationNode(Node):
         self._initial_pose_y = float(self.get_parameter('initial_pose_y').value)
         self._initial_pose_z = float(self.get_parameter('initial_pose_z').value)
         self._initial_pose_yaw = float(self.get_parameter('initial_pose_yaw').value)
+        self._grasp_height_m     = float(self.get_parameter('grasp_height_mm').value) / 1000.0
+        self._graveyard_red_x    = float(self.get_parameter('graveyard_red_x').value)
+        self._graveyard_red_y    = float(self.get_parameter('graveyard_red_y').value)
+        self._graveyard_black_x  = float(self.get_parameter('graveyard_black_x').value)
+        self._graveyard_black_y  = float(self.get_parameter('graveyard_black_y').value)
+
+        # Board frame from ArUco (populated at startup via GetBoardTransform service)
+        self._flat_locator: FlatBoardLocator | None = None
+        self._board_to_base_tf: np.ndarray | None = None   # 4×4 float64
+        self._board_z: float = 0.0
+
+        # IK seeds: a0 corner fallback; per-cell seeds from 4-corner bilinear interpolation.
+        self._a0_grasp_seed_names:     list = []
+        self._a0_grasp_seed_positions:  list = []
+        self._a0_approach_seed_names:  list = []
+        self._a0_approach_seed_positions: list = []
 
         self._taught_scan_pose = False
         self._initial_joint_positions: list = []
@@ -129,7 +164,6 @@ class ManipulationNode(Node):
         self._apply_taught_poses_from_calibration()
 
         if not self._taught_scan_pose:
-            # Compute scan pose x/y from board calibration (board centre in base_link).
             self._scan_pose_x, self._scan_pose_y, self._scan_pose_z = \
                 self._resolve_scan_pose()
 
@@ -140,13 +174,18 @@ class ManipulationNode(Node):
         self._grip_cbg = MutuallyExclusiveCallbackGroup()
         self._move_lock = threading.Lock()
 
-        # --- OMPL arm planner, Cartesian client + gripper ---
+        # --- OMPL arm planner + IK service client + gripper ---
         self._ompl_client = None
+        self._ik_client   = None
         self._waypoint_client = None
         self._rg2_client  = None
 
         if not self._sim_mode:
             self._setup_arm_planner()
+            self._ik_client = self.create_client(
+                GetPositionIK, '/compute_ik',
+                callback_group=self._arm_cbg,
+            )
             if WAYPOINT_MOVE_OK:
                 self._waypoint_client = ActionClient(
                     self, WaypointMove, '/par_moveit/waypoint_move',
@@ -191,25 +230,18 @@ class ManipulationNode(Node):
             callback_group=self._arm_cbg,
         )
 
+        # --- GetBoardTransform service client (vision node) ---
+        self._board_transform_client = self.create_client(
+            GetBoardTransform, 'get_board_transform',
+            callback_group=self._arm_cbg,
+        )
+
         arm_backend = 'sim' if self._sim_mode else ('ompl' if self._ompl_client else 'none')
         has_joints = bool(self._initial_joint_positions)
-        has_board_joints = (
-            self._board_calibration is not None
-            and self._board_calibration.cell_approach_joints is not None
-            and self._board_calibration.calibration_corners_joints is not None
-        )
-        has_graveyard_joints = (
-            self._board_calibration is not None
-            and (
-                self._board_calibration.graveyard_red_approach_joints is not None
-                or self._board_calibration.graveyard_black_approach_joints is not None
-            )
-        )
         self.get_logger().info(
             f'manipulation_node ready '
             f'(sim={self._sim_mode}, arm={arm_backend}, '
-            f'joint_homing={has_joints}, board_joints={has_board_joints}, '
-            f'graveyard_joints={has_graveyard_joints}, rg2={RG2_OK})'
+            f'joint_homing={has_joints}, aruco_board=pending_startup, rg2={RG2_OK})'
         )
 
         if (
@@ -218,7 +250,7 @@ class ManipulationNode(Node):
         ):
             delay = float(self.get_parameter('startup_move_delay_sec').value)
             self.get_logger().info(
-                f'Startup: will move to initial pose in {delay:.1f}s '
+                f'Startup: will move to scan pose + acquire board frame in {delay:.1f}s '
                 f'(planner={arm_backend}; pendant Play + moveit_config_driver required)'
             )
             self._startup_timer = self.create_timer(
@@ -227,65 +259,54 @@ class ManipulationNode(Node):
                 callback_group=self._arm_cbg,
             )
 
-    def _get_graveyard_joints(
-        self, y: float
-    ) -> tuple[tuple[list, list] | None, tuple[list, list] | None]:
-        """Return (approach_j, grasp_j) for a graveyard position.
+    def _refresh_board_frame(self) -> bool:
+        """Call vision node GetBoardTransform service and store the FlatBoardLocator.
 
-        Detects red/black zone by y-proximity to the stored reference y-coordinates.
-        Returns (None, None) when graveyard joints are not in the calibration file.
+        Returns True on success. Safe to call from a daemon thread (blocking).
         """
-        cal = self._board_calibration
-        if cal is None:
-            return None, None
+        if not self._board_transform_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(
+                'get_board_transform service not available (vision_node running?)'
+            )
+            return False
 
-        red_y   = cal.graveyard_red_y
-        black_y = cal.graveyard_black_y
+        req = GetBoardTransform.Request()
+        future = self._board_transform_client.call_async(req)
 
-        if red_y is None and black_y is None:
-            return None, None
+        deadline = time.monotonic() + 10.0
+        while not future.done():
+            if time.monotonic() > deadline:
+                self.get_logger().error('GetBoardTransform request timed out')
+                return False
+            time.sleep(0.05)
 
-        if red_y is not None and black_y is not None:
-            is_red = abs(y - red_y) <= abs(y - black_y)
-        else:
-            is_red = red_y is not None
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.get_logger().error(f'GetBoardTransform call failed: {exc}')
+            return False
 
-        result = cal.get_graveyard_joints(is_red)
-        if result is None:
-            return None, None
-        approach_j, grasp_j = result
-        return approach_j, grasp_j
+        if not resp.success:
+            self.get_logger().error(f'GetBoardTransform failed: {resp.message}')
+            return False
 
-    def _get_cell_joints(
-        self, x: float, y: float, z: float
-    ) -> tuple[tuple[list, list] | None, tuple[list, list] | None]:
-        """Map XYZ → (file_f, rank_f) via rigid-body inverse; return (approach_j, grasp_j).
+        try:
+            self._flat_locator = FlatBoardLocator(list(resp.marker_centres_base))
+            self._board_z = self._flat_locator.board_z
+            tf_flat = list(resp.board_to_base)
+            if len(tf_flat) == 16:
+                self._board_to_base_tf = np.array(tf_flat, dtype=np.float64).reshape(4, 4)
+            a0 = self._flat_locator.cell_xyz(0, 0)
+            self.get_logger().info(
+                f'Board frame acquired: board_z={self._board_z:.4f} m  '
+                f'a0=({a0[0]:.3f},{a0[1]:.3f})  '
+                f'grasp_z={self._board_z + self._grasp_height_m:.4f} m'
+            )
+        except Exception as exc:
+            self.get_logger().error(f'FlatBoardLocator construction failed: {exc}')
+            return False
 
-        Each element is (joint_names, joint_positions) or None.
-        Returns (None, None) when off-board or calibration data is missing.
-        """
-        import numpy as np
-        cal = self._board_calibration
-        if cal is None or cal.board_to_base_tf is None:
-            return None, None
-
-        tf = np.array(cal.board_to_base_tf)
-        R, t = tf[:3, :3], tf[:3, 3]
-        board_pos = R.T @ (np.array([x, y, z]) - t)
-
-        spacing_m = cal.grid_spacing_mm / 1000.0
-        file_f = board_pos[0] / spacing_m
-        rank_f = board_pos[1] / spacing_m
-
-        if file_f < -0.5 or file_f > 8.5 or rank_f < -0.5 or rank_f > 9.5:
-            return None, None
-
-        file_f = max(0.0, min(8.0, file_f))
-        rank_f = max(0.0, min(9.0, rank_f))
-
-        approach = cal.interpolate_approach_joints(file_f, rank_f)
-        grasp    = cal.interpolate_board_joints(file_f, rank_f)
-        return approach, grasp
+        return True
 
     def _setup_arm_planner(self) -> None:
         """OMPL via move_group /move_action (joint-space, same as RViz)."""
@@ -318,7 +339,242 @@ class ManipulationNode(Node):
             )
 
     # ------------------------------------------------------------------
-    # Action execution: 8-step pick-and-place sequence
+    # Board-frame pose computation
+    # ------------------------------------------------------------------
+
+    def _board_frame_pose(
+        self, x_base: float, y_base: float, z_board_m: float
+    ) -> tuple[float, float, float]:
+        """Transform a planner XY + board-frame Z into a full base_link position.
+
+        The math (user's board-frame approach):
+          1. Inverse-transform planner XY from base_link to board frame
+             board_xy = R.T @ (base_xy - t)
+          2. Re-build a point at the desired board-frame Z
+             T_local = [board_xy[0], board_xy[1], z_board_m, 1]
+          3. Multiply through board_to_base_tf
+             T_base  = board_to_base_tf @ T_local
+
+        This gives the exact position in base_link regardless of board tilt/position,
+        with Z measured perpendicularly from the board surface — not from base_link Z-axis.
+
+        Falls back to (x_base, y_base, z_board_m) when no board frame is available.
+        """
+        tf = self._board_to_base_tf
+        if tf is None:
+            return x_base, y_base, z_board_m
+
+        R = tf[:3, :3]
+        t = tf[:3, 3]
+
+        # Project the planner XY onto the board plane (Z = 0 in board frame)
+        base_pt = np.array([x_base, y_base, t[2]])   # put at board-origin height first
+        board_pt = R.T @ (base_pt - t)               # inverse rotate + translate
+
+        # Rebuild with the desired board-frame Z, then transform back to base_link
+        local = np.array([board_pt[0], board_pt[1], z_board_m, 1.0])
+        base  = tf @ local
+        return float(base[0]), float(base[1]), float(base[2])
+
+    # ------------------------------------------------------------------
+    # IK → joint-space motion  (geometry → smooth deterministic moves)
+    # ------------------------------------------------------------------
+
+    def _compute_ik(
+        self,
+        x: float, y: float, z: float,
+        seed_names: list | None = None,
+        seed_positions: list | None = None,
+    ) -> tuple[list, list] | None:
+        """Call MoveIt /compute_ik and return (joint_names, joint_positions).
+
+        When seed_names/seed_positions are provided (e.g. the taught a0 joint state),
+        IK is solved starting from that configuration.  This ensures solutions stay in
+        the same elbow-up/down region as the board-level work space — critical for
+        avoiding wild arm reconfigurations between waypoints.
+
+        Falls back to the live robot state as seed when no seed is given.
+        Returns None in simulation or when the service fails.
+        """
+        if self._sim_mode or self._ik_client is None:
+            return None
+
+        if not self._ik_client.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn('/compute_ik not available')
+            return None
+
+        req = GetPositionIK.Request()
+        ik_req = PositionIKRequest()
+        ik_req.group_name        = str(self.get_parameter('move_group_name').value)
+        ik_req.avoid_collisions  = True
+
+        ps = PoseStamped()
+        ps.header.frame_id      = str(self.get_parameter('planning_frame').value)
+        ps.header.stamp         = self.get_clock().now().to_msg()
+        ps.pose.position.x      = float(x)
+        ps.pose.position.y      = float(y)
+        ps.pose.position.z      = float(z)
+        ps.pose.orientation     = yaw_to_downward_quaternion(self._scan_pose_yaw)
+        ik_req.pose_stamped     = ps
+
+        rs = MoveItRobotState()
+        if seed_names and seed_positions:
+            js = SensorJointState()
+            js.name     = list(seed_names)
+            js.position = [float(p) for p in seed_positions]
+            rs.joint_state = js
+            rs.is_diff     = False   # use provided seed, not live state
+        else:
+            rs.is_diff = True        # fallback: live state as seed
+        ik_req.robot_state      = rs
+        ik_req.timeout.sec      = 1
+        ik_req.timeout.nanosec  = 0
+
+        req.ik_request = ik_req
+
+        future = self._ik_client.call_async(req)
+        deadline = time.monotonic() + 4.0
+        while not future.done():
+            if time.monotonic() > deadline:
+                self.get_logger().warn(f'IK timed out for ({x:.3f},{y:.3f},{z:.3f})')
+                return None
+            time.sleep(0.05)
+
+        try:
+            resp = future.result()
+        except Exception as exc:
+            self.get_logger().error(f'IK service error: {exc}')
+            return None
+
+        if resp.error_code.val != MoveItErrorCodes.SUCCESS:
+            self.get_logger().warn(
+                f'IK no solution for ({x:.3f},{y:.3f},{z:.3f}): '
+                f'error_code={resp.error_code.val}'
+            )
+            return None
+
+        js = resp.solution.joint_state
+        arm_names = self._initial_joint_names   # 6 UR5e joints from scan calibration
+        if arm_names:
+            pairs = [
+                (n, p) for n, p in zip(js.name, js.position)
+                if n in arm_names
+            ]
+            if len(pairs) >= len(arm_names):
+                pairs.sort(key=lambda np_: arm_names.index(np_[0]))
+                names, positions = zip(*pairs)
+                return list(names), list(positions)
+
+        # Fallback: return everything in the IK response
+        return list(js.name), list(js.position)
+
+    def _move_via_ik(
+        self,
+        x: float, y: float, z: float,
+        seed_names: list | None = None,
+        seed_positions: list | None = None,
+    ) -> bool:
+        """Move to pose via IK → joint-space (smooth, deterministic).
+
+        seed_names/seed_positions: IK starting configuration (a0 taught state recommended).
+        Falls back to OMPL if IK is unavailable or fails.
+        """
+        ik = self._compute_ik(x, y, z, seed_names, seed_positions)
+        if ik is not None:
+            names, positions = ik
+            return self._move_joints(names, positions)
+        self.get_logger().warn(
+            f'IK failed for ({x:.3f},{y:.3f},{z:.3f}) — falling back to OMPL'
+        )
+        return self._move(x, y, z, self._scan_pose_yaw)
+
+    def _graveyard_side_from_y(self, place_y: float) -> str:
+        """Pick which graveyard ('red'/'black') a place_pose belongs to by nearest Y.
+
+        Only called when the action goal already says place_is_graveyard=True, so this
+        just disambiguates red vs black — no risk of misclassifying a board square.
+        Prefers the taught calibration Y values; falls back to config-param Y.
+        """
+        cal = getattr(self, '_board_calibration', None)
+        red_y   = getattr(cal, 'graveyard_red_y', None)   if cal else None
+        black_y = getattr(cal, 'graveyard_black_y', None) if cal else None
+        if red_y is None:
+            red_y = self._graveyard_red_y
+        if black_y is None:
+            black_y = self._graveyard_black_y
+        return 'red' if abs(place_y - float(red_y)) <= abs(place_y - float(black_y)) else 'black'
+
+    def _graveyard_joints_for_zone(
+        self, zone: str
+    ) -> tuple[tuple[list, list] | None, tuple[list, list] | None]:
+        """Taught (approach, grasp) joint configs for red or black graveyard."""
+        cal = getattr(self, '_board_calibration', None)
+        if cal is None:
+            return None, None
+        result = cal.get_graveyard_joints(zone == 'red')
+        if result is None:
+            return None, None
+        return result[0], result[1]
+
+    def _ik_seed_at_xy(
+        self, x: float, y: float, for_approach: bool
+    ) -> tuple[list, list] | None:
+        """IK seed from 4 taught corners (bilinear), matching the target board XY.
+
+        Uses the same 4-patch interpolation as joint-space cell moves (a0/i0/i9/a9),
+        so IK along the i-file (i0→i9) stays in the correct elbow region.
+        Falls back to the a0 corner seed when interpolation is unavailable.
+        """
+        if for_approach:
+            fb_n, fb_p = self._a0_approach_seed_names, self._a0_approach_seed_positions
+        else:
+            fb_n, fb_p = self._a0_grasp_seed_names, self._a0_grasp_seed_positions
+
+        cal = getattr(self, '_board_calibration', None)
+        if cal is not None:
+            interp = cal.ik_seed_joints(x, y, for_approach)
+            if interp is not None:
+                return interp
+
+        if fb_n and fb_p:
+            return list(fb_n), list(fb_p)
+        return None
+
+    def _move_board_approach_joints(
+        self, x: float, y: float, pa_x: float, pa_y: float, pa_z: float
+    ) -> bool:
+        """Move to taught approach-height joints (4-corner bilinear) for board cell (x, y)."""
+        seed = self._ik_seed_at_xy(x, y, for_approach=True)
+        if seed:
+            return self._move_joints(seed[0], seed[1])
+        self.get_logger().warn(
+            f'No taught approach joints at ({x:.3f},{y:.3f}) — IK fallback'
+        )
+        return self._move_via_ik(pa_x, pa_y, pa_z, None, None)
+
+    def _move_grasp_descend(
+        self,
+        x: float, y: float, z: float,
+        seed_names: list | None = None,
+        seed_positions: list | None = None,
+    ) -> bool:
+        """Vertical descend at fixed XY via IK → joint-space.
+
+        Cartesian (/par_moveit/waypoint_move) is deliberately NOT used: it fails on
+        this hardware with CONTROL_FAILED and, worse, can report success without
+        moving — so the arm "descends" by zero and grasps air. IK seeded from the
+        cell's taught grasp joints keeps the descend in the correct elbow region.
+        """
+        return self._move_via_ik(x, y, z, seed_names, seed_positions)
+
+    # ------------------------------------------------------------------
+    # Action execution: hybrid pick-and-place
+    #   Board cells: joint approach/lift (4-corner bilinear), IK descend.
+    #   Graveyard:   taught graveyard joints when available, else IK.
+    #   place_is_graveyard comes from the action goal (set by the planner) —
+    #   no fragile geometric guessing of whether a square is a graveyard.
+    #   NO return-to-scan here: the behaviour tree's GoToScanPose does the
+    #   single scan move after BOTH capture and main move complete.
     # ------------------------------------------------------------------
 
     def _execute_cb(self, goal_handle):
@@ -328,10 +584,17 @@ class ManipulationNode(Node):
 
         pick_x  = req.pick_pose.position.x
         pick_y  = req.pick_pose.position.y
-        pick_z  = req.pick_pose.position.z
         place_x = req.place_pose.position.x
         place_y = req.place_pose.position.y
-        place_z = req.place_pose.position.z
+
+        approach_h = req.approach_height   # metres above board surface
+        grasp_h    = self._grasp_height_m  # metres above board surface (e.g. 0.010)
+        place_is_graveyard = bool(getattr(req, 'place_is_graveyard', False))
+
+        if self._board_to_base_tf is None:
+            self.get_logger().warn(
+                'No board frame yet — call /xiangqi/move_to_scan_pose first'
+            )
 
         def step(phase, fn):
             if goal_handle.is_cancel_requested:
@@ -352,103 +615,86 @@ class ManipulationNode(Node):
                 goal_handle.abort()
                 return False
 
-        # Resolve joint configs - board cells first, graveyard fallback for off-board positions
-        pick_approach_j,  pick_grasp_j  = self._get_cell_joints(pick_x,  pick_y,  pick_z)
-        if pick_approach_j is None:
-            pick_approach_j, pick_grasp_j = self._get_graveyard_joints(pick_y)
+        # ── Board-frame poses (board_to_base_tf × local board-frame Z offset) ──
+        pa_x, pa_y, pa_z = self._board_frame_pose(pick_x,  pick_y,  approach_h)
+        pg_x, pg_y, pg_z = self._board_frame_pose(pick_x,  pick_y,  grasp_h)
+        da_x, da_y, da_z = self._board_frame_pose(place_x, place_y, approach_h)
+        dg_x, dg_y, dg_z = self._board_frame_pose(place_x, place_y, grasp_h)
 
-        place_approach_j, place_grasp_j = self._get_cell_joints(place_x, place_y, place_z)
-        if place_approach_j is None:
-            place_approach_j, place_grasp_j = self._get_graveyard_joints(place_y)
+        # IK seeds at the pick board cell (4-corner bilinear taught joints)
+        pick_ap_n, pick_ap_p = self._ik_seed_at_xy(pick_x, pick_y, True)  or (None, None)
+        pick_gr_n, pick_gr_p = self._ik_seed_at_xy(pick_x, pick_y, False) or (None, None)
 
-        use_joint_space = (
-            pick_approach_j  is not None and pick_grasp_j  is not None
-            and place_approach_j is not None and place_grasp_j is not None
-            and bool(self._initial_joint_positions)
-        )
-
-        # 1. Open gripper
-        if not step('opening_gripper',
-                    lambda: self._gripper(self._open_width, OPEN_FORCE)):
-            return result
-
-        if use_joint_space:
-            # ----------------------------------------------------------
-            # All-joint-space path - no OMPL, no Cartesian IK
-            # Sequence: scan → pick_approach → pick_grasp → grasp →
-            #           pick_approach → place_approach → place_grasp →
-            #           release → place_approach → scan
-            # ----------------------------------------------------------
+        # Place leg: graveyard (taught joints, all joint-space) vs board cell.
+        gy_approach_joints = gy_grasp_joints = None
+        place_gr_n = place_gr_p = None   # IK seed for the place-cell descend (board only)
+        if place_is_graveyard:
+            zone = self._graveyard_side_from_y(place_y)
+            gy_approach_joints, gy_grasp_joints = self._graveyard_joints_for_zone(zone)
             self.get_logger().info(
-                f'Joint-space pick-and-place: '
-                f'pick=({pick_x:.3f},{pick_y:.3f}) place=({place_x:.3f},{place_y:.3f})'
+                f'Pick→place: pick board ({pick_x:.3f},{pick_y:.3f}); '
+                f'place {zone} GRAVEYARD ({place_x:.3f},{place_y:.3f}) '
+                f'taught_approach={gy_approach_joints is not None} '
+                f'taught_grasp={gy_grasp_joints is not None}'
             )
-            scan_n, scan_p   = self._initial_joint_names, self._initial_joint_positions
-            ap_n,   ap_p     = pick_approach_j
-            ag_n,   ag_p     = pick_grasp_j
-            dp_n,   dp_p     = place_approach_j
-            dg_n,   dg_p     = place_grasp_j
-
-            if not step('scan_pose_before_pick',
-                        lambda: self._move_joints(scan_n, scan_p)):          return result
-            if not step('approaching_pick',
-                        lambda: self._move_joints(ap_n, ap_p)):              return result
-            if not step('descending_to_piece',
-                        lambda: self._move_joints(ag_n, ag_p)):              return result
-            if not step('grasping_piece',
-                        lambda: self._gripper(self._grasp_width,
-                                              self._grasp_force)):           return result
-            if not step('lifting',
-                        lambda: self._move_joints(ap_n, ap_p)):              return result
-            if not step('approaching_place',
-                        lambda: self._move_joints(dp_n, dp_p)):              return result
-            if not step('descending_to_place',
-                        lambda: self._move_joints(dg_n, dg_p)):              return result
-            if not step('releasing_piece',
-                        lambda: self._gripper(self._release_width,
-                                              OPEN_FORCE)):                  return result
-            if not step('lifting_clear',
-                        lambda: self._move_joints(dp_n, dp_p)):              return result
-            if not step('returning_to_scan',
-                        lambda: self._move_joints(scan_n, scan_p)):          return result
-
         else:
-            # ----------------------------------------------------------
-            # OMPL fallback - used for graveyard moves or missing calibration
-            # ----------------------------------------------------------
+            place_gr_n, place_gr_p = self._ik_seed_at_xy(place_x, place_y, False) or (None, None)
             self.get_logger().info(
-                'Joint configs not available for this move - using OMPL+Cartesian fallback'
+                f'Pick→place: pick ({pick_x:.3f},{pick_y:.3f}) '
+                f'place ({place_x:.3f},{place_y:.3f}) board cells; '
+                f'pick_grasp_z={pg_z:.4f} place_grasp_z={dg_z:.4f}'
             )
-            approach_h = req.approach_height
-            transit_h  = req.transit_height
-            yaw        = self._scan_pose_yaw
 
-            if not step('approaching_pick',
-                        lambda: self._move(pick_x, pick_y,
-                                           pick_z + approach_h, yaw)):       return result
-            if not step('descending_to_piece',
-                        lambda: self._move_cartesian(pick_x, pick_y,
-                                                     pick_z, yaw)):          return result
-            if not step('grasping_piece',
-                        lambda: self._gripper(self._grasp_width,
-                                              self._grasp_force)):           return result
-            if not step('lifting',
-                        lambda: self._move_cartesian(pick_x, pick_y,
-                                                     pick_z + approach_h,
-                                                     yaw)):                  return result
-            if not step('transiting',
-                        lambda: self._move(place_x, place_y,
-                                           place_z + transit_h, yaw)):       return result
-            if not step('descending_to_place',
-                        lambda: self._move_cartesian(place_x, place_y,
-                                                     place_z, yaw)):         return result
-            if not step('releasing_piece',
-                        lambda: self._gripper(self._release_width,
-                                              OPEN_FORCE)):                  return result
-            if not step('lifting_clear',
-                        lambda: self._move_cartesian(place_x, place_y,
-                                                     place_z + approach_h,
-                                                     yaw)):                  return result
+        # ── Pick leg (always a board cell) ─────────────────────────────
+        def _approach_pick():
+            return self._move_board_approach_joints(pick_x, pick_y, pa_x, pa_y, pa_z)
+
+        def _descend_pick():
+            return self._move_grasp_descend(pg_x, pg_y, pg_z, pick_gr_n, pick_gr_p)
+
+        def _lift_pick():
+            return self._move_board_approach_joints(pick_x, pick_y, pa_x, pa_y, pa_z)
+
+        # ── Place leg (board cell or graveyard) ────────────────────────
+        def _approach_place():
+            if place_is_graveyard:
+                if gy_approach_joints:
+                    return self._move_joints(*gy_approach_joints)
+                # No taught graveyard joints: IK to graveyard approach, seed from pick approach
+                return self._move_via_ik(da_x, da_y, da_z, pick_ap_n, pick_ap_p)
+            return self._move_board_approach_joints(place_x, place_y, da_x, da_y, da_z)
+
+        def _descend_place():
+            if place_is_graveyard:
+                # Graveyard descend is pure joint-space (taught grasp joints) — no IK,
+                # no Cartesian. Fall back to taught approach joints if grasp not taught.
+                if gy_grasp_joints:
+                    return self._move_joints(*gy_grasp_joints)
+                if gy_approach_joints:
+                    return self._move_joints(*gy_approach_joints)
+                # Last resort only (no taught graveyard joints at all): IK descend.
+                return self._move_via_ik(dg_x, dg_y, dg_z, pick_gr_n, pick_gr_p)
+            return self._move_grasp_descend(dg_x, dg_y, dg_z, place_gr_n, place_gr_p)
+
+        def _lift_place():
+            if place_is_graveyard:
+                if gy_approach_joints:
+                    return self._move_joints(*gy_approach_joints)
+                return self._move_via_ik(da_x, da_y, da_z, pick_ap_n, pick_ap_p)
+            return self._move_board_approach_joints(place_x, place_y, da_x, da_y, da_z)
+
+        if not step('opening_gripper',
+                    lambda: self._gripper(self._open_width, OPEN_FORCE)):     return result
+        if not step('approaching_pick',    _approach_pick):                   return result
+        if not step('descending_to_piece', _descend_pick):                   return result
+        if not step('grasping_piece',
+                    lambda: self._gripper(self._grasp_width, self._grasp_force)):  return result
+        if not step('lifting',             _lift_pick):                       return result
+        if not step('approaching_place',   _approach_place):                  return result
+        if not step('descending_to_place', _descend_place):                  return result
+        if not step('releasing_piece',
+                    lambda: self._gripper(self._release_width, OPEN_FORCE)):  return result
+        if not step('lifting_clear',       _lift_place):                      return result
 
         result.success = True
         result.placement_error_mm = 0.0
@@ -507,23 +753,31 @@ class ManipulationNode(Node):
             )
 
         self._board_calibration = cal
-        has_approach = cal.cell_approach_joints is not None
-        has_grasp    = cal.calibration_corners_joints is not None
-        if has_approach and has_grasp:
+
+        # Extract a0 (corner 0) joint state as IK seed for board-level moves.
+        # This is the existing taught configuration at file=0, rank=0 — no re-teaching needed.
+        if (cal.calibration_corners_joints and cal.calibration_corners_joint_names
+                and len(cal.calibration_corners_joints) >= 1):
+            self._a0_grasp_seed_names     = list(cal.calibration_corners_joint_names)
+            self._a0_grasp_seed_positions  = list(cal.calibration_corners_joints[0])
             self.get_logger().info(
-                'Full joint-space calibration loaded - all board moves will use '
-                'bilinear joint interpolation (no OMPL)'
+                'a0 grasp seed loaded (IK fallback); board IK uses 4-corner bilinear seeds'
             )
-        elif has_approach or has_grasp:
-            self.get_logger().warn(
-                f'Partial joint calibration: approach={has_approach} grasp={has_grasp} - '
-                'board moves will fall back to OMPL (re-run calibration_tool)'
-            )
-        else:
-            self.get_logger().info(
-                'No board joint configs in calibration - board moves will use OMPL '
-                '(run calibration_tool to enable joint-space interpolation)'
-            )
+
+        if (cal.cell_approach_joints and cal.cell_approach_joint_names
+                and len(cal.cell_approach_joints) >= 1):
+            self._a0_approach_seed_names     = list(cal.cell_approach_joint_names)
+            self._a0_approach_seed_positions  = list(cal.cell_approach_joints[0])
+            self.get_logger().info('a0 approach seed loaded (IK fallback)')
+
+        n_corners = (
+            len(cal.calibration_corners_joints)
+            if cal.calibration_corners_joints else 0
+        )
+        self.get_logger().info(
+            f'Calibration loaded: scan/home poses + IK seeds from {n_corners} taught corners '
+            '(a0/i0/i9/a9 bilinear, 4-patch when midpoints present).'
+        )
 
     def _resolve_scan_pose(self):
         """Return (x, y, z) for the scan pose in base_link (metres).
@@ -634,12 +888,18 @@ class ManipulationNode(Node):
             if ok:
                 break
         if ok:
-            self.get_logger().info('Startup: reached initial pose')
+            self.get_logger().info('Startup: reached scan pose - acquiring board frame via ArUco')
+            time.sleep(1.0)  # let camera settle
+            if not self._refresh_board_frame():
+                self.get_logger().warn(
+                    'Startup: board frame acquisition failed - moves will use planner Z. '
+                    'Ensure vision_node + camera_config.yaml static TF are running, '
+                    'then call /xiangqi/move_to_scan_pose to retry.'
+                )
         else:
             self.get_logger().warn(
-                'Startup: initial pose move failed - check arm_drivers, '
-                'moveit_config_driver, pendant Play (External Control), and '
-                'board_calibration.yaml initial_pose'
+                'Startup: scan pose move failed - check arm_drivers, '
+                'moveit_config_driver, pendant Play (External Control)'
             )
 
     def _move_to_initial_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
@@ -663,7 +923,7 @@ class ManipulationNode(Node):
         return response
 
     def _move_to_scan_pose_cb(self, _request, response: Trigger.Response) -> Trigger.Response:
-        """Move arm to top-down scan position (joint-space if calibrated)."""
+        """Move arm to top-down scan position, then refresh board frame from ArUco."""
         if self._initial_joint_positions:
             self.get_logger().info('Moving to scan pose (joint-space)')
             ok = self._move_joints(self._initial_joint_names, self._initial_joint_positions)
@@ -678,8 +938,18 @@ class ManipulationNode(Node):
                 self._scan_pose_z,
                 self._scan_pose_yaw,
             )
-        response.success = ok
-        response.message = 'at scan pose' if ok else 'scan pose move failed'
+        if ok:
+            time.sleep(0.5)
+            board_ok = self._refresh_board_frame()
+            response.success = True
+            response.message = (
+                'at scan pose; board frame acquired'
+                if board_ok else
+                'at scan pose; board frame acquisition failed (check vision_node + TF)'
+            )
+        else:
+            response.success = False
+            response.message = 'scan pose move failed'
         return response
 
     # ------------------------------------------------------------------
@@ -746,16 +1016,18 @@ class ManipulationNode(Node):
                 )
 
                 send_future = self._waypoint_client.send_goal_async(goal)
-                rclpy.spin_until_future_complete(self, send_future, timeout_sec=15.0)
-                goal_handle = send_future.result() if send_future.done() else None
+                # Use _wait_on_future (polling) instead of spin_until_future_complete.
+                # spin_until_future_complete deadlocks when called from inside an action
+                # server callback because the executor callback group is already active.
+                goal_handle = _wait_on_future(send_future, timeout_sec=15.0)
                 if goal_handle is None or not goal_handle.accepted:
-                    self.get_logger().error('WaypointMove goal rejected')
+                    self.get_logger().error('WaypointMove goal rejected or timed out')
                     return False
 
                 result_future = goal_handle.get_result_async()
-                rclpy.spin_until_future_complete(self, result_future, timeout_sec=120.0)
-                if not result_future.done():
-                    self.get_logger().error('WaypointMove timed out')
+                wrapped = _wait_on_future(result_future, timeout_sec=120.0)
+                if wrapped is None:
+                    self.get_logger().error('WaypointMove timed out waiting for result')
                     return False
 
                 return True

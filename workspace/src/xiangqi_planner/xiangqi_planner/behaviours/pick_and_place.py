@@ -46,6 +46,7 @@ class PickPieceBehaviour(py_trees_ros.action_clients.FromBlackboard):
         goal.place_pose = bb.get('place_pose')
         goal.approach_height = float(_bb_get(bb, 'approach_height', 0.12))
         goal.transit_height = float(_bb_get(bb, 'transit_height', 0.20))
+        goal.place_is_graveyard = False   # normal board move: place is a board cell
         bb.set('pick_place_goal', goal)
         super().initialise()
 
@@ -71,5 +72,6 @@ class PlaceInGraveyardBehaviour(py_trees_ros.action_clients.FromBlackboard):
         goal.place_pose = bb.get('graveyard_pose')
         goal.approach_height = float(_bb_get(bb, 'approach_height', 0.12))
         goal.transit_height = float(_bb_get(bb, 'transit_height', 0.20))
+        goal.place_is_graveyard = True    # captured piece goes to off-board graveyard
         bb.set('graveyard_goal', goal)
         super().initialise()

@@ -1,0 +1,33 @@
+# camera_config.yaml: Static TF from camera_color_optical_frame to base_link.
+#
+# Measure the camera position ONCE with a tape measure and update below.
+# The transform publishes: camera_color_optical_frame → base_link
+# (i.e. where is the camera optical frame relative to the robot base?)
+#
+# Steps to measure:
+#   1. Place a ruler from the robot base (origin on mounting flange floorplate) to the
+#      camera lens centre: record x (forward from base), y (left from base), z (up from base).
+#   2. Estimate the camera tilt angles (roll=0 for level mount, pitch=down tilt, yaw=rotation).
+#   3. Update the values below, then rebuild and relaunch.
+#
+# Typical overhead fixed-mount values (edit to match your lab setup):
+#   x:     0.0    # camera directly above robot base (forward/back offset in metres)
+#   y:     0.0    # no lateral offset
+#   z:     1.5    # 1.5m above floor (adjust to match camera height)
+#   roll:  0.0    # camera not rolled
+#   pitch: 1.57   # 90° tilt (pointing straight down); use ~0.79 for 45° tilt
+#   yaw:   0.0    # camera facing same direction as robot X-axis
+#
+# NOTE: After updating these values you must rebuild xiangqi_bringup:
+#   cd workspace && colcon build --packages-select xiangqi_bringup
+
+static_transform_publisher:
+  ros__parameters:
+    x:     0.0
+    y:     0.0
+    z:     1.5
+    roll:  0.0
+    pitch: 1.5708
+    yaw:   0.0
+    frame_id: base_link
+    child_frame_id: camera_color_optical_frame

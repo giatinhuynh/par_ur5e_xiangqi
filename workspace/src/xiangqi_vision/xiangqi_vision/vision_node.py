@@ -24,23 +24,151 @@ import time
 import threading
 import numpy as np
 import cv2
+import yaml as _yaml
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.time import Time as RclpyTime
+from rclpy.duration import Duration as RclpyDuration
 from std_msgs.msg import Bool, Header, Empty
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CameraInfo
+from geometry_msgs.msg import TransformStamped
 from cv_bridge import CvBridge
+from tf2_ros import Buffer, TransformListener, StaticTransformBroadcaster
 
 from xiangqi_msgs.msg import BoardState, PieceDetection
 from xiangqi_vision.fen_util import grid_to_fen
-from xiangqi_msgs.srv import GetBoardState
+from xiangqi_msgs.srv import GetBoardState, GetBoardTransform
 
 from .board_detector import BoardDetector, BoardCalibration
+from .board_layout import _compute_4xa3_grid_mm as _blay_compute
 from .image_preprocess import PreprocessConfig, apply_piece_preprocess, stack_comparison
 from .piece_detector import PieceDetector
 from .turn_detector import TurnDetector, TurnDetectorState
 from .weights_util import resolve_calibration_path, resolve_yolo_model_path
+
+
+def _tf_rotation_matrix(r) -> np.ndarray:
+    """Convert a geometry_msgs Quaternion to a 3×3 rotation matrix."""
+    x, y, z, w = r.x, r.y, r.z, r.w
+    return np.array([
+        [1 - 2*(y*y + z*z),  2*(x*y - z*w),      2*(x*z + y*w)],
+        [2*(x*y + z*w),      1 - 2*(x*x + z*z),   2*(y*z - x*w)],
+        [2*(x*z - y*w),      2*(y*z + x*w),       1 - 2*(x*x + y*y)],
+    ], dtype=np.float64)
+
+
+def _apply_transform(tf_stamped, point_cam: np.ndarray) -> np.ndarray:
+    """Transform a 3D point from camera frame to target frame via a TF stamped."""
+    R = _tf_rotation_matrix(tf_stamped.transform.rotation)
+    t = tf_stamped.transform.translation
+    return R @ point_cam + np.array([t.x, t.y, t.z])
+
+
+def _compute_4xa3_marker_fractions():
+    """Compute bilinear (u,v) fractions for grid corners within the marker quad.
+
+    Returns (u_file0, u_file8, v_rank0, v_rank9) using the physical marker centre
+    positions (not the norm_pixel inner-band fractions used for YOLO snapping).
+    """
+    gx, gy, il, *_ = _blay_compute()
+    page_w = 594.0
+    page_h = 840.0
+    aruco_page_inset = 8.0
+    aruco_size = 38.0
+    marker_inset = aruco_page_inset + aruco_size / 2.0  # 27mm from sheet corner
+    marker_span_x = page_w - 2.0 * marker_inset          # 540mm
+    marker_span_y = page_h - 2.0 * marker_inset          # 786mm
+
+    delta_x = il - marker_inset                          # inner_left - 27 = 25mm
+    delta_y = (page_h - gy(0)) - marker_inset            # (840 - 695.625) - 27 = 117.375mm
+
+    cell_mm = gx(1) - gx(0)
+    u_file0 = delta_x / marker_span_x
+    u_file8 = (delta_x + 8.0 * cell_mm) / marker_span_x
+    v_rank0 = delta_y / marker_span_y
+    v_rank9 = (delta_y + 9.0 * cell_mm) / marker_span_y
+    return u_file0, u_file8, v_rank0, v_rank9
+
+
+_MAT_U_FILE0, _MAT_U_FILE8, _MAT_V_RANK0, _MAT_V_RANK9 = _compute_4xa3_marker_fractions()
+
+# ArUco marker-centre positions in the board frame (origin=a0, X=file dir, Y=rank dir, metres).
+# Derived from 4×A3 mat geometry; used for auto camera calibration.
+_CELL_M = 0.06125   # grid spacing
+_DX_M   = 0.025     # inner_left (52mm) - marker_inset (27mm)
+_DY_M   = 0.117375  # (page_h - bb_grid) - marker_inset = 144.375 - 27
+_MARKER_BOARD_M: dict = {
+    0: np.array([-_DX_M,         9 * _CELL_M + _DY_M, 0.0]),  # ID0: file0, rank9-side
+    1: np.array([8 * _CELL_M + _DX_M, 9 * _CELL_M + _DY_M, 0.0]),  # ID1: file8, rank9-side
+    2: np.array([8 * _CELL_M + _DX_M, -_DY_M,              0.0]),  # ID2: file8, rank0-side
+    3: np.array([-_DX_M,         -_DY_M,                   0.0]),  # ID3: file0, rank0-side
+}
+
+
+def _kabsch_tf(pts_from: np.ndarray, pts_to: np.ndarray) -> np.ndarray:
+    """Kabsch/SVD rigid-body alignment: find 4×4 T so pts_to ≈ T[:3,:3] @ pts_from + T[:3,3].
+
+    pts_from / pts_to: (N, 3) arrays of corresponding 3D points.
+    """
+    c_f = pts_from.mean(axis=0)
+    c_t = pts_to.mean(axis=0)
+    H   = (pts_from - c_f).T @ (pts_to - c_t)
+    U, _, Vt = np.linalg.svd(H)
+    d = np.linalg.det(Vt.T @ U.T)
+    R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+    t = c_t - R @ c_f
+    tf       = np.eye(4)
+    tf[:3, :3] = R
+    tf[:3,  3] = t
+    return tf
+
+
+def _rotation_to_quaternion(R: np.ndarray):
+    """Convert 3×3 rotation matrix to (x, y, z, w) quaternion tuple."""
+    tr = R[0, 0] + R[1, 1] + R[2, 2]
+    if tr > 0:
+        s = 0.5 / np.sqrt(tr + 1.0)
+        return (R[2,1]-R[1,2])*s, (R[0,2]-R[2,0])*s, (R[1,0]-R[0,1])*s, 0.25/s
+    elif R[0,0] > R[1,1] and R[0,0] > R[2,2]:
+        s = 2.0 * np.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2])
+        return 0.25*s, (R[0,1]+R[1,0])/s, (R[0,2]+R[2,0])/s, (R[2,1]-R[1,2])/s
+    elif R[1,1] > R[2,2]:
+        s = 2.0 * np.sqrt(1.0 + R[1,1] - R[0,0] - R[2,2])
+        return (R[0,1]+R[1,0])/s, 0.25*s, (R[1,2]+R[2,1])/s, (R[0,2]-R[2,0])/s
+    else:
+        s = 2.0 * np.sqrt(1.0 + R[2,2] - R[0,0] - R[1,1])
+        return (R[0,2]+R[2,0])/s, (R[1,2]+R[2,1])/s, 0.25*s, (R[1,0]-R[0,1])/s
+
+
+def _compute_board_tf_from_markers(markers_base: dict) -> np.ndarray:
+    """Compute 4×4 board_to_base_tf from ArUco marker centre 3D positions.
+
+    markers_base: {id: np.array([x,y,z])} for IDs 0-3 in base_link frame.
+    Board frame: origin=a0 (file0,rank0), X=file dir (a→i), Y=rank dir (0→9).
+    """
+    M0, M1, M2, M3 = [np.array(markers_base[i]) for i in range(4)]
+
+    def _bilin(u, v):
+        return (1-u)*(1-v)*M3 + u*(1-v)*M2 + u*v*M1 + (1-u)*v*M0
+
+    a0 = _bilin(_MAT_U_FILE0, _MAT_V_RANK0)
+    i0 = _bilin(_MAT_U_FILE8, _MAT_V_RANK0)
+    a9 = _bilin(_MAT_U_FILE0, _MAT_V_RANK9)
+
+    X_hat = i0 - a0
+    X_hat /= np.linalg.norm(X_hat)
+    Z_hat = np.cross(X_hat, a9 - a0)
+    Z_hat /= np.linalg.norm(Z_hat)
+    Y_hat = np.cross(Z_hat, X_hat)
+
+    tf = np.eye(4)
+    tf[:3, 0] = X_hat
+    tf[:3, 1] = Y_hat
+    tf[:3, 2] = Z_hat
+    tf[:3, 3] = a0
+    return tf
 
 
 class GridStabilizer:
@@ -114,6 +242,10 @@ class VisionNode(Node):
         self.declare_parameter('piece_saturation_scale', 1.0)
         self.declare_parameter('piece_use_white_balance', False)
         self.declare_parameter('debug_show_preprocess', False)
+        self.declare_parameter(
+            'camera_config_file',
+            '/home/rosuser/workspace/config/camera_config.yaml',
+        )
 
         model_path_param = self.get_parameter('model_path').value
         cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
@@ -167,6 +299,21 @@ class VisionNode(Node):
         self._grid_stabilizer = GridStabilizer(smooth_frames=grid_smooth)
         self._bridge = CvBridge()
 
+        # --- TF2 for camera→base_link transform (fallback if no auto-calibration) ---
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(self._tf_buffer, self)
+
+        # --- Static TF broadcaster: used to republish auto-calibrated camera TF ---
+        self._static_broadcaster = StaticTransformBroadcaster(self)
+
+        # --- Camera intrinsics (from CameraInfo) ---
+        self._camera_matrix: np.ndarray | None = None
+        self._dist_coeffs: np.ndarray | None = None
+
+        # --- Camera→base_link transform (auto-calibrated or loaded from file) ---
+        self._camera_to_base_matrix: np.ndarray | None = None
+        self._load_camera_tf()  # try loading saved calibration right away
+
         # --- State ---
         self._latest_board_state: BoardState | None = None
         self._last_camera_image: np.ndarray | None = None
@@ -198,12 +345,28 @@ class VisionNode(Node):
             depth=1,
         )
 
+        cam_info_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+
         # --- Subscriptions ---
         self._img_sub = self.create_subscription(
             Image,
             self.get_parameter('camera_topic').value,
             self._image_callback,
             camera_qos,
+        )
+        camera_info_topic = self.get_parameter('camera_topic').value.replace(
+            'image_raw', 'camera_info'
+        )
+        self._cam_info_sub = self.create_subscription(
+            CameraInfo,
+            camera_info_topic,
+            self._camera_info_callback,
+            cam_info_qos,
         )
         self._human_ready_sub = self.create_subscription(
             Empty,
@@ -227,6 +390,9 @@ class VisionNode(Node):
         # --- Services ---
         self._get_board_srv = self.create_service(
             GetBoardState, 'get_board_state', self._get_board_state_callback
+        )
+        self._get_board_transform_srv = self.create_service(
+            GetBoardTransform, 'get_board_transform', self._get_board_transform_callback
         )
 
         # --- Dedicated detection thread (permanent daemon) ---
@@ -302,6 +468,144 @@ class VisionNode(Node):
     # Other callbacks - all fast, no YOLO/ArUco here
     # ------------------------------------------------------------------
 
+    def _camera_info_callback(self, msg: CameraInfo) -> None:
+        if self._camera_matrix is None:
+            K = msg.k
+            self._camera_matrix = np.array(K, dtype=np.float64).reshape(3, 3)
+            D = msg.d
+            self._dist_coeffs = np.array(D, dtype=np.float64)
+            self.get_logger().info('Camera intrinsics received')
+
+    # ------------------------------------------------------------------
+    # Camera→base_link auto-calibration
+    # ------------------------------------------------------------------
+
+    def _load_camera_tf(self) -> None:
+        """Load camera→base_link 4×4 matrix from camera_config.yaml if saved there."""
+        path = str(self.get_parameter('camera_config_file').value)
+        if not os.path.isfile(path):
+            return
+        try:
+            with open(path) as f:
+                cfg = _yaml.safe_load(f) or {}
+            params = cfg.get('static_transform_publisher', {}).get('ros__parameters', {})
+            mat = params.get('tf_matrix')
+            if mat:
+                self._camera_to_base_matrix = np.array(mat, dtype=np.float64).reshape(4, 4)
+                self.get_logger().info(
+                    f'Camera→base_link TF loaded from {path} — no calibration step needed'
+                )
+        except Exception as e:
+            self.get_logger().warn(f'Could not load camera TF from {path}: {e}')
+
+    def _get_marker_base_positions(self, cal: BoardCalibration) -> dict | None:
+        """Compute ArUco marker centre positions in base_link from existing calibration data.
+
+        Uses board_to_base_tf (preferred) or calibration_corners_base as fallback.
+        Returns {id: np.array([x,y,z])} for IDs 0-3, or None if no data available.
+        """
+        if cal.board_to_base_tf is not None:
+            tf = np.array(cal.board_to_base_tf, dtype=np.float64)
+            return {
+                mid: (tf @ np.append(pos, 1.0))[:3]
+                for mid, pos in _MARKER_BOARD_M.items()
+            }
+        if cal.calibration_corners_base is not None and len(cal.calibration_corners_base) == 4:
+            a0, i0, _, a9 = [np.array(c, dtype=np.float64) for c in cal.calibration_corners_base]
+            X_hat = i0 - a0; X_hat /= np.linalg.norm(X_hat)
+            Y_raw = a9 - a0; Y_raw /= np.linalg.norm(Y_raw)
+            return {
+                mid: a0 + pos[0] * X_hat + pos[1] * Y_raw
+                for mid, pos in _MARKER_BOARD_M.items()
+            }
+        return None
+
+    def _auto_calibrate_camera(self, markers_cam: dict) -> np.ndarray | None:
+        """Compute camera→base_link 4×4 TF using Kabsch alignment.
+
+        markers_cam: {id: np.array([x,y,z])} in camera frame (from solvePnP).
+        Loads board_calibration.yaml to get known marker positions in base_link.
+        Returns 4×4 transform or None on failure.
+        """
+        try:
+            cal_path = resolve_calibration_path(
+                self.get_parameter('calibration_file').value, self.get_logger()
+            )
+            if not os.path.isfile(cal_path):
+                self.get_logger().warn(
+                    'Auto camera calibration: no board_calibration.yaml found. '
+                    'Run calibration_tool once to establish the board frame, '
+                    'then re-scan to auto-calibrate the camera.'
+                )
+                return None
+            cal = BoardCalibration.load(cal_path)
+            markers_base = self._get_marker_base_positions(cal)
+            if markers_base is None:
+                self.get_logger().warn(
+                    'Auto camera calibration: board_calibration.yaml has no '
+                    'board_to_base_tf or calibration_corners_base. '
+                    'Run calibration_tool to record board corners first.'
+                )
+                return None
+            ids = sorted(markers_cam.keys())
+            pts_cam  = np.array([markers_cam[i]   for i in ids], dtype=np.float64)
+            pts_base = np.array([markers_base[i]  for i in ids], dtype=np.float64)
+            tf = _kabsch_tf(pts_cam, pts_base)
+            residual_mm = float(np.mean(np.linalg.norm(
+                pts_base - (tf[:3, :3] @ pts_cam.T + tf[:3, 3:]).T, axis=1
+            )) * 1000)
+            self.get_logger().info(
+                f'Camera auto-calibration done (mean residual: {residual_mm:.1f} mm)'
+            )
+            return tf
+        except Exception as e:
+            self.get_logger().error(f'Auto camera calibration exception: {e}')
+            return None
+
+    def _save_and_publish_camera_tf(self, tf_matrix: np.ndarray) -> None:
+        """Persist 4×4 camera→base_link TF to camera_config.yaml and re-publish as static TF."""
+        path = str(self.get_parameter('camera_config_file').value)
+        try:
+            try:
+                with open(path) as f:
+                    cfg = _yaml.safe_load(f) or {}
+            except Exception:
+                cfg = {}
+            params = cfg.setdefault(
+                'static_transform_publisher', {}
+            ).setdefault('ros__parameters', {})
+            t = tf_matrix[:3, 3]
+            params['x'] = float(t[0])
+            params['y'] = float(t[1])
+            params['z'] = float(t[2])
+            params['tf_matrix'] = tf_matrix.tolist()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                _yaml.dump(cfg, f, default_flow_style=False)
+            self.get_logger().info(
+                f'Camera→base_link TF saved to {path} '
+                '(will load automatically on next startup)'
+            )
+        except Exception as e:
+            self.get_logger().warn(f'Could not save camera TF to {path}: {e}')
+
+        # Publish to /tf_static so RViz and other nodes see the camera frame
+        msg = TransformStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        msg.child_frame_id = 'camera_color_optical_frame'
+        t = tf_matrix[:3, 3]
+        qx, qy, qz, qw = _rotation_to_quaternion(tf_matrix[:3, :3])
+        msg.transform.translation.x = float(t[0])
+        msg.transform.translation.y = float(t[1])
+        msg.transform.translation.z = float(t[2])
+        msg.transform.rotation.x = float(qx)
+        msg.transform.rotation.y = float(qy)
+        msg.transform.rotation.z = float(qz)
+        msg.transform.rotation.w = float(qw)
+        self._static_broadcaster.sendTransform(msg)
+        self.get_logger().info('Camera→base_link static TF published to /tf_static')
+
     def _human_ready_callback(self, _: Empty) -> None:
         self.get_logger().info('human_ready - forcing move detection notify')
         self._turn_detector.trigger_keyboard_fallback()
@@ -345,6 +649,93 @@ class VisionNode(Node):
         else:
             response.success = False
             response.message = 'No board detected yet'
+        return response
+
+    def _get_board_transform_callback(self, _request, response):
+        """Compute board_to_base_tf and marker 3D positions from ArUco markers.
+
+        Uses cv2.solvePnP on the latest camera frame to estimate each marker's
+        3D position in camera frame, then transforms to base_link via TF2.
+        The static camera→base_link TF must be published (see camera_config.yaml).
+        """
+        image = self._last_camera_image
+        if image is None:
+            response.success = False
+            response.message = 'No camera image received yet'
+            return response
+
+        if self._camera_matrix is None:
+            response.success = False
+            response.message = 'Camera intrinsics not received yet (no CameraInfo message)'
+            return response
+
+        ok, _H, _dbg, corners_raw, ids_raw = self._board_detector.detect_full(image.copy())
+        if not ok or corners_raw is None:
+            diag = getattr(self._board_detector, '_last_detect_diag', '')
+            response.success = False
+            response.message = f'ArUco detection failed: {diag}'
+            return response
+
+        markers_cam = self._board_detector.estimate_corner_positions_3d(
+            corners_raw, ids_raw, self._camera_matrix, self._dist_coeffs
+        )
+        if markers_cam is None:
+            response.success = False
+            response.message = '3D pose estimation failed for one or more markers'
+            return response
+
+        # ── Resolve camera→base_link transform ────────────────────────
+        # Priority:
+        #   1. Already loaded (from camera_config.yaml or a previous auto-calibration)
+        #   2. Auto-calibrate now using board_calibration.yaml (saves for next time)
+        #   3. TF2 lookup (manual camera_config.yaml with x/y/z set)
+        if self._camera_to_base_matrix is not None:
+            R = self._camera_to_base_matrix[:3, :3]
+            t = self._camera_to_base_matrix[:3, 3]
+            markers_base = {mid: R @ pt + t for mid, pt in markers_cam.items()}
+        else:
+            self.get_logger().info(
+                'No camera TF yet — attempting one-time auto-calibration from board_calibration.yaml'
+            )
+            cam_tf = self._auto_calibrate_camera(markers_cam)
+            if cam_tf is not None:
+                self._camera_to_base_matrix = cam_tf
+                self._save_and_publish_camera_tf(cam_tf)
+                R = cam_tf[:3, :3]
+                t = cam_tf[:3, 3]
+                markers_base = {mid: R @ pt + t for mid, pt in markers_cam.items()}
+            else:
+                # Last resort: TF2 lookup (requires camera_config.yaml with valid x/y/z)
+                try:
+                    tf = self._tf_buffer.lookup_transform(
+                        'base_link', 'camera_color_optical_frame',
+                        RclpyTime(), timeout=RclpyDuration(seconds=1.0),
+                    )
+                    markers_base = {mid: _apply_transform(tf, pt) for mid, pt in markers_cam.items()}
+                except Exception as ex:
+                    response.success = False
+                    response.message = (
+                        f'Camera TF not available: {ex}.\n'
+                        'Auto-calibration also failed — board_calibration.yaml needs '
+                        'board_to_base_tf or calibration_corners_base.\n'
+                        'Fix: run calibration_tool once with the board in place, '
+                        'then call get_board_transform again.'
+                    )
+                    return response
+
+        board_tf = _compute_board_tf_from_markers(markers_base)
+
+        response.board_to_base = board_tf.flatten().tolist()
+        flat_centres = []
+        for mid in (0, 1, 2, 3):
+            flat_centres.extend(markers_base[mid].tolist())
+        response.marker_centres_base = flat_centres
+        response.success = True
+        response.message = 'OK'
+        self.get_logger().info(
+            'GetBoardTransform: board origin at '
+            f'({board_tf[0,3]:.3f}, {board_tf[1,3]:.3f}, {board_tf[2,3]:.3f}) m'
+        )
         return response
 
     # ------------------------------------------------------------------

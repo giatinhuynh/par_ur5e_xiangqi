@@ -250,6 +250,7 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
                 expected_fen = _bb_get(self._bb, 'expected_board_fen', '') or ''
                 parts = expected_fen.split()
                 captured_is_red = len(parts) > 1 and parts[1].strip().lower() == 'w'
+                self._bb.set('captured_piece_is_red', captured_is_red)
                 graveyard = translator.graveyard_pose(is_red_piece=captured_is_red)
                 self._bb.set('graveyard_pose', graveyard)
 
@@ -302,6 +303,7 @@ class FinalizeRobotMoveAfterVerify(py_trees.behaviour.Behaviour):
 
         bb.set('ai_move', None)
         bb.set('is_capture', False)
+        bb.set('captured_piece_is_red', None)
         bb.set('expected_board_fen', None)
         bb.set('current_dispatch_id', None)
         bb.set('verification_passed', False)
@@ -344,6 +346,7 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
             self._pub.publish(msg)
         bb.set('ai_move', None)
         bb.set('is_capture', False)
+        bb.set('captured_piece_is_red', None)
         bb.set('expected_board_fen', None)
         bb.set('current_dispatch_id', None)
         bb.set('verification_passed', False)

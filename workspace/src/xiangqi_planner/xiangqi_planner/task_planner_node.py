@@ -59,6 +59,7 @@ class TaskPlannerNode(Node):
         )
         self.declare_parameter('robot_plays_red', True)
         self.declare_parameter('verify_grid_tolerance', 6)
+        self.declare_parameter('graveyard_slot_x', 0.25)
 
         self._bb = py_trees.blackboard.Blackboard()
         self._bb.set('ai_move', None)
@@ -135,7 +136,8 @@ class TaskPlannerNode(Node):
                 )
                 self._bb.set('move_translator', None)
                 return
-            translator = MoveTranslator(cal)
+            slot_x = float(self.get_parameter('graveyard_slot_x').value)
+            translator = MoveTranslator(cal, graveyard_slot_x=slot_x)
             self._bb.set('move_translator', translator)
             self.get_logger().info(f'MoveTranslator loaded from {cal_path}')
         except Exception as e:

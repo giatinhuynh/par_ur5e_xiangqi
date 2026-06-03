@@ -1,11 +1,17 @@
 # Execute a full robot move (pick + optional capture + place + verify).
-string move          # Coordinate notation e.g. "h0g2"
-string fen_before    # Board FEN before this move (for verification)
-bool is_capture      # True if destination has an opponent piece to remove first
-int8 captured_piece  # Piece type code of the captured piece (0 if not a capture)
+string move           # Coordinate notation e.g. "h0g2"
+string expected_fen   # Board FEN after this move (used for post-execution verification)
+bool is_capture       # True if destination has an opponent piece to remove first
+int8 captured_piece   # Piece type code of the captured piece (0 if not a capture)
+int32 retry_attempt   # 0 for first attempt; planner lowers grasp-z on each retry
 ---
+uint8 ROBOT_MOVE_COMPLETE=0
+uint8 BOARD_VERIFY_FAILED=1
+uint8 AI_MOTION_FAILED=2
+
 bool success
-string final_fen     # Board FEN after execution
+uint8 status_code
+string final_fen     # Board FEN after execution (empty if not available)
 string message
 ---
 string phase         # "capturing" | "picking" | "placing" | "verifying" | "done"

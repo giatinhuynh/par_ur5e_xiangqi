@@ -46,6 +46,10 @@ pip3 uninstall -y numpy opencv-python opencv-python-headless 2>/dev/null || true
 pip3 install --no-cache-dir \
   pymodbus==2.5.3 ultralytics flask flask-cors flask-socketio eventlet scipy \
   'opencv-python>=4.6.0,<4.10.0' 'numpy>=1.23,<2'
+# ONNX stack last — its deps can upgrade numpy/opencv; re-pin for ROS cv_bridge.
+pip3 install --no-cache-dir onnx onnxruntime
+pip3 install --no-cache-dir --force-reinstall \
+  'opencv-python>=4.6.0,<4.10.0' 'numpy>=1.23,<2'
 
 WS=/home/rosuser/workspace/src
 if ! python3 -c "import py_trees_ros" 2>/dev/null; then
@@ -73,4 +77,4 @@ if ! command -v fairy-stockfish >/dev/null 2>&1 || ! python3 -c "import pyffish"
   install_fairy_stockfish
 fi
 
-python3 -c "import ultralytics, py_trees, pyffish; print('deps OK')"
+python3 -c "import ultralytics, onnxruntime, py_trees, pyffish; print('deps OK')"

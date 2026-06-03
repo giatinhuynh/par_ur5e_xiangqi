@@ -20,17 +20,20 @@ Tree structure:
 
 from __future__ import annotations
 import os
+import threading
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionServer
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool
 
 import py_trees
 import py_trees.trees
 
+from xiangqi_msgs.action import ExecuteMove
 from xiangqi_msgs.msg import GameStatus
-from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck
 
 from xiangqi_manipulation.move_translator import BoardCalibration, MoveTranslator
 from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
@@ -50,8 +53,6 @@ from .behaviours.pick_and_place import PickPieceBehaviour, PlaceInGraveyardBehav
 class TaskPlannerNode(Node):
     def __init__(self):
         super().__init__('task_planner_node')
-
-        self._ack_pub = self.create_publisher(AiCommandAck, '/xiangqi/ai_command_ack', 10)
 
         self.declare_parameter(
             'calibration_file',
@@ -90,13 +91,22 @@ class TaskPlannerNode(Node):
 
         cb_group = ReentrantCallbackGroup()
 
-        self.create_subscription(
-            AiMoveCommand,
-            '/xiangqi/ai_move_command',
-            self._ai_move_command_cb,
-            10,
+        # Action server: replaces the old AiMoveCommand topic + AiCommandAck publisher.
+        # execute_move_callback blocks in a thread until the BT completes the goal.
+        self._action_server = ActionServer(
+            self,
+            ExecuteMove,
+            '/xiangqi/execute_move',
+            self._execute_move_callback,
             callback_group=cb_group,
         )
+
+        # Threading primitives for signalling from BT finaliser → execute callback
+        self._action_lock = threading.Lock()
+        self._action_done_event: threading.Event | None = None
+        self._action_final_status: int = ExecuteMove.Result.ROBOT_MOVE_COMPLETE
+        self._action_final_message: str = ''
+
         self.create_subscription(
             Bool, '/xiangqi/human_move_detected', self._human_move_detected_cb, 10,
             callback_group=cb_group,
@@ -115,7 +125,7 @@ class TaskPlannerNode(Node):
 
         self._tick_timer = self.create_timer(0.1, self._tick_tree)
 
-        self.get_logger().info('task_planner_node started (BT running at 10 Hz)')
+        self.get_logger().info('task_planner_node started (BT at 10 Hz, ExecuteMove action server)')
 
     def _bb_get(self, key: str, default=None):
         """Compatibility wrapper: py_trees Blackboard.get() may not accept a default argument."""
@@ -150,41 +160,74 @@ class TaskPlannerNode(Node):
             self.get_logger().error(f'Failed to load MoveTranslator: {e}')
             self._bb.set('move_translator', None)
 
-    def _ai_move_command_cb(self, msg: AiMoveCommand) -> None:
-        """Atomic AI dispatch: move, capture flag, expected FEN, monotonic dispatch_id."""
-        dispatch_id = int(msg.dispatch_id)
-        move = msg.move
-        is_capture = bool(msg.is_capture)
-        expected_fen = msg.expected_fen
+    def _execute_move_callback(self, goal_handle) -> ExecuteMove.Result:
+        """Action server execute callback — blocks until the BT completes the goal."""
+        req = goal_handle.request
 
-        busy_move = self._bb_get('ai_move')
-        current_id = self._bb_get('current_dispatch_id')
-        if busy_move is not None:
-            if current_id is not None and dispatch_id == current_id:
-                return
-            nack = AiCommandAck()
-            nack.dispatch_id = dispatch_id
-            nack.accepted = False
-            nack.reason = f'busy (current_dispatch_id={current_id})'
-            self._ack_pub.publish(nack)
-            self.get_logger().warn(
-                f'NACK ai_move_command id={dispatch_id} (busy with id={current_id})'
-            )
-            return
+        with self._action_lock:
+            if self._bb_get('ai_move') is not None:
+                self.get_logger().warn('ExecuteMove rejected: planner already busy')
+                result = ExecuteMove.Result()
+                result.success = False
+                result.status_code = ExecuteMove.Result.AI_MOTION_FAILED
+                result.message = 'planner busy'
+                goal_handle.abort()
+                return result
 
-        self._bb.set('current_dispatch_id', dispatch_id)
-        self._bb.set('expected_board_fen', expected_fen)
-        self._bb.set('is_capture', is_capture)
-        self._bb.set('ai_move', move)
-        self._bb.set('retry_attempt', int(msg.retry_attempt))
-        ack = AiCommandAck()
-        ack.dispatch_id = dispatch_id
-        ack.accepted = True
-        ack.reason = ''
-        self._ack_pub.publish(ack)
+            done_event = threading.Event()
+            self._action_done_event = done_event
+            self._action_final_status = ExecuteMove.Result.ROBOT_MOVE_COMPLETE
+            self._action_final_message = ''
+
+        # Populate blackboard so the BT can start on the next tick
+        self._bb.set('ai_move', req.move)
+        self._bb.set('expected_board_fen', req.expected_fen)
+        self._bb.set('is_capture', req.is_capture)
+        self._bb.set('retry_attempt', int(req.retry_attempt))
+        self._bb.set('current_dispatch_id', id(goal_handle))
         self.get_logger().info(
-            f'AI dispatch id={dispatch_id} move={move} capture={is_capture}'
+            f'ExecuteMove accepted: move={req.move} capture={req.is_capture} '
+            f'retry={req.retry_attempt}'
         )
+
+        # Wait for BT to signal completion (or cancellation from game_manager estop)
+        while not done_event.wait(timeout=0.05):
+            if goal_handle.is_cancel_requested:
+                with self._action_lock:
+                    self._action_done_event = None
+                self._bb.set('ai_move', None)
+                self._bb.set('current_dispatch_id', None)
+                self.get_logger().info('ExecuteMove cancelled')
+                goal_handle.canceled()
+                result = ExecuteMove.Result()
+                result.success = False
+                result.status_code = ExecuteMove.Result.AI_MOTION_FAILED
+                result.message = 'cancelled'
+                return result
+
+        with self._action_lock:
+            status = self._action_final_status
+            message = self._action_final_message
+            self._action_done_event = None
+
+        result = ExecuteMove.Result()
+        result.status_code = status
+        result.success = (status == ExecuteMove.Result.ROBOT_MOVE_COMPLETE)
+        result.message = message
+        if result.success:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
+        return result
+
+    def signal_action_complete(self, status: int, message: str = '') -> None:
+        """Called by BT finaliser behaviours when the move sequence ends."""
+        with self._action_lock:
+            self._action_final_status = status
+            self._action_final_message = message
+            event = self._action_done_event
+        if event is not None:
+            event.set()
 
     def _human_move_detected_cb(self, msg: Bool) -> None:
         self._bb.set('human_move_detected', msg.data)
@@ -192,12 +235,16 @@ class TaskPlannerNode(Node):
     def _estop_cb(self, msg: Bool) -> None:
         self._bb.set('estop_active', msg.data)
         if msg.data and self._bb_get('ai_move') is not None:
-            self.get_logger().warn('E-stop: clearing planner move blackboard')
+            self.get_logger().warn('E-stop: clearing planner blackboard')
             self._bb.set('ai_move', None)
             self._bb.set('is_capture', False)
             self._bb.set('expected_board_fen', None)
             self._bb.set('verification_passed', False)
             self._bb.set('current_dispatch_id', None)
+            # Unblock any waiting execute_callback so it can return cancelled
+            self.signal_action_complete(
+                ExecuteMove.Result.AI_MOTION_FAILED, 'e-stop asserted'
+            )
 
     def _game_status_cb(self, msg: GameStatus) -> None:
         # Could extend GameStatus with robot side; keep launch parameter as source of truth
@@ -283,8 +330,12 @@ class TaskPlannerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = TaskPlannerNode()
+    # MultiThreadedExecutor required: the action execute_callback blocks on a
+    # threading.Event while the BT tick timer runs concurrently.
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

@@ -10,9 +10,19 @@
 set -euo pipefail
 
 CONTAINER="${CONTAINER:-ros2}"
-MARKER="${XIANGQI_DEPS_MARKER:-/opt/xiangqi_deps_installed_v1}"
+MARKER="${XIANGQI_DEPS_MARKER:-/opt/xiangqi_deps_installed_v2}"
 REPO="${REPO:-$HOME/par_ur5e_xiangqi}"
 DEPS_SCRIPT="$REPO/tools/lab_container_deps.sh"
+EXPORT_SCRIPT="$REPO/tools/lab_export_yolo_onnx.sh"
+
+_ensure_yolo_onnx() {
+  if [[ "${SKIP_ONNX_EXPORT:-}" == "1" ]]; then
+    return 0
+  fi
+  if [[ -x "$EXPORT_SCRIPT" ]]; then
+    REPO="$REPO" CONTAINER="$CONTAINER" "$EXPORT_SCRIPT"
+  fi
+}
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
   echo "Container '$CONTAINER' is not running. Start UR5e_Env first:"
@@ -24,19 +34,21 @@ _deps_satisfied() {
   docker exec "$CONTAINER" bash -c '
     source /opt/ros/humble/setup.bash
     python3 -c "import numpy; assert numpy.__version__.startswith(\"1.\")" >/dev/null 2>&1 &&
-    python3 -c "import ultralytics, py_trees, flask, pyffish" >/dev/null 2>&1 &&
+    python3 -c "import ultralytics, onnxruntime, py_trees, flask, pyffish" >/dev/null 2>&1 &&
     command -v fairy-stockfish >/dev/null
   ' 2>/dev/null
 }
 
 if docker exec "$CONTAINER" test -f "$MARKER" 2>/dev/null && _deps_satisfied; then
   echo "OK: Xiangqi deps already present ($MARKER in $CONTAINER)."
+  _ensure_yolo_onnx
   exit 0
 fi
 
 if _deps_satisfied; then
   docker exec -u root "$CONTAINER" touch "$MARKER" 2>/dev/null || true
   echo "OK: Xiangqi deps verified (marker updated)."
+  _ensure_yolo_onnx
   exit 0
 fi
 
@@ -65,19 +77,24 @@ if ! docker exec "$CONTAINER" python3 -c "import pyffish" 2>/dev/null; then
   '
 fi
 
-echo "Building py_trees_ros in workspace (if present)..."
+echo "Building py_trees_ros in workspace (if needed)..."
 docker exec -u rosuser -w /home/rosuser/workspace "$CONTAINER" bash -lc '
   set -e
   source /opt/ros/humble/setup.bash
-  if [[ -d src/py_trees_ros ]]; then
-    colcon build --packages-select py_trees_ros_interfaces py_trees_ros --symlink-install
+  source install/setup.bash 2>/dev/null || true
+  if python3 -c "import py_trees_ros" 2>/dev/null; then
+    echo "py_trees_ros already available — skip colcon rebuild"
+  elif [[ -d src/py_trees_ros ]]; then
+    rm -rf build/py_trees_ros_interfaces build/py_trees_ros \
+      install/py_trees_ros_interfaces install/py_trees_ros 2>/dev/null || true
+    colcon build --packages-select py_trees_ros_interfaces py_trees_ros
   fi
 '
 
 echo "Verifying imports..."
 if ! docker exec "$CONTAINER" bash -c '
   source /opt/ros/humble/setup.bash
-  python3 -c "import ultralytics, py_trees, flask, pyffish; print(\"pip OK\")"
+  python3 -c "import ultralytics, onnxruntime, py_trees, flask, pyffish; print(\"pip OK\")"
   command -v fairy-stockfish >/dev/null && echo "fairy-stockfish OK"
 '; then
   echo "ERROR: dependency verification failed (see above)."
@@ -94,4 +111,5 @@ docker exec -u rosuser -w /home/rosuser/workspace "$CONTAINER" bash -lc '
 
 docker exec -u root "$CONTAINER" touch "$MARKER"
 echo "Done. Marker written: $MARKER"
+_ensure_yolo_onnx
 echo "Relaunch: source ~/workspace/install/setup.bash && ros2 launch xiangqi_bringup xiangqi_system.launch.py simulation_mode:=false"

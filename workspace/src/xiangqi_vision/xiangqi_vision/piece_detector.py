@@ -125,21 +125,36 @@ def _yolo_model_names(model: 'YOLO') -> Union[Dict[int, str], List[str], None]:
 
 
 def _trained_imgsz_from_model(model: 'YOLO') -> int | None:
-    """Read imgsz from Ultralytics checkpoint train_args (e.g. v8 @ 1024, v4 @ 640)."""
+    """Read imgsz from Ultralytics model metadata.
+
+    Checks (in order):
+      1. ckpt.train_args  — .pt weights trained with Ultralytics
+      2. model.overrides  — populated for TensorRT .engine and ONNX exports
+    Returns None when neither source has the value (caller falls back to 640).
+    For TensorRT engines set yolo_imgsz explicitly to match the export imgsz.
+    """
     ckpt = getattr(model, 'ckpt', None)
-    if not isinstance(ckpt, dict):
-        return None
-    ta = ckpt.get('train_args')
-    if ta is None:
-        return None
-    imgsz = getattr(ta, 'imgsz', None)
-    if imgsz is None and isinstance(ta, dict):
-        imgsz = ta.get('imgsz')
-    if imgsz is None:
-        return None
-    if isinstance(imgsz, (list, tuple)):
-        return int(max(imgsz))
-    return int(imgsz)
+    if isinstance(ckpt, dict):
+        ta = ckpt.get('train_args')
+        if ta is not None:
+            imgsz = getattr(ta, 'imgsz', None)
+            if imgsz is None and isinstance(ta, dict):
+                imgsz = ta.get('imgsz')
+            if imgsz is not None:
+                if isinstance(imgsz, (list, tuple)):
+                    return int(max(imgsz))
+                return int(imgsz)
+
+    # TensorRT / ONNX exports store metadata in model.overrides
+    overrides = getattr(model, 'overrides', None)
+    if isinstance(overrides, dict):
+        imgsz = overrides.get('imgsz')
+        if imgsz is not None:
+            if isinstance(imgsz, (list, tuple)):
+                return int(max(imgsz))
+            return int(imgsz)
+
+    return None
 
 
 class Detection:

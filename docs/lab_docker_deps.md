@@ -1,6 +1,6 @@
 # Lab Docker: persistent Xiangqi dependencies
 
-The stock UR5e_Env image (`ros:humble`) has ROS + arm drivers but **not** Ultralytics, Flask, Fairy-Stockfish, or pyffish. Those live in this repo’s [Dockerfile](../Dockerfile).
+The stock UR5e_Env image (`ros:humble`) has ROS + arm drivers but **not** Ultralytics, ONNX runtime, Flask, Fairy-Stockfish, or pyffish. Those live in this repo’s [Dockerfile](../Dockerfile) (`ultralytics`, `onnx`, `onnxruntime` for optional CPU `.onnx` inference).
 
 ## Recommended: `./docker-xiangqi.sh` in `~/UR5e_Env` (replaces `./docker-start.sh`)
 
@@ -62,10 +62,26 @@ No manual `lab_ensure_deps.sh` needed in most cases when the extended image exis
 ~/par_ur5e_xiangqi/tools/lab_ensure_deps.sh
 ```
 
+## ONNX weights (optional, faster CPU inference)
+
+**Automatic:** `./docker-xiangqi.sh` runs `lab_ensure_deps.sh`, which calls `lab_export_yolo_onnx.sh` when
+`/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt` exists and `.onnx` is missing or older than `.pt`.
+
+```bash
+# Manual export only
+~/par_ur5e_xiangqi/tools/lab_export_yolo_onnx.sh
+FORCE_ONNX_EXPORT=1 ~/par_ur5e_xiangqi/tools/lab_export_yolo_onnx.sh
+SKIP_ONNX_EXPORT=1 ./docker-xiangqi.sh   # deps yes, export no
+```
+
+Point `vision_config.yaml` at the `.onnx` and set `yolo_imgsz: 640`. Marker **`xiangqi_deps_installed_v2`** includes `onnxruntime`; older `v1` containers re-run `lab_ensure_deps.sh` on next `./docker-xiangqi.sh`.
+
+**Not in `ros2 launch`:** export takes minutes and blocks startup — keep it in the docker start scripts only.
+
 ## When to re-run
 
 | Event | Action |
 |-------|--------|
 | Daily start | **`docker-start-xiangqi.sh`** |
 | `./docker-build.sh` (new `ros:humble`) | **`docker-start-xiangqi.sh`** (re-installs deps if needed) |
-| Rebuilt `ur5e_xiangqi:latest` | **`docker-start-xiangqi.sh`** |
+| Rebuilt `ur5e_xiangqi:latest` | **`docker-start-xiangqi.sh`** or rebuild image from updated Dockerfile |

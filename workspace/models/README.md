@@ -7,6 +7,7 @@ Mounted in Docker as `/home/rosuser/workspace/models/`. Referenced by `xiangqi_b
 | `xiangqi_kaggle_v1_best.pt` | yes | Legacy / backup |
 | `xiangqi_kaggle_v2_best.pt` | yes | Legacy |
 | `xiangqi_kaggle_v4_best.pt` | yes | **Current default** in `vision_config.yaml` |
+| `xiangqi_kaggle_v4_best.onnx` | no | Optional CPU export (not used by default) |
 | `xiangqi_kaggle_v8_best.pt` | no | Experimental (YOLOv8x @ 1024; poor on lab warp) |
 | `xiangqi_kaggle_v3_best.pt` | no | Too large for GitHub (>100 MB) — keep locally or fetch via URL |
 

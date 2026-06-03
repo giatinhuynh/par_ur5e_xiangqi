@@ -71,18 +71,28 @@
           </div>
         </div>
         <canvas id="board-canvas" width="480" height="533"></canvas>
-        <div id="coord-files">
-          <span>a</span><span>b</span><span>c</span><span>d</span><span>e</span>
-          <span>f</span><span>g</span><span>h</span><span>i</span>
+        <div class="coord-files">
+          <span>i</span><span>h</span><span>g</span><span>f</span><span>e</span>
+          <span>d</span><span>c</span><span>b</span><span>a</span>
         </div>
-        <div id="coord-ranks-left">
-          <span>10</span><span>9</span><span>8</span><span>7</span><span>6</span>
-          <span>5</span><span>4</span><span>3</span><span>2</span><span>1</span>
+        <div class="coord-ranks-left">
+          <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
+          <span>6</span><span>7</span><span>8</span><span>9</span><span>10</span>
         </div>
       </div>
       <div class="fen-board-section">
         <div class="fen-board-label">FEN Board (game state)</div>
-        <canvas id="fen-board-canvas" width="480" height="533"></canvas>
+        <div class="board-canvas-wrapper">
+          <canvas id="fen-board-canvas" width="480" height="533"></canvas>
+          <div class="coord-files">
+            <span>i</span><span>h</span><span>g</span><span>f</span><span>e</span>
+            <span>d</span><span>c</span><span>b</span><span>a</span>
+          </div>
+          <div class="coord-ranks-left">
+            <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
+            <span>6</span><span>7</span><span>8</span><span>9</span><span>10</span>
+          </div>
+        </div>
       </div>
       <div id="phase-chip" class="phase-chip">Setup</div>
       <div id="turn-indicator">

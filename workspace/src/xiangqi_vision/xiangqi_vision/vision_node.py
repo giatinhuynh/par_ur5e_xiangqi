@@ -28,7 +28,7 @@ import yaml as _yaml
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from rclpy.time import Time as RclpyTime
 from rclpy.duration import Duration as RclpyDuration
 from std_msgs.msg import Bool, Header, Empty
@@ -225,6 +225,8 @@ class VisionNode(Node):
         self.declare_parameter('require_yolo_weights', True)
         self.declare_parameter('yolo_download_url', '')
         self.declare_parameter('confidence_threshold', 0.5)
+        # 0 = use imgsz from checkpoint train_args (v4 → 640)
+        self.declare_parameter('yolo_imgsz', 0)
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('grid_smooth_frames', 3)
         self.declare_parameter('poll_rate_hz', 3.0)
@@ -250,6 +252,7 @@ class VisionNode(Node):
         model_path_param = self.get_parameter('model_path').value
         cal_file = resolve_calibration_path(self.get_parameter('calibration_file').value, self.get_logger())
         conf_thresh = self.get_parameter('confidence_threshold').value
+        yolo_imgsz = int(self.get_parameter('yolo_imgsz').value)
         stability = self.get_parameter('stability_frames').value
         grid_smooth = int(self.get_parameter('grid_smooth_frames').value)
         self._poll_rate = self.get_parameter('poll_rate_hz').value
@@ -274,7 +277,9 @@ class VisionNode(Node):
         )
         if resolved_model:
             try:
-                self._piece_detector = PieceDetector(resolved_model, conf_thresh)
+                self._piece_detector = PieceDetector(
+                    resolved_model, conf_thresh, yolo_imgsz=yolo_imgsz,
+                )
                 self.get_logger().info(f'YOLOv8 model loaded from {resolved_model}')
             except Exception as e:
                 self.get_logger().error(f'Failed to load YOLO model: {e}')
@@ -349,7 +354,6 @@ class VisionNode(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
 
         # --- Subscriptions ---
@@ -823,23 +827,30 @@ class VisionNode(Node):
         warped = self._board_detector.warp_board(image, H)
         preprocess_cfg = self._piece_preprocess_config()
         yolo_input = apply_piece_preprocess(warped, preprocess_cfg)
+        # Flip horizontally so the debug image matches the dashboard orientation (a0 top-right).
+        # YOLO runs on the flipped image; file indices are remapped back below.
+        yolo_flipped = cv2.flip(yolo_input, 1)
 
         grid = np.zeros(90, dtype=np.int8)
+        cell_conf = np.zeros(90, dtype=np.float32)
         mean_conf = 0.0
 
         if self._piece_detector is not None:
-            detections, annotated = self._piece_detector.detect(yolo_input)
-            raw_grid = self._piece_detector.detections_to_grid(detections)
+            detections, annotated = self._piece_detector.detect(yolo_flipped)
+            # Remap file: horizontal flip mirrors file 0↔8
+            for det in detections:
+                det.file = 8 - det.file
+            raw_grid, cell_conf = self._piece_detector.detections_to_grid(detections)
             # Apply per-cell temporal smoothing - a cell value only commits
             # after `grid_smooth_frames` consecutive agreeing detections.
             grid = self._grid_stabilizer.update(raw_grid)
             mean_conf = self._piece_detector.mean_confidence(detections)
             if bool(self.get_parameter('debug_show_preprocess').value):
-                debug_out = stack_comparison(warped, yolo_input, annotated)
+                debug_out = stack_comparison(cv2.flip(warped, 1), yolo_flipped, annotated)
             else:
                 debug_out = annotated
         else:
-            debug_out = yolo_input if preprocess_cfg.enabled else warped
+            debug_out = yolo_flipped if preprocess_cfg.enabled else cv2.flip(warped, 1)
 
         msg = BoardState()
         msg.header = Header()
@@ -847,6 +858,7 @@ class VisionNode(Node):
         msg.header.frame_id = 'camera_color_optical_frame'
         msg.grid = grid.tolist()
         msg.detection_confidence = mean_conf
+        msg.cell_confidence = cell_conf.tolist()
         msg.fen = grid_to_fen(msg.grid)
 
         move_detected = False

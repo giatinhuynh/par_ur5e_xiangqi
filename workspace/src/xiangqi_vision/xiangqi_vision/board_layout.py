@@ -114,8 +114,24 @@ def norm_pixel_at_intersection(file_idx: int, rank_idx: int) -> Tuple[float, flo
     return px, py
 
 
+def _cell_pixel_spacing() -> float:
+    """Pixel distance between adjacent grid intersections in the warped image."""
+    x0, y0 = norm_pixel_at_intersection(0, 0)
+    x1, y1 = norm_pixel_at_intersection(1, 0)
+    return math.hypot(x1 - x0, y1 - y0)
+
+
+# Detections further than this from any intersection are outside the board (e.g. graveyard).
+# Set to 0.6 × cell spacing: board pieces are typically < 30 px away; graveyard pieces > 60 px.
+_MAX_SNAP_DIST_SQ: float = (_cell_pixel_spacing() * 0.6) ** 2
+
+
 def pixel_to_grid(px: float, py: float) -> Tuple[int, int]:
-    """Snap to the closest of 90 intersections (handles inset grid vs margin warp)."""
+    """Snap to the closest of 90 intersections.
+
+    Returns (-1, -1) if the nearest intersection is farther than _MAX_SNAP_DIST_SQ,
+    which means the detection is outside the board (e.g. in the graveyard).
+    """
     best_f, best_r = -1, -1
     best_d = math.inf
     for f in range(BOARD_FILES):
@@ -125,4 +141,6 @@ def pixel_to_grid(px: float, py: float) -> Tuple[int, int]:
             if d < best_d:
                 best_d = d
                 best_f, best_r = f, r
+    if best_d > _MAX_SNAP_DIST_SQ:
+        return -1, -1
     return best_f, best_r

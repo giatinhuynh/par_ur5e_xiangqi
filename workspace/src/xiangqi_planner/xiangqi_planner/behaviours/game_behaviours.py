@@ -236,7 +236,15 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         try:
-            approach_pick, grasp, lift, approach_place, place = translator.move_to_poses(move)
+            retry_attempt = int(_bb_get(self._bb, 'retry_attempt', 0))
+            grasp_height = translator._grasp_height_m()
+            if retry_attempt > 0:
+                # Descend progressively lower on each retry (attempt 1 → 1×, 2 → 2×, ...).
+                lower = float(_bb_get(self._bb, 'grasp_z_lower_on_retry_m', 0.005))
+                grasp_height = max(0.0, grasp_height - lower * retry_attempt)
+            approach_pick, grasp, lift, approach_place, place = translator.move_to_poses(
+                move, grasp_height=grasp_height
+            )
             self._bb.set('pick_pose', grasp)
             self._bb.set('place_pose', place)
             self._bb.set('approach_height', translator._approach_height_m())

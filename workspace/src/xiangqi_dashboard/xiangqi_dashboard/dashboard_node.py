@@ -331,21 +331,28 @@ def api_sync_board():
     return jsonify({'ok': True})
 
 
-_SCAN_ROUNDS = 7
+_SCAN_ROUNDS = 3
 _SCAN_INTERVAL = 0.35  # seconds between rounds (matches game_manager startup scan)
 
 
-def _best_frame_grid(grids: list) -> list:
-    """Return the single frame that detected the most pieces.
+def _best_cell_grid(grids: list, cell_confs: list) -> list:
+    """Per-cell max-confidence selection across all scan rounds.
 
-    Using the densest frame avoids majority-vote artifacts where pieces detected
-    in most-but-not-all frames get zeroed out, and keeps the board coherent (a
-    real snapshot rather than a cell-by-cell reconstruction).
+    For each of the 90 cells, pick the piece type from whichever round had the
+    highest YOLO confidence for that cell. Empty cells (code 0) are always
+    overridden by any detection, no matter how low its confidence.
     """
-    return max(grids, key=lambda g: sum(1 for v in g if v != 0))
+    best_grid = [0] * 90
+    best_conf = [0.0] * 90
+    for grid, confs in zip(grids, cell_confs):
+        for i in range(90):
+            if grid[i] != 0 and confs[i] > best_conf[i]:
+                best_conf[i] = confs[i]
+                best_grid[i] = grid[i]
+    return best_grid
 
 
-def _call_get_board_state(cli, timeout: float = 4.0):
+def _call_get_board_state(cli, timeout: float = 12.0):
     """Call GetBoardState synchronously from a Flask thread; returns response or None."""
     result_holder = [None]
     done_event = threading.Event()
@@ -375,11 +382,20 @@ def api_scan_board():
         if status not in ('idle', 'game_over'):
             return jsonify({'ok': False, 'error': 'Cannot scan during a game'}), 409
     cli = _ros_publishers.get('get_board_state_cli')
+    # Wait up to 5 s for the vision service to become available (common on startup
+    # or immediately after a slow YOLO detection frame).
+    _SERVICE_WAIT_S = 15.0
+    _SERVICE_POLL_S = 0.25
+    waited = 0.0
+    while (cli is None or not cli.service_is_ready()) and waited < _SERVICE_WAIT_S:
+        time.sleep(_SERVICE_POLL_S)
+        waited += _SERVICE_POLL_S
+        cli = _ros_publishers.get('get_board_state_cli')
     if cli is None or not cli.service_is_ready():
         with _state_lock:
             _state['board_scan_status'] = 'fail'
             _state['_dirty'] = True
-        return jsonify({'ok': False, 'error': 'Vision service not ready'}), 503
+        return jsonify({'ok': False, 'error': 'Vision service not ready — check vision node'}), 503
 
     with _state_lock:
         _state['board_scan_status'] = 'scanning'
@@ -387,6 +403,7 @@ def api_scan_board():
         _state['_dirty'] = True
 
     grids: list = []
+    cell_confs: list = []
     last_fen: str = ''
     for i in range(_SCAN_ROUNDS):
         if i > 0:
@@ -394,6 +411,7 @@ def api_scan_board():
         resp = _call_get_board_state(cli)
         if resp is not None and resp.success and resp.board_state is not None:
             grids.append(list(resp.board_state.grid))
+            cell_confs.append(list(resp.board_state.cell_confidence) if len(resp.board_state.cell_confidence) == 90 else [0.0] * 90)
             if resp.board_state.fen:
                 last_fen = resp.board_state.fen
 
@@ -403,7 +421,7 @@ def api_scan_board():
             _state['_dirty'] = True
         return jsonify({'ok': False, 'error': 'Board not detected — check camera and ArUco markers'}), 503
 
-    best_grid = _best_frame_grid(grids)
+    best_grid = _best_cell_grid(grids, cell_confs)
     piece_count = sum(1 for x in best_grid if x != 0)
 
     # Rebuild FEN from best frame, using the last scanned FEN for the metadata tail
@@ -809,12 +827,17 @@ class DashboardNode(Node):
         self._mode_synced = False
 
         # --- Glitch-filter state (hardware mode) ---
-        # Board grid hold: only push a new grid to the UI after it has been
-        # seen in N consecutive vision messages (or confidence is high).
-        self._prev_board_grid: list | None = None
-        self._board_grid_repeat: int = 0
-        self._BOARD_GRID_HOLD = 2        # consecutive identical msgs before UI update
-        self._BOARD_CONF_BYPASS = 0.65   # high-confidence frames skip the hold
+        # Per-cell hysteresis: pieces register immediately when seen; only
+        # disappear after N consecutive absent frames.
+        # Idle/scanning: high threshold (anti-jitter).
+        # Active game: low threshold (moves must reflect quickly).
+        self._stable_display_grid: list = [0] * 90
+        self._cell_absence_count: list = [0] * 90
+        # Per-cell highest YOLO confidence seen, so the displayed piece type locks to
+        # the most confident reading and never jitters down to a lower-confidence type.
+        self._cell_best_confidence: list = [0.0] * 90
+        self._CELL_ABSENCE_THRESHOLD_IDLE = 2
+        self._CELL_ABSENCE_THRESHOLD_GAME = 2
         # Post-move lock: after the game manager publishes an authoritative board
         # (conf=1.0), suppress all vision grid updates for this many seconds so
         # jittery YOLO frames can't overwrite the clean post-move display.
@@ -906,20 +929,19 @@ class DashboardNode(Node):
             # Ignore all /xiangqi/board_state messages to avoid camera data leaking in.
             if _state.get('simulation_mode', False):
                 return
-            # On hardware, apply a hold filter: only update the displayed grid
-            # when the same grid arrives in N consecutive messages OR confidence
-            # is high enough to trust a single frame.
             new_grid = [int(x) for x in msg.grid]
             conf = float(msg.detection_confidence)
             if conf >= 0.999:
                 # Authoritative logical board from game manager (post-move FEN).
+                # Sync hysteresis state so vision resumes from the correct baseline.
+                self._stable_display_grid = list(new_grid)
+                self._cell_absence_count = [0] * 90
+                self._cell_best_confidence = [0.0] * 90
                 _state['board_grid'] = new_grid
                 _state['board_source'] = 'game'
                 if msg.fen:
                     _state['fen'] = msg.fen
                 _state['detection_confidence'] = conf
-                self._prev_board_grid = new_grid
-                self._board_grid_repeat = self._BOARD_GRID_HOLD
                 self._post_move_lock_until = time.time() + self._POST_MOVE_LOCK_SECS
                 _state['_dirty'] = True
                 return
@@ -928,22 +950,43 @@ class DashboardNode(Node):
                 _state['detection_confidence'] = conf
                 _state['_dirty'] = True
                 return
-            if new_grid == self._prev_board_grid:
-                self._board_grid_repeat += 1
-            else:
-                self._board_grid_repeat = 0
-                self._prev_board_grid = new_grid
-            # Suppress the UI update unless the grid is stable or high-confidence
-            if self._board_grid_repeat < self._BOARD_GRID_HOLD and conf < self._BOARD_CONF_BYPASS:
-                # Still update non-grid metadata (confidence) but not the grid.
-                # Do not copy is_red_turn from vision - BoardState from camera often
-                # leaves it unset; game_status is authoritative for side to move.
-                _state['detection_confidence'] = conf
-                if msg.fen:
-                    _state['fen'] = msg.fen
-                _state['_dirty'] = True
-                return
-            _state['board_grid'] = new_grid
+            # "What the robot is seeing" is the raw vision view, so each cell tracks
+            # what YOLO detects directly:
+            #   - a piece registers IMMEDIATELY the first frame it is seen at a cell, and
+            #   - each cell locks its piece TYPE to the highest-confidence reading seen
+            #     (never downgraded by a lower-confidence frame), so it doesn't jitter.
+            # A cell clears once the piece is absent for N consecutive frames (it left),
+            # which also resets the per-cell best confidence.
+            game_status = _state.get('game_status', 'idle')
+            in_game = game_status not in ('idle', 'game_over')
+            threshold = (
+                self._CELL_ABSENCE_THRESHOLD_IDLE
+                if not in_game
+                else self._CELL_ABSENCE_THRESHOLD_GAME
+            )
+            # Per-cell confidence (0.0 when the field is absent/wrong length).
+            cell_conf = (
+                [float(c) for c in msg.cell_confidence]
+                if len(msg.cell_confidence) == 90
+                else [0.0] * 90
+            )
+            for i in range(90):
+                vision_has = new_grid[i] != 0
+                stable_has = self._stable_display_grid[i] != 0
+                if vision_has:
+                    self._cell_absence_count[i] = 0
+                    # Register on first sight, and keep the highest-confidence type.
+                    if not stable_has or cell_conf[i] > self._cell_best_confidence[i]:
+                        self._stable_display_grid[i] = new_grid[i]
+                        self._cell_best_confidence[i] = cell_conf[i]
+                    # else: keep the locked best-confidence type (ignore lower-conf jitter).
+                else:
+                    self._cell_absence_count[i] += 1
+                    if self._cell_absence_count[i] >= threshold and stable_has:
+                        # Piece left this square — clear it and reset its best confidence.
+                        self._stable_display_grid[i] = 0
+                        self._cell_best_confidence[i] = 0.0
+            _state['board_grid'] = list(self._stable_display_grid)
             _state['board_source'] = 'vision'
             if msg.fen:
                 _state['fen'] = msg.fen
@@ -967,7 +1010,18 @@ class DashboardNode(Node):
             else:
                 self._detecting_move_first_seen = 0.0
 
+            prev_status = _state.get('game_status', 'idle')
             _state['game_status'] = new_status
+            # When transitioning into an active game, seed the live display from
+            # the authoritative FEN so the board never starts from blank.
+            if (prev_status in ('idle', 'game_over')
+                    and new_status not in ('idle', 'game_over')
+                    and not _state.get('simulation_mode', False)):
+                seed_fen = _state.get('game_fen') or _state.get('prescan_fen')
+                if seed_fen and all(v == 0 for v in self._stable_display_grid):
+                    self._stable_display_grid = fen_to_grid(seed_fen)
+                    self._cell_absence_count = [0] * 90
+                    self._cell_best_confidence = [0.0] * 90
             _state['is_red_turn'] = msg.is_red_turn
             prev_moves = _state.get('move_count', 0)
             _state['move_count'] = msg.move_count
@@ -994,7 +1048,15 @@ class DashboardNode(Node):
                 # status tick (which publishes STARTING_FEN) from overwriting the pre-scan
                 # empty state or the scan-preview FEN set by /api/scan_board.
                 game_active = msg.status not in ('idle', 'game_over') or msg.move_count > 0
-                if is_sim or game_active:
+                # At game start (no moves yet) keep the scanned position on the FEN board.
+                # The game manager is given the prescan FEN, but its early status ticks may
+                # briefly publish a different FEN before it applies the scan — don't let
+                # that flicker the board. Accept the game FEN only once a move is played.
+                prescan = _state.get('prescan_fen', '')
+                preserve_scan = (
+                    not is_sim and prescan and msg.move_count == 0
+                )
+                if is_sim or (game_active and not preserve_scan):
                     _state['game_fen'] = msg.current_fen
                 if is_sim or msg.move_count > prev_moves:
                     _state['board_grid'] = fen_to_grid(msg.current_fen)

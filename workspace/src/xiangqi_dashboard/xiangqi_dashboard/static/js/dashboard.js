@@ -315,24 +315,24 @@ const fenCanvas = document.getElementById('fen-board-canvas');
 const fenCtx    = fenCanvas.getContext('2d');
 
 // Convert board pixel → grid index
+// Orientation: a1 = top-right, a10 = bottom-right (rank 0 = top, file a = right)
 function pixelToGridIdx(px, py) {
-  const file = Math.round((px - MARGIN_X) / CELL_W);
-  const rank = Math.round((py - MARGIN_Y) / CELL_H);
-  if (file < 0 || file >= COLS || rank < 0 || rank >= ROWS) return null;
-  // In the canvas rank 0 = top (Black home, rank 10 in UCI)
-  // We draw rank 9 (Red home) at the bottom => canvas row 0 = board rank 9
-  // Actually: we draw board rank 9 at canvas top, rank 0 at canvas bottom
-  // canvas_row_from_top = 9 - board_rank
-  const boardRank = 9 - rank;
+  const canvasCol = Math.round((px - MARGIN_X) / CELL_W);
+  const canvasRow = Math.round((py - MARGIN_Y) / CELL_H);
+  if (canvasCol < 0 || canvasCol >= COLS || canvasRow < 0 || canvasRow >= ROWS) return null;
+  const file = 8 - canvasCol;   // col 0 = file i, col 8 = file a
+  const boardRank = canvasRow;  // row 0 = rank 0 (rank 1 UCI, Red home)
   return coordToGridIdx(file, boardRank);
 }
 
 // Board grid index → canvas pixel centre
+// Orientation: a1 = top-right, a10 = bottom-right
 function gridIdxToPixel(idx) {
   const { file, rank } = gridIdxToCoord(idx);
-  const canvasRow = 9 - rank;   // rank 9 = top, rank 0 = bottom
+  const canvasRow = rank;        // rank 0 = top, rank 9 = bottom
+  const canvasCol = 8 - file;   // file a = right, file i = left
   return {
-    x: MARGIN_X + file * CELL_W,
+    x: MARGIN_X + canvasCol * CELL_W,
     y: MARGIN_Y + canvasRow * CELL_H,
   };
 }
@@ -357,12 +357,12 @@ function drawBoard() {
   // Vertical lines (files) - break at river
   for (let f = 0; f < COLS; f++) {
     const x = MARGIN_X + f * CELL_W;
-    // Top half (canvas rows 0-4 = board ranks 9-5)
+    // Top half (canvas rows 0-4 = board ranks 0-4)
     ctx.beginPath();
     ctx.moveTo(x, MARGIN_Y);
     ctx.lineTo(x, MARGIN_Y + 4 * CELL_H);
     ctx.stroke();
-    // Bottom half (canvas rows 5-9 = board ranks 4-0)
+    // Bottom half (canvas rows 5-9 = board ranks 5-9)
     ctx.beginPath();
     ctx.moveTo(x, MARGIN_Y + 5 * CELL_H);
     ctx.lineTo(x, MARGIN_Y + 9 * CELL_H);
@@ -393,21 +393,21 @@ function drawBoard() {
   // Palace diagonals
   ctx.strokeStyle = 'rgba(80,40,5,.6)';
   ctx.lineWidth   = .8;
-  // Red palace (board ranks 0-2, files 3-5) → canvas rows 9-7
+  // Red palace (board ranks 0-2, files 3-5) → canvas rows 0-2 (rank 0 = top)
   const rp = {
-    tl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 7 * CELL_H },
-    tr: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 7 * CELL_H },
-    bl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 9 * CELL_H },
-    br: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 9 * CELL_H },
-  };
-  ctx.beginPath(); ctx.moveTo(rp.tl.x, rp.tl.y); ctx.lineTo(rp.br.x, rp.br.y); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(rp.tr.x, rp.tr.y); ctx.lineTo(rp.bl.x, rp.bl.y); ctx.stroke();
-  // Black palace (board ranks 9-7, files 3-5) → canvas rows 0-2
-  const bp = {
     tl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 0 * CELL_H },
     tr: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 0 * CELL_H },
     bl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 2 * CELL_H },
     br: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 2 * CELL_H },
+  };
+  ctx.beginPath(); ctx.moveTo(rp.tl.x, rp.tl.y); ctx.lineTo(rp.br.x, rp.br.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(rp.tr.x, rp.tr.y); ctx.lineTo(rp.bl.x, rp.bl.y); ctx.stroke();
+  // Black palace (board ranks 7-9, files 3-5) → canvas rows 7-9 (rank 9 = bottom)
+  const bp = {
+    tl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 7 * CELL_H },
+    tr: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 7 * CELL_H },
+    bl: { x: MARGIN_X + 3 * CELL_W, y: MARGIN_Y + 9 * CELL_H },
+    br: { x: MARGIN_X + 5 * CELL_W, y: MARGIN_Y + 9 * CELL_H },
   };
   ctx.beginPath(); ctx.moveTo(bp.tl.x, bp.tl.y); ctx.lineTo(bp.br.x, bp.br.y); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(bp.tr.x, bp.tr.y); ctx.lineTo(bp.bl.x, bp.bl.y); ctx.stroke();

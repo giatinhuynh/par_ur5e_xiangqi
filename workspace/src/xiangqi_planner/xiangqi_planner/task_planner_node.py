@@ -60,6 +60,7 @@ class TaskPlannerNode(Node):
         self.declare_parameter('robot_plays_red', True)
         self.declare_parameter('verify_grid_tolerance', 6)
         self.declare_parameter('graveyard_slot_x', 0.25)
+        self.declare_parameter('grasp_z_lower_on_retry_m', 0.005)  # 5 mm lower on retry → 2 mm at retry
 
         self._bb = py_trees.blackboard.Blackboard()
         self._bb.set('ai_move', None)
@@ -69,6 +70,11 @@ class TaskPlannerNode(Node):
         self._bb.set('is_capture', False)
         self._bb.set('estop_active', False)
         self._bb.set('human_move_detected', False)
+        self._bb.set('retry_attempt', 0)
+        self._bb.set(
+            'grasp_z_lower_on_retry_m',
+            float(self.get_parameter('grasp_z_lower_on_retry_m').value),
+        )
         self._bb.set(
             'verify_grid_tolerance',
             int(self.get_parameter('verify_grid_tolerance').value),
@@ -170,6 +176,7 @@ class TaskPlannerNode(Node):
         self._bb.set('expected_board_fen', expected_fen)
         self._bb.set('is_capture', is_capture)
         self._bb.set('ai_move', move)
+        self._bb.set('retry_attempt', int(msg.retry_attempt))
         ack = AiCommandAck()
         ack.dispatch_id = dispatch_id
         ack.accepted = True
@@ -231,7 +238,7 @@ class TaskPlannerNode(Node):
 
         verify = VerifyBoardState(self, name='VerifyBoard')
         retry_verify = py_trees.decorators.Retry(
-            name='RetryVerify', child=verify, num_failures=5
+            name='RetryVerify', child=verify, num_failures=4
         )
         # Always reach finalize: on mismatch, FinalizeRobotMoveAfterVerify publishes
         # ``board_verify_failed`` instead of ``robot_move_complete``.

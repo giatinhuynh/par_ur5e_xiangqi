@@ -121,6 +121,10 @@ class ManipulationNode(Node):
         # Height of gripper centre above board surface when grasping a piece (mm).
         # Typically piece_height / 2; for 20mm pieces side-gripped ≈ 10mm.
         self.declare_parameter('grasp_height_mm', 2.0)
+        # Below this final_width (mm) after closing = no piece grasped (fingers closed through air)
+        self.declare_parameter('grasp_check_min_width_mm', 12.0)
+        # How much lower (m) to re-descend on a failed grasp before retrying
+        self.declare_parameter('grasp_retry_lower_m', 0.005)
         # Graveyard positions: fixed XY in base_link (Z = board_z + grasp_height)
         self.declare_parameter('graveyard_red_x',    0.25)
         self.declare_parameter('graveyard_red_y',   -0.30)
@@ -140,7 +144,10 @@ class ManipulationNode(Node):
         self._initial_pose_y = float(self.get_parameter('initial_pose_y').value)
         self._initial_pose_z = float(self.get_parameter('initial_pose_z').value)
         self._initial_pose_yaw = float(self.get_parameter('initial_pose_yaw').value)
-        self._grasp_height_m     = float(self.get_parameter('grasp_height_mm').value) / 1000.0
+        self._grasp_height_m         = float(self.get_parameter('grasp_height_mm').value) / 1000.0
+        self._grasp_check_min_width  = float(self.get_parameter('grasp_check_min_width_mm').value)
+        self._grasp_retry_lower_m    = float(self.get_parameter('grasp_retry_lower_m').value)
+        self._last_gripper_width: float = self._open_width
         self._graveyard_red_x    = float(self.get_parameter('graveyard_red_x').value)
         self._graveyard_red_y    = float(self.get_parameter('graveyard_red_y').value)
         self._graveyard_black_x  = float(self.get_parameter('graveyard_black_x').value)
@@ -588,7 +595,6 @@ class ManipulationNode(Node):
         place_y = req.place_pose.position.y
 
         approach_h = req.approach_height   # metres above board surface
-        grasp_h    = self._grasp_height_m  # metres above board surface (e.g. 0.010)
         place_is_graveyard = bool(getattr(req, 'place_is_graveyard', False))
 
         if self._board_to_base_tf is None:
@@ -616,10 +622,17 @@ class ManipulationNode(Node):
                 return False
 
         # ── Board-frame poses (board_to_base_tf × local board-frame Z offset) ──
+        # Approach: computed from board-relative height (same for all attempts).
         pa_x, pa_y, pa_z = self._board_frame_pose(pick_x,  pick_y,  approach_h)
-        pg_x, pg_y, pg_z = self._board_frame_pose(pick_x,  pick_y,  grasp_h)
         da_x, da_y, da_z = self._board_frame_pose(place_x, place_y, approach_h)
-        dg_x, dg_y, dg_z = self._board_frame_pose(place_x, place_y, grasp_h)
+        # Grasp/place: use the planner-provided pose directly — it already encodes
+        # board tilt compensation and any retry z offset from SetupMoveCoordinates.
+        pg_x = req.pick_pose.position.x
+        pg_y = req.pick_pose.position.y
+        pg_z = req.pick_pose.position.z
+        dg_x = req.place_pose.position.x
+        dg_y = req.place_pose.position.y
+        dg_z = req.place_pose.position.z
 
         # IK seeds at the pick board cell (4-corner bilinear taught joints)
         pick_ap_n, pick_ap_p = self._ik_seed_at_xy(pick_x, pick_y, True)  or (None, None)
@@ -689,6 +702,28 @@ class ManipulationNode(Node):
         if not step('descending_to_piece', _descend_pick):                   return result
         if not step('grasping_piece',
                     lambda: self._gripper(self._grasp_width, self._grasp_force)):  return result
+
+        # Grasp confirmation: if final_width is below threshold the fingers closed
+        # through air — no piece was grasped. Re-open, descend lower, retry once.
+        if (not self._sim_mode
+                and self._last_gripper_width < self._grasp_check_min_width):
+            self.get_logger().warn(
+                f'Grasp check failed: final_width={self._last_gripper_width:.1f} mm '
+                f'< {self._grasp_check_min_width:.1f} mm — re-descending '
+                f'{self._grasp_retry_lower_m * 1000:.1f} mm lower'
+            )
+            pg_z_retry = pg_z - self._grasp_retry_lower_m
+
+            def _regrasp_lower():
+                if not self._gripper(self._open_width, OPEN_FORCE):
+                    return False
+                if not self._move_grasp_descend(pg_x, pg_y, pg_z_retry, pick_gr_n, pick_gr_p):
+                    return False
+                return self._gripper(self._grasp_width, self._grasp_force)
+
+            if not step('regrasp_lower', _regrasp_lower):
+                return result
+
         if not step('lifting',             _lift_pick):                       return result
         if not step('approaching_place',   _approach_place):                  return result
         if not step('descending_to_place', _descend_place):                  return result
@@ -1078,6 +1113,7 @@ class ManipulationNode(Node):
                 f'Gripper → {target_width:.1f} mm @ {target_force:.1f} N'
             )
             time.sleep(0.2)
+            self._last_gripper_width = target_width
             return True
 
         if not self._rg2_client.wait_for_server(timeout_sec=3.0):
@@ -1102,8 +1138,9 @@ class ManipulationNode(Node):
             self.get_logger().error('GripperSetWidth timed out')
             return False
 
+        self._last_gripper_width = wrapped.result.final_width
         self.get_logger().info(
-            f'RG2 at {wrapped.result.final_width:.1f} mm'
+            f'RG2 at {self._last_gripper_width:.1f} mm'
         )
         return True
 

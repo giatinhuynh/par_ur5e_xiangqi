@@ -6,7 +6,9 @@ vision_node:
     require_yolo_weights: true
     yolo_download_url: ""
     confidence_threshold: 0.5
-    stability_frames: 5           # Frames to confirm a stable human move (~1.2s at 4Hz)
+    yolo_imgsz: 0   # 0 = auto from .pt (v4 → 640)
+    stability_frames: 4           # Frames to confirm a stable human move (~32s at 0.125Hz on CPU)
+    grid_smooth_frames: 1         # 1 = no smoothing; at 8s/frame each detection is already reliable
     poll_rate_hz: 4.0
     camera_topic: "/camera/camera/color/image_raw"
     camera_config_file: "/home/rosuser/workspace/config/camera_config.yaml"

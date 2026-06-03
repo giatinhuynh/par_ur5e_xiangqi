@@ -500,6 +500,9 @@ APPROACH_HEIGHT   = 0.12   # Above board plane at intersection
 GRASP_HEIGHT      = 0.010  # Side-grip at mid-piece (~10 mm for 20 mm disc)
 TRANSIT_HEIGHT    = 0.20   # Clearance during transit
 GRAVEYARD_OFFSET  = 0.10   # Z-offset above graveyard zone
+# Extra downward offset (m) applied to the Cartesian-IK board grasp/place Z only
+# (not approach, lift, or the joint-space graveyard descend).
+CARTESIAN_GRASP_DROP = 0.01
 
 
 # Graveyard zones: flat positions off the board where captured pieces go
@@ -619,11 +622,14 @@ class MoveTranslator:
             place_xyz = self._cal.grid_to_world(to_file,   to_rank)
             board_z   = float(pick_xyz[2])
 
+        # Cartesian-IK board grasp/place descend 2 cm lower than the configured
+        # grasp height; approach/lift/graveyard heights are unchanged.
+        grasp_z        = board_z + grasp_height - CARTESIAN_GRASP_DROP
         approach_pick  = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + approach_height)
-        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + grasp_height)
+        grasp_pose     = _make_pose(pick_xyz[0],  pick_xyz[1],  grasp_z)
         lift_pose      = _make_pose(pick_xyz[0],  pick_xyz[1],  board_z + transit_height)
         approach_place = _make_pose(place_xyz[0], place_xyz[1], board_z + approach_height)
-        place_pose     = _make_pose(place_xyz[0], place_xyz[1], board_z + grasp_height)
+        place_pose     = _make_pose(place_xyz[0], place_xyz[1], grasp_z)
 
         return approach_pick, grasp_pose, lift_pose, approach_place, place_pose
 

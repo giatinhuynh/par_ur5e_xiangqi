@@ -165,7 +165,7 @@ function endGameStart() {
 function checkGameStartComplete() {
   if (!gameStarting) return;
   const gs = (state.game_status || 'idle').toLowerCase();
-  if (gs !== 'idle' && gs !== 'game_over') {
+  if (gs !== 'idle') {
     endGameStart();
     return;
   }

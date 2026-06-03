@@ -1310,6 +1310,39 @@ class GameManagerNode(Node):
     def _human_side_is_red(self) -> bool:
         return self._human_color == 'red'
 
+    def _extra_changes_for_move(
+        self, move: str, ref_grid: list, observed_grid: list, human_sign: int
+    ) -> list:
+        """Return cell indices that changed beyond what a single legal `move` explains.
+
+        A clean move produces exactly:
+          - from-square: human piece vanishes  (ref=human, observed=0)
+          - to-square:   human piece appears   (observed=human; ref=0 for non-capture,
+                         ref=opponent for a capture)
+        Any other differing cell is an unexpected extra change (piece removed, piece
+        relocated elsewhere, etc.) and is returned in the list.
+        """
+        try:
+            parsed = _resolver_parse_move(move)
+            if parsed is None:
+                return []
+            (from_f, from_r1), (to_f, to_r1) = parsed
+            from_i = (from_r1 - 1) * 9 + (ord(from_f) - ord('a'))
+            to_i   = (to_r1   - 1) * 9 + (ord(to_f)   - ord('a'))
+        except Exception:
+            return []
+        extra = []
+        for i in range(90):
+            old, new = ref_grid[i], observed_grid[i]
+            if old == new:
+                continue
+            if i == from_i and old * human_sign > 0 and new == 0:
+                continue  # expected: human piece left source
+            if i == to_i and new * human_sign > 0:
+                continue  # expected: human piece arrived at dest (capture or empty)
+            extra.append(i)
+        return extra
+
     def _execution_interference_detected(self) -> bool:
         """Return True if non-planned squares clearly changed after execution.
 
@@ -1479,6 +1512,22 @@ class GameManagerNode(Node):
             except Exception:
                 legal = []
             if candidate in legal:
+                # Confirm no extra pieces were disturbed alongside the valid move.
+                extra = self._extra_changes_for_move(candidate, ref_for_side, grid, human_sign)
+                if extra:
+                    sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
+                    self.get_logger().warn(
+                        f'Interference alongside move {candidate}: extra changes at {sqs} — game over'
+                    )
+                    result = 'black_wins' if human_red else 'red_wins'
+                    self._declare_game_over(result, 'illegal_move')
+                    alert = String()
+                    alert.data = (
+                        'Illegal: extra pieces were moved or removed alongside your move — game over.'
+                    )
+                    self._illegal_move_pub.publish(alert)
+                    self._publish_status()
+                    return
                 self.get_logger().info(f'Human move (definitive): {candidate}')
                 self._apply_move(candidate, is_ai=False)
                 self._check_game_over()
@@ -1587,6 +1636,23 @@ class GameManagerNode(Node):
                         return
             except Exception as e:
                 self.get_logger().warn(f'Ghost move check error: {e}')
+
+        # Final interference check: confirm no extra pieces were disturbed.
+        extra = self._extra_changes_for_move(detected_move, ref_for_side, grid, human_sign)
+        if extra:
+            sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
+            self.get_logger().warn(
+                f'Interference alongside inferred move {detected_move}: extra changes at {sqs} — game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                'Illegal: extra pieces were moved or removed alongside your move — game over.'
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
 
         self.get_logger().info(f'Human move detected: {detected_move}')
         self._apply_move(detected_move, is_ai=False)

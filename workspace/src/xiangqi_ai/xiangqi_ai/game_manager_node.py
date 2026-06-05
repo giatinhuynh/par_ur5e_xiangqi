@@ -432,7 +432,7 @@ class GameManagerNode(Node):
             return False
         return val > 0 if human_red else val < 0
 
-    _HUMAN_SCAN_ROUNDS = 3       # scans to accumulate before inferring human move
+    _HUMAN_SCAN_ROUNDS = 5       # scans to accumulate before inferring human move
     _HUMAN_SCAN_INTERVAL = 0.20  # seconds between scans
 
     def _begin_human_move_detection(self) -> None:
@@ -497,7 +497,7 @@ class GameManagerNode(Node):
     # AI verify-failure recovery via multi-scan
     # ------------------------------------------------------------------
 
-    _AI_VERIFY_SCAN_ROUNDS = 3
+    _AI_VERIFY_SCAN_ROUNDS = 5
     _AI_VERIFY_SCAN_INTERVAL = 0.20
 
     def _do_ai_verify_scan(self) -> None:

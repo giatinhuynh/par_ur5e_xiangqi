@@ -44,17 +44,36 @@ def resolve_calibration_path(primary: str, logger) -> str:
     return primary
 
 
+def _workspace_models_dirs() -> list[str]:
+    """Bind-mounted lab workspace and common local checkout paths."""
+    dirs: list[str] = []
+    for p in (
+        '/home/rosuser/workspace/models',
+        os.path.join(os.environ.get('XIANGQI_WORKSPACE', ''), 'models'),
+    ):
+        p = (p or '').strip()
+        if p and os.path.isdir(p) and p not in dirs:
+            dirs.append(p)
+    return dirs
+
+
 def _candidate_model_paths(primary: str) -> list[str]:
     out: list[str] = []
+    seen: set[str] = set()
     p0 = (primary or '').strip()
+
+    def _add(path: str) -> None:
+        path = os.path.expanduser(path)
+        if path not in seen:
+            seen.add(path)
+            out.append(path)
+
     if p0:
-        out.append(os.path.expanduser(p0))
-    share_models = _share_models_dir()
-    if not share_models:
-        return out
+        _add(p0)
+
     base_names = [
-        'xiangqi_kaggle_v5_best.pt',
         'xiangqi_kaggle_v4_best.pt',
+        'xiangqi_kaggle_v5_best.pt',
         'xiangqi_kaggle_v3_best.pt',
         'xiangqi_kaggle_v2_best.pt',
         'xiangqi_kaggle_v1_best.pt',
@@ -65,12 +84,15 @@ def _candidate_model_paths(primary: str) -> list[str]:
         ordered = [bn] + [n for n in base_names if n != bn]
     else:
         ordered = list(base_names)
-    seen: set[str] = set()
-    for n in ordered:
-        path = os.path.join(share_models, n)
-        if path not in seen:
-            seen.add(path)
-            out.append(path)
+
+    for models_dir in _workspace_models_dirs():
+        for n in ordered:
+            _add(os.path.join(models_dir, n))
+
+    share_models = _share_models_dir()
+    if share_models:
+        for n in ordered:
+            _add(os.path.join(share_models, n))
     return out
 
 
@@ -96,7 +118,7 @@ def resolve_yolo_model_path(
     """
     Return an existing .pt path, or None.
 
-    Order: primary path; package share models/ (canonical names); env XIANGQI_YOLO_DOWNLOAD_URL;
+    Order: primary path; workspace/models; package share; download URL;
     param yolo_download_url (non-empty).
     """
     for p in _candidate_model_paths(primary):

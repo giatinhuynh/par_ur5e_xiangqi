@@ -12,4 +12,5 @@ int8[90] grid
 string fen          # Position in Xiangqi FEN notation
 string last_move    # Last move in coordinate notation, e.g. "h0g2" (empty if start)
 bool is_red_turn    # True if it is red's turn to move
-float32 detection_confidence  # Mean YOLO confidence across detected pieces
+float32 detection_confidence   # Mean YOLO confidence across detected pieces
+float32[90] cell_confidence    # Per-cell YOLO confidence (0.0 = not detected)

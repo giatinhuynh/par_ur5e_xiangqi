@@ -12,13 +12,14 @@ import json
 
 import rclpy
 from rclpy.node import Node
+from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from std_msgs.msg import Bool, Empty, Header, String
 from std_srvs.srv import Trigger
 
+from xiangqi_msgs.action import ExecuteMove
 from xiangqi_msgs.msg import BoardState, GameStatus, MoveHistory
-from xiangqi_msgs.msg import AiMoveCommand, AiCommandAck, AiExecutionResult
 from xiangqi_msgs.srv import GetBestMove, GetBoardState, SetEngine
 
 from .move_resolver import (
@@ -64,6 +65,9 @@ class GameManagerNode(Node):
         self.declare_parameter('ai_depth', 0)
         self.declare_parameter('human_move_grid_tolerance', 8)
         self.declare_parameter('trust_robot_move_after_verify_fail', True)
+        # Max times to re-dispatch a failed robot move before giving up. The robot
+        # keeps retrying (descending lower each attempt) instead of waiting for a human.
+        self.declare_parameter('ai_move_max_retries', 8)
 
         self._engine_type = self.get_parameter('engine_type').value
         self._red_engine_type = str(self._engine_type)
@@ -147,21 +151,6 @@ class GameManagerNode(Node):
             String, '/xiangqi/starting_fen', self._starting_fen_cb, 10,
             callback_group=cb_group,
         )
-        # Planner execution feedback (ID-scoped JSON: status + dispatch_id)
-        self._ai_exec_result_sub = self.create_subscription(
-            AiExecutionResult,
-            '/xiangqi/ai_execution_result',
-            self._ai_execution_result_cb,
-            10,
-            callback_group=cb_group,
-        )
-        self._ai_cmd_ack_sub = self.create_subscription(
-            AiCommandAck,
-            '/xiangqi/ai_command_ack',
-            self._ai_command_ack_cb,
-            10,
-            callback_group=cb_group,
-        )
         self._estop_sub = self.create_subscription(
             Bool, '/xiangqi/estop', self._estop_cb, 10, callback_group=cb_group
         )
@@ -171,8 +160,6 @@ class GameManagerNode(Node):
         self._board_state_pub = self.create_publisher(BoardState, '/xiangqi/board_state', 10)
         self._move_history_pub = self.create_publisher(MoveHistory, '/xiangqi/move_history', 10)
         self._start_watching_pub = self.create_publisher(Bool, '/xiangqi/start_watching', 10)
-        # Single atomic dispatch (move + capture + expected FEN + id) for the planner
-        self._ai_move_command_pub = self.create_publisher(AiMoveCommand, '/xiangqi/ai_move_command', 10)
         self._illegal_move_pub = self.create_publisher(String, '/xiangqi/illegal_move_alert', 10)
 
         # Service clients
@@ -186,6 +173,11 @@ class GameManagerNode(Node):
             Trigger, '/xiangqi/move_to_scan_pose', callback_group=cb_group
         )
 
+        # Action client: replaces AiMoveCommand/AiCommandAck/AiExecutionResult topics
+        self._execute_move_cli = ActionClient(
+            self, ExecuteMove, '/xiangqi/execute_move', callback_group=cb_group
+        )
+
         # Status timer
         self._status_timer = self.create_timer(1.0, self._publish_status)
 
@@ -193,14 +185,12 @@ class GameManagerNode(Node):
         self._human_watch_reference_grid: list | None = None
         self._pending_human_move: str | None = None
 
-        # AI move bookkeeping - apply to FEN only after ai_execution_result=robot_move_complete
+        # AI move bookkeeping - apply to FEN only after action server confirms completion
         self._pending_ai_move: str | None = None
         self._pending_ai_eval_cp: int = 0
         self._pending_ai_depth: int = 0
         self._pending_ai_elapsed: float = 0.0
-        self._ai_dispatch_id: int = 0
-        self._active_dispatch_id: int | None = None
-        self._planner_ack_timer = None
+        self._active_goal_handle = None   # rclpy ClientGoalHandle for the in-flight ExecuteMove
 
         # Non-blocking GetBestMove (executor stays responsive for e-stop, etc.)
         self._ai_move_future = None
@@ -216,6 +206,14 @@ class GameManagerNode(Node):
         # FEN forwarded by dashboard after a successful Scan Board press.
         # Consumed once in _begin_new_game to skip the startup rescan.
         self._prescan_fen: str | None = None
+
+        # Interference detection: track consecutive frames where board differs
+        # from reference FEN during AI's turn (COMPUTING_AI only).
+        self._ai_interference_streak: int = 0
+        self._AI_INTERFERENCE_THRESHOLD: int = 3
+
+        # Move retry: track retries for the current AI move (reset each new move).
+        self._ai_move_retry_count: int = 0
 
         self.get_logger().info('game_manager_node started -- waiting for /xiangqi/new_game')
 
@@ -235,6 +233,11 @@ class GameManagerNode(Node):
         if float(msg.detection_confidence) >= 0.999:
             return
         self._latest_board_state = msg
+        # Interference check: in ai_vs_human hardware mode, if the human touches
+        # any piece during COMPUTING_AI, declare the AI the winner.
+        if (self._game_state == GameState.COMPUTING_AI
+                and not self._simulation_mode):
+            self._check_ai_turn_interference(list(msg.grid))
 
     def _apply_dashboard_mode(self, mode: str) -> None:
         """Apply sim play style from dashboard mode (ai_vs_ai = both sides AI)."""
@@ -429,7 +432,7 @@ class GameManagerNode(Node):
             return False
         return val > 0 if human_red else val < 0
 
-    _HUMAN_SCAN_ROUNDS = 3       # scans to accumulate before inferring human move
+    _HUMAN_SCAN_ROUNDS = 5       # scans to accumulate before inferring human move
     _HUMAN_SCAN_INTERVAL = 0.20  # seconds between scans
 
     def _begin_human_move_detection(self) -> None:
@@ -494,12 +497,13 @@ class GameManagerNode(Node):
     # AI verify-failure recovery via multi-scan
     # ------------------------------------------------------------------
 
-    _AI_VERIFY_SCAN_ROUNDS = 3
+    _AI_VERIFY_SCAN_ROUNDS = 5
     _AI_VERIFY_SCAN_INTERVAL = 0.20
 
     def _do_ai_verify_scan(self) -> None:
         if not self._get_board_state_cli.service_is_ready():
-            self._finish_ai_verify_recovery()
+            finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
+            finisher()
             return
         req = GetBoardState.Request()
         req.force_rescan = True
@@ -521,7 +525,8 @@ class GameManagerNode(Node):
                 self._AI_VERIFY_SCAN_INTERVAL, self._on_ai_verify_scan_timer
             )
             return
-        self._finish_ai_verify_recovery()
+        finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
+        finisher()
 
     def _on_ai_verify_scan_timer(self) -> None:
         if hasattr(self, '_ai_verify_scan_timer') and self._ai_verify_scan_timer:
@@ -530,6 +535,60 @@ class GameManagerNode(Node):
         if self._game_state != GameState.EXECUTING_MOVE:
             return
         self._do_ai_verify_scan()
+
+    def _finish_robot_move_complete(self) -> None:
+        """Planner reported success: check for interference, then commit the move."""
+        if self._game_state != GameState.EXECUTING_MOVE or not self._pending_ai_move:
+            return
+        if self._ai_verify_scan_grids:
+            merged = self._merge_startup_grids(self._ai_verify_scan_grids)
+            synthetic = BoardState()
+            synthetic.grid = [int(v) for v in merged]
+            synthetic.fen = self._grid_to_fen(merged, self._current_fen)
+            synthetic.detection_confidence = 0.5
+            self._latest_board_state = synthetic
+
+        # A piece off the planned squares changed (e.g. a piece was removed during
+        # execution) — interference, regardless of which side's piece. Game over.
+        if self._execution_interference_detected():
+            result = 'red_wins' if self._robot_is_red else 'black_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                "Illegal: a piece was moved or removed during the robot's move — game over."
+            )
+            self._illegal_move_pub.publish(alert)
+            self._pending_ai_move = None
+            self._active_goal_handle = None
+            self._publish_status()
+            return
+
+        # Clean board — commit the robot's move and advance the game.
+        self._apply_move(
+            self._pending_ai_move,
+            is_ai=True,
+            eval_cp=self._pending_ai_eval_cp,
+            depth=self._pending_ai_depth,
+            elapsed=self._pending_ai_elapsed,
+        )
+        self._pending_ai_move = None
+        self._active_goal_handle = None
+        self._check_game_over()
+
+        if self._game_state == GameState.GAME_OVER:
+            self.get_logger().info('Game over - robot finished last move')
+            self._publish_status()
+            return
+        if self._self_play:
+            self.get_logger().info('Self-play: computing next AI move immediately')
+            self._game_state = GameState.COMPUTING_AI
+            self._publish_status()
+            self._compute_and_emit_ai_move()
+            return
+        self.get_logger().info('Robot move execution confirmed - waiting for human')
+        self._game_state = GameState.WAITING_HUMAN
+        self._tell_vision_to_watch(True)
+        self._publish_status()
 
     def _finish_ai_verify_recovery(self) -> None:
         """Use merged multi-scan grid to retry AI move verification after BOARD_VERIFY_FAILED."""
@@ -541,6 +600,23 @@ class GameManagerNode(Node):
             synthetic.detection_confidence = 0.5
             self._latest_board_state = synthetic
 
+        # Before recovery: if non-planned squares changed, a piece was touched/removed
+        # during execution — that's interference regardless of which side's piece it was.
+        if self._execution_interference_detected():
+            result = 'red_wins' if self._robot_is_red else 'black_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                "Illegal: a piece was moved or removed during the robot's execution — game over."
+            )
+            self._illegal_move_pub.publish(alert)
+            self._pending_ai_move = None
+            self._active_goal_handle = None
+            self._publish_status()
+            return
+
+        if self._retry_ai_move_lower_grasp():
+            return
         if self._commit_pending_ai_after_robot(
             'Board verify failed - committing pending AI move (trust_robot)'
         ):
@@ -552,114 +628,104 @@ class GameManagerNode(Node):
             'Robot move could not be confirmed by vision - use Sync Board or New Game',
         )
 
-    def _ai_execution_result_cb(self, msg: AiExecutionResult) -> None:
-        """Handle planner feedback with dispatch_id guard against stale callbacks."""
-        dispatch_id = int(msg.dispatch_id)
-        status = int(msg.status)
 
+    def _cancel_active_execution(self) -> None:
+        """Cancel the in-flight ExecuteMove action goal (e-stop, halt, etc.)."""
+        if self._active_goal_handle is not None:
+            try:
+                self._active_goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            self._active_goal_handle = None
+
+    def _dispatch_to_planner(
+        self,
+        ai_move: str,
+        expected_fen: str,
+        is_capture: bool,
+        retry: int = 0,
+    ) -> None:
+        """Send an ExecuteMove goal to the task_planner action server."""
+        if not self._execute_move_cli.server_is_ready():
+            self._discard_pending_ai_after_planner_abort(
+                'execute_move action server not ready - move aborted',
+                'Planner not available - check task_planner_node',
+            )
+            return
+
+        goal = ExecuteMove.Goal()
+        goal.move = ai_move
+        goal.expected_fen = expected_fen
+        goal.is_capture = is_capture
+        goal.retry_attempt = retry
+
+        future = self._execute_move_cli.send_goal_async(goal)
+        future.add_done_callback(self._on_execute_move_goal_response)
+
+    def _on_execute_move_goal_response(self, future) -> None:
+        goal_handle = future.result()
+        if not goal_handle.accepted:
+            self._discard_pending_ai_after_planner_abort(
+                'ExecuteMove goal rejected by planner',
+                'Planner rejected move command - check task_planner_node',
+            )
+            return
+        self._active_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(self._on_execute_move_result)
+        self.get_logger().info(
+            f'ExecuteMove goal accepted for {self._pending_ai_move}'
+        )
+
+    def _on_execute_move_result(self, future) -> None:
         if self._game_state != GameState.EXECUTING_MOVE:
             return
-        if self._active_dispatch_id is None:
-            self.get_logger().warn(
-                f'Ignoring ai_execution_result id={dispatch_id}: no active dispatch'
-            )
-            return
-        if dispatch_id != self._active_dispatch_id:
-            self.get_logger().warn(
-                f'Ignoring stale ai_execution_result id={dispatch_id} '
-                f'(active={self._active_dispatch_id})'
+        self._active_goal_handle = None
+        try:
+            wrapped = future.result()
+        except Exception as e:
+            self._discard_pending_ai_after_planner_abort(
+                f'ExecuteMove result error: {e}',
+                'Planner result error - move aborted; check logs',
             )
             return
 
-        if status == AiExecutionResult.ROBOT_MOVE_COMPLETE:
-            if self._pending_ai_move:
-                self._apply_move(
-                    self._pending_ai_move,
-                    is_ai=True,
-                    eval_cp=self._pending_ai_eval_cp,
-                    depth=self._pending_ai_depth,
-                    elapsed=self._pending_ai_elapsed,
-                )
-                self._pending_ai_move = None
-                self._active_dispatch_id = None
-                self._check_game_over()
-            else:
+        result = wrapped.result
+        status_code = int(result.status_code)
+
+        if status_code == ExecuteMove.Result.ROBOT_MOVE_COMPLETE:
+            if not self._pending_ai_move:
                 self.get_logger().error(
-                    'robot_move_complete but no pending AI move - ignoring spurious signal'
+                    'robot_move_complete but no pending AI move - ignoring'
                 )
                 return
-
-            if self._game_state == GameState.GAME_OVER:
-                self.get_logger().info('Game over - robot finished last move')
-                self._publish_status()
-                return
-
-            # In self-play mode, immediately compute next AI move instead of waiting
-            if self._self_play:
-                self.get_logger().info('Self-play: computing next AI move immediately')
-                self._game_state = GameState.COMPUTING_AI
-                self._publish_status()
-                self._compute_and_emit_ai_move()
-                return
-
-            self.get_logger().info('Robot move execution confirmed - waiting for human')
-            self._game_state = GameState.WAITING_HUMAN
-            self._tell_vision_to_watch(True)
-            self._publish_status()
-            return
-
-        if status == AiExecutionResult.BOARD_VERIFY_FAILED:
-            # Don't immediately use the stale/jittery _latest_board_state.
-            # Scan multiple fresh frames first, then retry verification.
-            self._ai_verify_scan_grids: list = []
+            self._ai_verify_scan_grids = []
             self._ai_verify_scan_timer = None
+            self._verify_scan_finisher = self._finish_robot_move_complete
             self._do_ai_verify_scan()
             return
 
-        if status == AiExecutionResult.AI_MOTION_FAILED:
+        if status_code == ExecuteMove.Result.BOARD_VERIFY_FAILED:
+            self._ai_verify_scan_grids = []
+            self._ai_verify_scan_timer = None
+            self._verify_scan_finisher = self._finish_ai_verify_recovery
+            self._do_ai_verify_scan()
+            return
+
+        if status_code == ExecuteMove.Result.AI_MOTION_FAILED:
+            if self._redispatch_ai_move('AI motion subtree failed'):
+                return
             self._discard_pending_ai_after_planner_abort(
-                'AI motion subtree failed - pending AI move discarded (FEN unchanged)',
-                'Robot could not complete the planned move - check arm/gripper/board; '
-                'UI position unchanged; use New Game if the physical board moved',
+                'AI motion subtree failed - retries exhausted, pending AI move discarded',
+                'Robot could not complete the planned move after retries - check '
+                'arm/gripper/board; use New Game if the physical board moved',
             )
             return
 
         self._discard_pending_ai_after_planner_abort(
-            f'Unknown ai_execution_result status={status} - pending move discarded (FEN unchanged)',
-            f'Unexpected planner status ({status}) - pending move discarded; check logs',
+            f'Unknown ExecuteMove status_code={status_code} - pending move discarded',
+            f'Unexpected planner status ({status_code}) - pending move discarded; check logs',
         )
-        return
-
-    def _clear_planner_ack_timer(self) -> None:
-        if self._planner_ack_timer is not None:
-            self._planner_ack_timer.cancel()
-            self._planner_ack_timer = None
-
-    def _on_planner_ack_timeout(self) -> None:
-        self._clear_planner_ack_timer()
-        if self._game_state != GameState.EXECUTING_MOVE:
-            return
-        if self._active_dispatch_id is None:
-            return
-        # Planner never acked the command - abandon this pending move
-        self._discard_pending_ai_after_planner_abort(
-            f'Planner did not ack ai_move_command id={self._active_dispatch_id} (timeout)',
-            'Planner did not accept AI command - move aborted; check planner logs',
-        )
-
-    def _ai_command_ack_cb(self, msg: AiCommandAck) -> None:
-        dispatch_id = int(msg.dispatch_id)
-        accepted = bool(msg.accepted)
-        reason = msg.reason
-        if self._active_dispatch_id is None or dispatch_id != self._active_dispatch_id:
-            return
-        if accepted:
-            self._clear_planner_ack_timer()
-        else:
-            self._discard_pending_ai_after_planner_abort(
-                f'Planner NACKed ai_move_command id={dispatch_id}: {reason}',
-                f'Planner rejected AI command ({reason}) - move aborted; check planner logs',
-            )
 
     def _commit_pending_ai_after_robot(self, log_msg: str) -> bool:
         """Apply pending AI move after robot motion; advance game state."""
@@ -697,8 +763,7 @@ class GameManagerNode(Node):
             elapsed=self._pending_ai_elapsed,
         )
         self._pending_ai_move = None
-        self._active_dispatch_id = None
-        self._clear_planner_ack_timer()
+        self._active_goal_handle = None
         self._check_game_over()
         if self._game_state == GameState.GAME_OVER:
             self._publish_status()
@@ -711,6 +776,65 @@ class GameManagerNode(Node):
             self._game_state = GameState.WAITING_HUMAN
             self._tell_vision_to_watch(True)
             self._publish_status()
+        return True
+
+    def _retry_ai_move_lower_grasp(self) -> bool:
+        """Re-issue the same AI move with a lower grasp height if the piece was never picked up.
+
+        Keeps retrying (descending lower each attempt) up to ai_move_max_retries while the
+        source square still holds the AI's piece, rather than handing control to the human.
+        Returns True if a retry was dispatched (caller should return immediately).
+        """
+        if self._ai_move_retry_count >= int(self.get_parameter('ai_move_max_retries').value):
+            return False
+        move = self._pending_ai_move
+        if not move or self._game_state != GameState.EXECUTING_MOVE:
+            return False
+        if self._latest_board_state is None:
+            return False
+
+        # Check source square: if piece is still there, the robot never picked it up.
+        indices = move_critical_indices(move)
+        if not indices:
+            return False
+        ref_grid = self._fen_to_grid(self._current_fen)
+        observed = list(self._latest_board_state.grid)
+        # from-square: the critical index that has a piece in the reference FEN AND still
+        # shows that same piece in the observed grid (i.e. nothing moved).
+        # Sign-only: piece still at source if it has the same colour as in ref
+        # (YOLO may misidentify type but colour is reliable).
+        from_idx = next(
+            (i for i in indices
+             if ref_grid[i] != 0
+             and (observed[i] > 0) == (ref_grid[i] > 0)
+             and (observed[i] < 0) == (ref_grid[i] < 0)),
+            None,
+        )
+        if from_idx is None:
+            return False  # piece gone from source — partial move, don't retry
+
+        # Destination square occupied in reference → capture move
+        is_capture = any(i != from_idx and ref_grid[i] != 0 for i in indices)
+
+        expected_fen_after = ''
+        try:
+            expected_fen_after = sf.get_fen(VARIANT, self._current_fen, [move])
+        except Exception:
+            pass
+
+        self._ai_move_retry_count += 1
+        self._dispatch_to_planner(move, expected_fen_after, is_capture,
+                                  retry=self._ai_move_retry_count)
+
+        self.get_logger().warn(
+            f'Board verify failed: source square still occupied — retrying {move} '
+            f'with lower grasp (attempt #{self._ai_move_retry_count})'
+        )
+        alert = String()
+        alert.data = f'Retrying robot move {move} with lower grasp height...'
+        self._illegal_move_pub.publish(alert)
+
+        self._publish_status()
         return True
 
     def _recover_ai_move_after_verify_failure(self) -> bool:
@@ -732,6 +856,45 @@ class GameManagerNode(Node):
             f'Board verify failed but vision matches pending move {move}'
         )
 
+    def _redispatch_ai_move(self, reason: str) -> bool:
+        """Re-issue the current pending AI move to the planner (keep retrying).
+
+        Used when the robot fails to execute/verify a move: rather than giving up
+        and waiting for a human, the same move is re-sent (the planner descends a bit
+        lower each retry_attempt). Returns True if a retry was dispatched.
+        """
+        move = self._pending_ai_move
+        if not move or self._game_state != GameState.EXECUTING_MOVE:
+            return False
+        max_retries = int(self.get_parameter('ai_move_max_retries').value)
+        if self._ai_move_retry_count >= max_retries:
+            self.get_logger().error(
+                f'{reason} - exhausted {max_retries} robot retries for {move}'
+            )
+            return False
+
+        is_capture = self._is_capture_move(self._current_fen, move)
+        expected_fen_after = ''
+        try:
+            expected_fen_after = sf.get_fen(VARIANT, self._current_fen, [move])
+        except Exception:
+            pass
+
+        self._ai_move_retry_count += 1
+        self._dispatch_to_planner(move, expected_fen_after, is_capture,
+                                  retry=self._ai_move_retry_count)
+
+        self.get_logger().warn(
+            f'{reason} - re-dispatching robot move {move} '
+            f'(attempt #{self._ai_move_retry_count}/{max_retries})'
+        )
+        alert = String()
+        alert.data = f'Robot move failed — retrying {move} (attempt {self._ai_move_retry_count})...'
+        self._illegal_move_pub.publish(alert)
+
+        self._publish_status()
+        return True
+
     def _discard_pending_ai_after_planner_abort(self, log_msg: str, alert_text: str) -> None:
         """Drop pending AI move without applying FEN; return to human watching."""
         if self._game_state != GameState.EXECUTING_MOVE:
@@ -741,8 +904,7 @@ class GameManagerNode(Node):
             return
         self.get_logger().error(log_msg)
         self._pending_ai_move = None
-        self._active_dispatch_id = None
-        self._clear_planner_ack_timer()
+        self._cancel_active_execution()
         alert = String()
         alert.data = alert_text
         self._illegal_move_pub.publish(alert)
@@ -760,10 +922,9 @@ class GameManagerNode(Node):
         if not msg.data:
             return
         if self._game_state == GameState.EXECUTING_MOVE:
+            self._cancel_active_execution()
             if self._self_play:
                 self._pending_ai_move = None
-                self._active_dispatch_id = None
-                self._clear_planner_ack_timer()
                 self._game_state = GameState.IDLE
                 alert = String()
                 alert.data = (
@@ -838,12 +999,13 @@ class GameManagerNode(Node):
         self._ai_request_token += 1
         self._clear_delayed_ai_timers()
         self._cancel_ai_rpc_in_flight()
+        self._cancel_active_execution()
         self._pending_human_move = None
         self._pending_ai_move = None
-        self._active_dispatch_id = None
-        self._clear_planner_ack_timer()
         self._ai_service_retry_count = 0
         self._ai_fail_streak = 0
+        self._ai_interference_streak = 0
+        self._ai_move_retry_count = 0
         self._current_fen = self._prescan_fen if self._prescan_fen else STARTING_FEN
         self._move_history = []
         self._move_count = 0
@@ -874,7 +1036,6 @@ class GameManagerNode(Node):
         """Start from the initial position (call after _halt_game or from cold idle)."""
         self._abort_ai_computation = False
         self._ai_fen_at_request = None
-        self._ai_dispatch_id = 0
         self._ai_fail_streak = 0
         self._game_result = 'ongoing'
         self._game_result_reason = ''
@@ -1044,10 +1205,9 @@ class GameManagerNode(Node):
         self.get_logger().warn('Resync requested - adopting vision FEN (history preserved)')
         self._abort_ai_computation = True
         self._cancel_ai_rpc_in_flight()
-        self._active_dispatch_id = None
+        self._cancel_active_execution()
         self._pending_ai_move = None
         self._pending_human_move = None
-        self._clear_planner_ack_timer()
 
         if not self._get_board_state_cli.service_is_ready():
             alert = String()
@@ -1113,6 +1273,100 @@ class GameManagerNode(Node):
     def _human_side_is_red(self) -> bool:
         return self._human_color == 'red'
 
+    def _extra_changes_for_move(
+        self, move: str, ref_grid: list, observed_grid: list, human_sign: int
+    ) -> list:
+        """Return cell indices that changed beyond what a single legal `move` explains.
+
+        A clean move produces exactly:
+          - from-square: human piece vanishes  (ref=human, observed=0)
+          - to-square:   human piece appears   (observed=human; ref=0 for non-capture,
+                         ref=opponent for a capture)
+        Any other differing cell is an unexpected extra change (piece removed, piece
+        relocated elsewhere, etc.) and is returned in the list.
+        """
+        try:
+            parsed = _resolver_parse_move(move)
+            if parsed is None:
+                return []
+            (from_f, from_r1), (to_f, to_r1) = parsed
+            from_i = (from_r1 - 1) * 9 + (ord(from_f) - ord('a'))
+            to_i   = (to_r1   - 1) * 9 + (ord(to_f)   - ord('a'))
+        except Exception:
+            return []
+        extra = []
+        for i in range(90):
+            old, new = ref_grid[i], observed_grid[i]
+            if old == new:
+                continue
+            if i == from_i and old * human_sign > 0 and new == 0:
+                continue  # expected: human piece left source
+            if i == to_i and new * human_sign > 0:
+                continue  # expected: human piece arrived at dest (capture or empty)
+            extra.append(i)
+        return extra
+
+    def _execution_interference_detected(self) -> bool:
+        """Return True if non-planned squares clearly changed after execution.
+
+        Uses all verify-scan rounds for consensus: a cell is flagged only if its
+        colour (red/black/empty) changed in the majority of scan frames, which
+        distinguishes a genuine piece removal from a YOLO false-negative in one frame.
+        """
+        move = self._pending_ai_move
+        if not move:
+            return False
+        ref = self._fen_to_grid(self._current_fen)
+        planned = move_critical_indices(move)
+
+        raw_grids = getattr(self, '_ai_verify_scan_grids', None)
+        if not raw_grids and self._latest_board_state is not None:
+            raw_grids = [list(self._latest_board_state.grid)]
+        if not raw_grids:
+            return False
+
+        n = len(raw_grids)
+        majority = n // 2 + 1  # strict majority
+
+        for i in range(90):
+            if i in planned or ref[i] == 0:
+                continue  # planned squares or empty ref cells don't count
+            # Count frames where this cell's colour changed from the reference
+            changed_in = sum(
+                1 for g in raw_grids
+                if (ref[i] > 0) != (g[i] > 0) or (ref[i] < 0) != (g[i] < 0)
+            )
+            if changed_in >= majority:
+                self.get_logger().warn(
+                    f'Execution interference: cell {i} (ref={ref[i]}) absent in '
+                    f'{changed_in}/{n} scan frames'
+                )
+                return True
+        return False
+
+    def _check_ai_turn_interference(self, grid: list) -> None:
+        """Declare AI win if any piece has moved while the AI is computing its move.
+
+        Requires _AI_INTERFERENCE_THRESHOLD consecutive differing frames to avoid
+        triggering on YOLO jitter.
+        """
+        ref = self._fen_to_grid(self._current_fen)
+        board_changed = any(grid[i] != ref[i] for i in range(90))
+        if board_changed:
+            self._ai_interference_streak += 1
+            if self._ai_interference_streak >= self._AI_INTERFERENCE_THRESHOLD:
+                self._ai_interference_streak = 0
+                result = 'red_wins' if self._robot_is_red else 'black_wins'
+                self._declare_game_over(result, 'illegal_move')
+                alert = String()
+                alert.data = (
+                    "Illegal: pieces were moved during the AI's turn — AI wins."
+                )
+                self._illegal_move_pub.publish(alert)
+                self._publish_status()
+        else:
+            self._ai_interference_streak = 0
+
     def _return_to_human_watch(self, alert_text: str | None = None) -> None:
         if alert_text:
             alert = String()
@@ -1175,6 +1429,89 @@ class GameManagerNode(Node):
             self._publish_status()
             return
 
+        # Definitive single-piece move: if the human's own piece clearly left exactly one
+        # square and appeared at exactly one square, the move is unambiguous. Validate it
+        # directly rather than relying on tolerance inference (which can pick a spurious,
+        # unrelated legal move — e.g. i10h10 — when the real move is illegal).
+        appeared_human_def = [
+            i for i in range(90)
+            if (grid[i] * human_sign > 0) and not (ref_for_side[i] * human_sign > 0)
+        ]
+        disappeared_human_def = [
+            i for i in range(90)
+            if (ref_for_side[i] * human_sign > 0) and (grid[i] * human_sign <= 0)
+        ]
+
+        # Net loss of the human's own pieces: a legal move never reduces the mover's
+        # piece count (a move relocates one piece; a capture removes an OPPONENT piece).
+        # If more human pieces vanished than appeared, the human removed their own
+        # piece(s) — possibly alongside a real move. Illegal, game over.
+        if len(disappeared_human_def) > len(appeared_human_def):
+            sqs = ', '.join(
+                f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in disappeared_human_def
+            )
+            self.get_logger().warn(
+                f'Human pieces vanished from {sqs} but only '
+                f'{len(appeared_human_def)} reappeared — own piece removed, game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                'Illegal: you removed your own piece from the board — game over.'
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
+
+        if len(appeared_human_def) == 1 and len(disappeared_human_def) == 1:
+            from_i = disappeared_human_def[0]
+            to_i   = appeared_human_def[0]
+            from_sq = f"{chr(ord('a') + from_i % 9)}{from_i // 9 + 1}"
+            to_sq   = f"{chr(ord('a') + to_i % 9)}{to_i // 9 + 1}"
+            candidate = f"{from_sq}{to_sq}"
+            try:
+                legal = sf.legal_moves(VARIANT, self._current_fen, [])
+            except Exception:
+                legal = []
+            if candidate in legal:
+                # Confirm no extra pieces were disturbed alongside the valid move.
+                extra = self._extra_changes_for_move(candidate, ref_for_side, grid, human_sign)
+                if extra:
+                    sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
+                    self.get_logger().warn(
+                        f'Interference alongside move {candidate}: extra changes at {sqs} — game over'
+                    )
+                    result = 'black_wins' if human_red else 'red_wins'
+                    self._declare_game_over(result, 'illegal_move')
+                    alert = String()
+                    alert.data = (
+                        'Illegal: extra pieces were moved or removed alongside your move — game over.'
+                    )
+                    self._illegal_move_pub.publish(alert)
+                    self._publish_status()
+                    return
+                self.get_logger().info(f'Human move (definitive): {candidate}')
+                self._apply_move(candidate, is_ai=False)
+                self._check_game_over()
+                if self._game_state != GameState.GAME_OVER:
+                    self._game_state = GameState.COMPUTING_AI
+                    self._publish_status()
+                    self._compute_and_emit_ai_move()
+                return
+            self.get_logger().warn(
+                f'Human made illegal move {from_sq}->{to_sq} — game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                f'Illegal move: {from_sq.upper()}->{to_sq.upper()} is not legal — game over.'
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
+
         detected_move = self._infer_move_from_board(
             self._current_fen,
             grid,
@@ -1229,22 +1566,56 @@ class GameManagerNode(Node):
                         ap_i  = appeared_human[0]
                         ap_sq = f"{chr(ord('a') + ap_i % 9)}{ap_i // 9 + 1}"
                         self.get_logger().warn(
-                            f'Illegal placement: piece appeared at {ap_sq}, '
-                            f'but inferred move {detected_move} would go to '
-                            f'{to_file_ch}{to_rank_1based} — rejecting'
+                            f'Vision shows piece at {ap_sq} but inferred move {detected_move} '
+                            f'goes to {to_file_ch}{to_rank_1based} — YOLO position mismatch, '
+                            'trusting move inference'
+                        )
+            except Exception as e:
+                self.get_logger().warn(f'Placement check error: {e}')
+
+        # Ghost-move guard: if no human piece appeared anywhere on the board and the
+        # inferred destination is empty, the piece was physically removed rather than
+        # moved. Tolerance-based inference can still "find" a legal move in this case
+        # because the from-square being empty is a valid match. Catch it here.
+        if not appeared_human:
+            try:
+                parsed = _resolver_parse_move(detected_move)
+                if parsed is not None:
+                    _, (to_file_ch, to_rank_1based) = parsed
+                    dest_idx = (to_rank_1based - 1) * 9 + (ord(to_file_ch) - ord('a'))
+                    if grid[dest_idx] * human_sign <= 0:
+                        self.get_logger().warn(
+                            f'Ghost move blocked: {detected_move} — no human piece '
+                            f'appeared and destination {to_file_ch}{to_rank_1based} is empty'
                         )
                         result = 'black_wins' if human_red else 'red_wins'
                         self._declare_game_over(result, 'illegal_move')
                         alert = String()
                         alert.data = (
-                            f'Illegal move: {detected_move[:2].upper()}→{ap_sq} is not a '
-                            'legal destination for that piece — game over.'
+                            'Illegal: your piece was removed from the board — game over.'
                         )
                         self._illegal_move_pub.publish(alert)
                         self._publish_status()
                         return
             except Exception as e:
-                self.get_logger().warn(f'Illegal placement check error: {e}')
+                self.get_logger().warn(f'Ghost move check error: {e}')
+
+        # Final interference check: confirm no extra pieces were disturbed.
+        extra = self._extra_changes_for_move(detected_move, ref_for_side, grid, human_sign)
+        if extra:
+            sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
+            self.get_logger().warn(
+                f'Interference alongside inferred move {detected_move}: extra changes at {sqs} — game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._declare_game_over(result, 'illegal_move')
+            alert = String()
+            alert.data = (
+                'Illegal: extra pieces were moved or removed alongside your move — game over.'
+            )
+            self._illegal_move_pub.publish(alert)
+            self._publish_status()
+            return
 
         self.get_logger().info(f'Human move detected: {detected_move}')
         self._apply_move(detected_move, is_ai=False)
@@ -1377,14 +1748,12 @@ class GameManagerNode(Node):
             )
             return
 
-        self._ai_dispatch_id += 1
-        dispatch_id = self._ai_dispatch_id
+        self._ai_move_retry_count = 0  # fresh move, reset retry counter
 
         self._pending_ai_move = ai_move
         self._pending_ai_eval_cp = resp.evaluation_cp
         self._pending_ai_depth = resp.depth_reached
         self._pending_ai_elapsed = resp.thinking_time_sec
-        self._active_dispatch_id = dispatch_id
 
         # --- Simulation mode: apply move directly, no physical robot needed ---
         if self._simulation_mode:
@@ -1407,7 +1776,6 @@ class GameManagerNode(Node):
                 elapsed=resp.thinking_time_sec,
             )
             self._pending_ai_move = None
-            self._active_dispatch_id = None
             self._check_game_over()
             if self._game_state == GameState.GAME_OVER:
                 self._publish_status()
@@ -1424,21 +1792,10 @@ class GameManagerNode(Node):
                 self._tell_vision_to_watch(True)
                 self._publish_status()
             return
-        # --- Hardware mode: dispatch to task_planner ---
-        cmd = AiMoveCommand()
-        cmd.dispatch_id = dispatch_id
-        cmd.move = ai_move
-        cmd.is_capture = bool(is_capture)
-        cmd.expected_fen = expected_fen
-        self._ai_move_command_pub.publish(cmd)
-
+        # --- Hardware mode: dispatch to task_planner via action server ---
         self._game_state = GameState.EXECUTING_MOVE
         self._publish_status()
-
-        self._active_dispatch_id = dispatch_id
-        self._clear_planner_ack_timer()
-        # Planner must ack the command quickly, or we abandon to avoid deadlock
-        self._planner_ack_timer = self.create_timer(2.0, self._on_planner_ack_timeout)
+        self._dispatch_to_planner(ai_move, expected_fen, bool(is_capture), retry=0)
 
     def _clear_delayed_ai_timers(self) -> None:
         for t in self._delayed_ai_timers:
@@ -1713,6 +2070,11 @@ class GameManagerNode(Node):
                         touched = both_ends
                 if touched:
                     pool = touched
+                else:
+                    # The board physically changed but no legal move touches any changed
+                    # square — the change has no legal explanation. Do NOT fall back to all
+                    # legal moves (that picks a spurious unrelated move). Signal no match.
+                    return None
 
             if human_red is not None:
                 pool = [
@@ -1737,10 +2099,13 @@ class GameManagerNode(Node):
                 # FEN had a piece AND the move doesn't touch that cell.  These are missed
                 # detections (YOLO jitter), not real captures — ignoring them prevents a
                 # spurious capture from looking like the best match.
+                # Sign-only comparison: only check piece colour (red/black/empty),
+                # not piece type. YOLO often misidentifies types but colour is reliable.
                 mismatches = sum(
                     1 for i in range(90)
-                    if candidate_grid[i] != new_grid[i]
-                    and not (new_grid[i] == 0 and auth_grid[i] != 0 and i not in critical)
+                    if (candidate_grid[i] > 0) != (new_grid[i] > 0)
+                    or (candidate_grid[i] < 0) != (new_grid[i] < 0)
+                    if not (new_grid[i] == 0 and auth_grid[i] != 0 and i not in critical)
                 )
                 if mismatches < best_mismatches:
                     best_mismatches = mismatches

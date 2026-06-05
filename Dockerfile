@@ -40,7 +40,7 @@ RUN if id -u rosuser >/dev/null 2>&1; then \
     && pip3 uninstall -y numpy opencv-python opencv-python-headless || true
 
 # pymodbus: required by onrobot_rg2_driver (Modbus TCP to RG2 via EyeBox)
-# ultralytics: YOLOv8n for piece detection
+# ultralytics: YOLOv8 piece detection; onnx/onnxruntime: CPU ONNX export + inference
 # flask/flask-socketio/eventlet/flask-cors: web dashboard
 # numpy<2: matches ROS Humble cv_bridge (NumPy 2 breaks cv_bridge boost bindings)
 # pyffish: installed from same Fairy-Stockfish tree as the binary (see below)
@@ -53,7 +53,10 @@ RUN pip3 install --no-cache-dir \
     eventlet \
     scipy \
     'opencv-python>=4.6.0,<4.10.0' \
-    'numpy>=1.23,<2'
+    'numpy>=1.23,<2' \
+    && pip3 install --no-cache-dir onnx onnxruntime \
+    && pip3 install --no-cache-dir --force-reinstall \
+    'opencv-python>=4.6.0,<4.10.0' 'numpy>=1.23,<2'
 
 # YOLO weights: place xiangqi_kaggle_v1_best.pt under workspace/src/xiangqi_vision/models/
 # before colcon, or use tools/fetch_yolo_weights.py / env XIANGQI_YOLO_DOWNLOAD_URL at runtime.

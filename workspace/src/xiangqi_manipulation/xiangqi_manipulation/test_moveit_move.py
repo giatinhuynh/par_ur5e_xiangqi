@@ -374,6 +374,80 @@ def _run_board_cell(node: Node, cal_path: str, square: str, go_to_grasp: bool) -
     return True
 
 
+def _run_pick_place(
+    node: Node,
+    client: MoveGroupOmplClient,
+    scan_names: list,
+    scan_pos: list,
+    pick_approach: tuple,
+    pick_grasp: tuple,
+    place_approach: tuple,
+    place_release: tuple,
+    pick_label: str,
+    place_label: str,
+    pick_transit: tuple | None = None,
+    place_joint_approach: tuple | None = None,
+    place_joint_grasp: tuple | None = None,
+    return_scan: bool = True,
+) -> bool:
+    """One pick-and-place leg (mirrors manipulation_node step order).
+
+    Board pick (approach / grasp / lift): always pick_approach & pick_grasp (IK on hardware).
+
+    place_joint_approach / place_joint_grasp: when set (capture → graveyard), transit and
+    place use taught graveyard joints instead of IK/board interpolation.
+
+    pick_transit: optional IK transit between pick lift and place (board-to-board only).
+    """
+    pa_n, pa_p = pick_approach
+    pg_n, pg_p = pick_grasp
+    da = place_joint_approach or place_approach
+    dr = place_joint_grasp or place_release
+    da_n, da_p = da
+    dr_n, dr_p = dr
+
+    def step(label: str, fn) -> bool:
+        node.get_logger().info(f'→ {label}')
+        ok = fn()
+        if not ok:
+            node.get_logger().error(f'FAILED at: {label}')
+        return ok
+
+    if not step('open gripper', lambda: _gripper(node, OPEN_WIDTH, OPEN_FORCE)):
+        return False
+    if scan_names and not step('scan pose', lambda: client.move_to_joints(scan_names, scan_pos)):
+        return False
+    if not step(f'approach {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
+        return False
+    if not step(f'grasp {pick_label}', lambda: client.move_to_joints(pg_n, pg_p)):
+        return False
+    if not step('grip', lambda: _gripper(node, GRASP_WIDTH, GRASP_FORCE)):
+        return False
+    if not step(f'lift {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
+        return False
+    if place_joint_approach is not None:
+        gy_n, gy_p = place_joint_approach
+        if not step('transit to graveyard', lambda: client.move_to_joints(gy_n, gy_p)):
+            return False
+    elif pick_transit is not None:
+        tr_n, tr_p = pick_transit
+        if not step('transit', lambda: client.move_to_joints(tr_n, tr_p)):
+            return False
+    if not step(f'approach {place_label}', lambda: client.move_to_joints(da_n, da_p)):
+        return False
+    if not step(f'place {place_label}', lambda: client.move_to_joints(dr_n, dr_p)):
+        return False
+    if not step('release', lambda: _gripper(node, RELEASE_WIDTH, OPEN_FORCE)):
+        return False
+    if not step(f'lift {place_label}', lambda: client.move_to_joints(da_n, da_p)):
+        return False
+    if return_scan and scan_names and not step(
+        'scan pose', lambda: client.move_to_joints(scan_names, scan_pos)
+    ):
+        return False
+    return True
+
+
 def _run_joint_pick_place(
     node: Node,
     client: MoveGroupOmplClient,
@@ -386,42 +460,13 @@ def _run_joint_pick_place(
     pick_label: str,
     place_label: str,
 ) -> bool:
-    """One joint-space pick-and-place leg (same sequence as manipulation_node)."""
-    pa_n, pa_p = pick_approach_j
-    pg_n, pg_p = pick_grasp_j
-    da_n, da_p = place_approach_j
-    dg_n, dg_p = place_grasp_j
-
-    def step(label: str, fn) -> bool:
-        node.get_logger().info(f'→ {label}')
-        ok = fn()
-        if not ok:
-            node.get_logger().error(f'FAILED at: {label}')
-        return ok
-
-    if not step('open gripper', lambda: _gripper(node, OPEN_WIDTH, OPEN_FORCE)):
-        return False
-    if not step('scan pose', lambda: client.move_to_joints(scan_names, scan_pos)):
-        return False
-    if not step(f'approach {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
-        return False
-    if not step(f'grasp {pick_label}', lambda: client.move_to_joints(pg_n, pg_p)):
-        return False
-    if not step('grip', lambda: _gripper(node, GRASP_WIDTH, GRASP_FORCE)):
-        return False
-    if not step(f'lift {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
-        return False
-    if not step(f'approach {place_label}', lambda: client.move_to_joints(da_n, da_p)):
-        return False
-    if not step(f'place {place_label}', lambda: client.move_to_joints(dg_n, dg_p)):
-        return False
-    if not step('release', lambda: _gripper(node, RELEASE_WIDTH, OPEN_FORCE)):
-        return False
-    if not step(f'lift {place_label}', lambda: client.move_to_joints(da_n, da_p)):
-        return False
-    if not step('scan pose', lambda: client.move_to_joints(scan_names, scan_pos)):
-        return False
-    return True
+    """One fully joint-space pick-and-place leg."""
+    return _run_pick_place(
+        node, client, scan_names, scan_pos,
+        pick_approach_j, pick_grasp_j,
+        place_approach_j, place_grasp_j,
+        pick_label, place_label,
+    )
 
 
 def _load_cal_and_scan(node: Node, cal_path: str):
@@ -477,8 +522,11 @@ def _run_capture_move(
     """Capture demo: remove opponent on destination square to graveyard, then move piece.
 
     Mirrors planner order (PlaceInGraveyardBehaviour then PickPieceBehaviour):
-      1. Pick captured piece at TO → graveyard
-      2. Pick moving piece at FROM → TO
+      1. Pick captured piece at TO (board; IK on manipulation_node) → graveyard (taught joints)
+      2. Pick moving piece at FROM → TO (all board waypoints via IK on manipulation_node)
+
+    This test script uses joint targets for board cells until IK helpers are wired here;
+    on-robot behaviour follows manipulation_node (IK board, joint graveyard).
 
     Place a piece on the destination square before running (the captured victim).
     """
@@ -496,22 +544,28 @@ def _run_capture_move(
     ):
         return False
 
+    # Red captured piece → red graveyard joints; black → black graveyard joints.
     gy_zone = 'red graveyard' if captured_is_red else 'black graveyard'
     node.get_logger().info(
         f'Capture move {from_sq.upper()} → {to_sq.upper()}: '
-        f'remove piece on {to_sq.upper()} to {gy_zone}, then relocate'
+        f'remove {"red" if captured_is_red else "black"} piece on {to_sq.upper()} '
+        f'to {gy_zone}, then relocate'
     )
 
     client = _make_client(node)
     if not client.wait_for_server(timeout_sec=15.0):
         return False
 
-    node.get_logger().info('--- Phase 1: capture to graveyard ---')
-    if not _run_joint_pick_place(
+    node.get_logger().info(
+        f'--- Phase 1: capture {to_sq.upper()} → {gy_zone} (board pick, joint graveyard) ---'
+    )
+    if not _run_pick_place(
         node, client, scan_names, scan_pos,
         cap_pick_approach_j, cap_pick_grasp_j,
         gy_approach_j, gy_grasp_j,
         to_sq.upper(), gy_zone,
+        place_joint_approach=gy_approach_j,
+        place_joint_grasp=gy_grasp_j,
     ):
         return False
 

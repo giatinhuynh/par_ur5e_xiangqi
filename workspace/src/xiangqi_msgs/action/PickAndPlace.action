@@ -5,6 +5,7 @@ geometry_msgs/Pose pick_pose     # World-frame pose (robot base_link) to pick fr
 geometry_msgs/Pose place_pose    # World-frame pose (robot base_link) to place at
 float32 approach_height          # Z offset above target for approach/depart (metres)
 float32 transit_height           # Z height for lateral transit between pick and place
+bool place_is_graveyard          # True when place_pose is an off-board graveyard slot
 ---
 bool success
 float32 placement_error_mm       # Estimated error from target in mm

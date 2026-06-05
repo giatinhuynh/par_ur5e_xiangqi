@@ -14,7 +14,7 @@ from std_msgs.msg import String, Bool
 from std_srvs.srv import Trigger
 
 from xiangqi_msgs.srv import GetBoardState
-from xiangqi_msgs.msg import AiExecutionResult
+from xiangqi_msgs.action import ExecuteMove
 
 
 PIECE_CODES = {
@@ -236,7 +236,15 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.FAILURE
 
         try:
-            approach_pick, grasp, lift, approach_place, place = translator.move_to_poses(move)
+            retry_attempt = int(_bb_get(self._bb, 'retry_attempt', 0))
+            grasp_height = translator._grasp_height_m()
+            if retry_attempt > 0:
+                # Descend progressively lower on each retry (attempt 1 → 1×, 2 → 2×, ...).
+                lower = float(_bb_get(self._bb, 'grasp_z_lower_on_retry_m', 0.005))
+                grasp_height = max(0.0, grasp_height - lower * retry_attempt)
+            approach_pick, grasp, lift, approach_place, place = translator.move_to_poses(
+                move, grasp_height=grasp_height
+            )
             self._bb.set('pick_pose', grasp)
             self._bb.set('place_pose', place)
             self._bb.set('approach_height', translator._approach_height_m())
@@ -250,6 +258,7 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
                 expected_fen = _bb_get(self._bb, 'expected_board_fen', '') or ''
                 parts = expected_fen.split()
                 captured_is_red = len(parts) > 1 and parts[1].strip().lower() == 'w'
+                self._bb.set('captured_piece_is_red', captured_is_red)
                 graveyard = translator.graveyard_pose(is_red_piece=captured_is_red)
                 self._bb.set('graveyard_pose', graveyard)
 
@@ -260,15 +269,13 @@ class SetupMoveCoordinates(py_trees.behaviour.Behaviour):
 
 class FinalizeRobotMoveAfterVerify(py_trees.behaviour.Behaviour):
     """
-    After motion + verify (possibly failed after retries), publish
-    ``/xiangqi/ai_execution_result`` with ``dispatch_id`` and a ``status`` of
-    ``robot_move_complete`` or ``board_verify_failed``. Always clears
-    move-related blackboard keys.
+    After motion + verify (possibly failed after retries), call
+    node.signal_action_complete() with ROBOT_MOVE_COMPLETE or BOARD_VERIFY_FAILED.
+    Always clears move-related blackboard keys.
     """
     def __init__(self, node: Node):
         super().__init__('FinalizeRobotMove')
         self._node = node
-        self._result_pub = node.create_publisher(AiExecutionResult, '/xiangqi/ai_execution_result', 10)
         self._done = False
 
     def initialise(self) -> None:
@@ -279,29 +286,21 @@ class FinalizeRobotMoveAfterVerify(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.SUCCESS
 
         bb = py_trees.blackboard.Blackboard()
-        dispatch_id = _bb_get(bb, 'current_dispatch_id')
-        if dispatch_id is None:
-            self._node.get_logger().error(
-                'FinalizeRobotMoveAfterVerify missing current_dispatch_id; skipping result publish'
+        if _bb_get(bb, 'verification_passed', False):
+            self._node.signal_action_complete(
+                ExecuteMove.Result.ROBOT_MOVE_COMPLETE, ''
             )
-        elif _bb_get(bb, 'verification_passed', False):
-            msg = AiExecutionResult()
-            msg.dispatch_id = int(dispatch_id)
-            msg.status = AiExecutionResult.ROBOT_MOVE_COMPLETE
-            msg.message = ''
-            self._result_pub.publish(msg)
         else:
-            fail = AiExecutionResult()
-            fail.dispatch_id = int(dispatch_id)
-            fail.status = AiExecutionResult.BOARD_VERIFY_FAILED
-            fail.message = 'board mismatch after retries'
-            self._result_pub.publish(fail)
             self._node.get_logger().warn(
-                'Board verification failed after retries - publishing board_verify_failed'
+                'Board verification failed after retries - signalling board_verify_failed'
+            )
+            self._node.signal_action_complete(
+                ExecuteMove.Result.BOARD_VERIFY_FAILED, 'board mismatch after retries'
             )
 
         bb.set('ai_move', None)
         bb.set('is_capture', False)
+        bb.set('captured_piece_is_red', None)
         bb.set('expected_board_fen', None)
         bb.set('current_dispatch_id', None)
         bb.set('verification_passed', False)
@@ -313,14 +312,13 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
     """
     Fallback child of a ``Selector`` wrapping the main move sequence: runs when
     capture / pick-place / setup fails before ``FinalizeRobotMoveAfterVerify``.
-    Publishes ``/xiangqi/ai_execution_result`` with ``status=ai_motion_failed``
-    and clears move blackboard keys so the game manager can drop the pending AI
-    move without committing FEN.
+    Calls node.signal_action_complete(AI_MOTION_FAILED) and clears move
+    blackboard keys so the game manager can drop the pending AI move without
+    committing FEN.
     """
     def __init__(self, node: Node):
         super().__init__('AiMotionFailureFinalizer')
         self._node = node
-        self._pub = node.create_publisher(AiExecutionResult, '/xiangqi/ai_execution_result', 10)
         self._done = False
 
     def initialise(self) -> None:
@@ -331,25 +329,19 @@ class AiMotionFailureFinalizer(py_trees.behaviour.Behaviour):
             return py_trees.common.Status.SUCCESS
 
         bb = py_trees.blackboard.Blackboard()
-        dispatch_id = _bb_get(bb, 'current_dispatch_id')
-        if dispatch_id is None:
-            self._node.get_logger().error(
-                'AiMotionFailureFinalizer missing current_dispatch_id; skipping result publish'
-            )
-        else:
-            msg = AiExecutionResult()
-            msg.dispatch_id = int(dispatch_id)
-            msg.status = AiExecutionResult.AI_MOTION_FAILED
-            msg.message = 'setup/capture/manipulation failed before verify'
-            self._pub.publish(msg)
+        self._node.get_logger().error(
+            'Move subtree failed (setup / capture / manipulation) - signalling ai_motion_failed'
+        )
+        self._node.signal_action_complete(
+            ExecuteMove.Result.AI_MOTION_FAILED,
+            'setup/capture/manipulation failed before verify',
+        )
         bb.set('ai_move', None)
         bb.set('is_capture', False)
+        bb.set('captured_piece_is_red', None)
         bb.set('expected_board_fen', None)
         bb.set('current_dispatch_id', None)
         bb.set('verification_passed', False)
-        self._node.get_logger().error(
-            'Move subtree failed (setup / capture / manipulation) - publishing ai_motion_failed'
-        )
         self._done = True
         return py_trees.common.Status.SUCCESS
 

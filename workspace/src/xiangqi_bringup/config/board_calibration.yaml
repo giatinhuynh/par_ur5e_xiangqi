@@ -24,7 +24,7 @@ calibration_corners_base:
   - [-0.28972568,  0.37698402,  0.00295336]   # a9
 grid_spacing_mm: 61.25
 piece_diameter_mm: 20.0
-grasp_height_mm: 10.0
+grasp_height_mm: 3.0
 approach_height_mm: 120.0
 transit_height_mm: 200.0
 board_origin_mm: [0.0, 0.0]

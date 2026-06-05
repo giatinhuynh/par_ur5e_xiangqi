@@ -1,21 +1,18 @@
 """
-Piece detector: YOLOv8n inference on the warped board image.
+Piece detector: YOLOv8 inference on the warped board image.
 
-Class mapping (14 piece classes + background):
-  0  red_general    1  red_advisor    2  red_elephant   3  red_horse
-  4  red_chariot    5  red_cannon     6  red_soldier
-  7  black_general  8  black_advisor  9  black_elephant 10 black_horse
-  11 black_chariot  12 black_cannon   13 black_soldier
-
-Piece code mapping (for BoardState.grid):
-  red:   general=1, advisor=2, elephant=3, horse=4, chariot=5, cannon=6, soldier=7
-  black: same values but negative
+Class IDs come from the loaded .pt (data.yaml names). v4 uses black-then-red
+alphabetical order; v8 uses red-then-black piece-type order. Mapping to grid
+values is built at load time from model.names — do not hard-code one layout.
 """
 
 from __future__ import annotations
+
+import logging
+import re
+from typing import Dict, List, Tuple, Union
+
 import numpy as np
-from typing import List, Tuple, Optional
-import cv2
 
 try:
     import torch
@@ -29,53 +26,158 @@ try:
 except ImportError:
     YOLO_AVAILABLE = False
 
-
-class _nullctx:
-    def __enter__(self): return self
-    def __exit__(self, *_): pass
+_log = logging.getLogger(__name__)
 
 BOARD_FILES = 9
 BOARD_RANKS = 10
 
-# (class_id -> (is_red, piece_code))
-# Kaggle model classes are alphabetically ordered within each color group:
-#   0-6: black advisor, cannon, chariot, elephant, general, horse, soldier
-#   7-13: red advisor, cannon, chariot, elephant, general, horse, soldier
-CLASS_MAP = {
-    0:  (False, 2),   # black advisor
-    1:  (False, 6),   # black cannon
-    2:  (False, 5),   # black chariot
-    3:  (False, 3),   # black elephant
-    4:  (False, 1),   # black general
-    5:  (False, 4),   # black horse
-    6:  (False, 7),   # black soldier
-    7:  (True,  2),   # red advisor
-    8:  (True,  6),   # red cannon
-    9:  (True,  5),   # red chariot
-    10: (True,  3),   # red elephant
-    11: (True,  1),   # red general
-    12: (True,  4),   # red horse
-    13: (True,  7),   # red soldier
+# Piece-type token (after colour prefix) -> BoardState piece_code magnitude
+_PIECE_TYPE_CODE: Dict[str, int] = {
+    'general': 1, 'king': 1, 'shuai': 1, 'jiang': 1,
+    'advisor': 2, 'shi': 2, 'guard': 2,
+    'elephant': 3, 'xiang': 3, 'bishop': 3,
+    'horse': 4, 'ma': 4, 'knight': 4,
+    'chariot': 5, 'ju': 5, 'rook': 5, 'che': 5,
+    'cannon': 6, 'pao': 6,
+    'soldier': 7, 'bing': 7, 'zu': 7, 'pawn': 7,
 }
 
-CLASS_NAMES = [
+# Fallback when model.names is missing (v4-style alphabetical black then red)
+_LEGACY_CLASS_MAP: Dict[int, Tuple[bool, int]] = {
+    0: (False, 2), 1: (False, 6), 2: (False, 5), 3: (False, 3), 4: (False, 1),
+    5: (False, 4), 6: (False, 7),
+    7: (True, 2), 8: (True, 6), 9: (True, 5), 10: (True, 3), 11: (True, 1),
+    12: (True, 4), 13: (True, 7),
+}
+_LEGACY_CLASS_NAMES: List[str] = [
     'black_advisor', 'black_cannon', 'black_chariot', 'black_elephant',
     'black_general', 'black_horse', 'black_soldier',
     'red_advisor', 'red_cannon', 'red_chariot', 'red_elephant',
     'red_general', 'red_horse', 'red_soldier',
 ]
 
-from xiangqi_vision.board_layout import NORM_W, NORM_H, MARGIN, pixel_to_grid as _pixel_to_grid
+from xiangqi_vision.board_layout import pixel_to_grid as _pixel_to_grid
+
+
+class _nullctx:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+
+def _normalize_label(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', name.strip().lower()).strip('_')
+
+
+def _label_to_red_code(name: str) -> Tuple[bool, int]:
+    """Parse a YOLO class name into (is_red, piece_code)."""
+    norm = _normalize_label(name)
+    if not norm:
+        raise ValueError(f'empty class name')
+
+    is_red: bool | None = None
+    if norm.startswith('red_') or norm.startswith('r_'):
+        is_red = True
+        piece_token = norm.split('_', 1)[1]
+    elif norm.startswith('black_') or norm.startswith('b_'):
+        is_red = False
+        piece_token = norm.split('_', 1)[1]
+    else:
+        for prefix, red in (('red', True), ('black', False)):
+            if norm.startswith(prefix) and len(norm) > len(prefix):
+                is_red = red
+                piece_token = norm[len(prefix):].lstrip('_')
+                break
+        else:
+            raise ValueError(f'cannot infer colour from class name: {name!r}')
+
+    code = _PIECE_TYPE_CODE.get(piece_token)
+    if code is None:
+        raise ValueError(f'unknown piece type in class name: {name!r}')
+    return is_red, code
+
+
+def build_class_map_from_names(
+    names: Union[Dict[int, str], List[str], Dict[str, str]],
+) -> Tuple[Dict[int, Tuple[bool, int]], List[str]]:
+    """Build (class_id -> (is_red, code), ordered names) from Ultralytics names."""
+    if isinstance(names, list):
+        items = [(i, str(n)) for i, n in enumerate(names)]
+    else:
+        items = sorted((int(k), str(v)) for k, v in names.items())
+
+    class_map: Dict[int, Tuple[bool, int]] = {}
+    class_names: List[str] = []
+    for cid, name in items:
+        class_map[cid] = _label_to_red_code(name)
+        class_names.append(name)
+    return class_map, class_names
+
+
+def _yolo_model_names(model: 'YOLO') -> Union[Dict[int, str], List[str], None]:
+    names = getattr(model, 'names', None)
+    if names:
+        return names
+    inner = getattr(getattr(model, 'model', None), 'names', None)
+    return inner or None
+
+
+def _trained_imgsz_from_model(model: 'YOLO') -> int | None:
+    """Read imgsz from Ultralytics model metadata.
+
+    Checks (in order):
+      1. ckpt.train_args  — .pt weights trained with Ultralytics
+      2. model.overrides  — populated for TensorRT .engine and ONNX exports
+    Returns None when neither source has the value (caller falls back to 640).
+    For TensorRT engines set yolo_imgsz explicitly to match the export imgsz.
+    """
+    ckpt = getattr(model, 'ckpt', None)
+    if isinstance(ckpt, dict):
+        ta = ckpt.get('train_args')
+        if ta is not None:
+            imgsz = getattr(ta, 'imgsz', None)
+            if imgsz is None and isinstance(ta, dict):
+                imgsz = ta.get('imgsz')
+            if imgsz is not None:
+                if isinstance(imgsz, (list, tuple)):
+                    return int(max(imgsz))
+                return int(imgsz)
+
+    # TensorRT / ONNX exports store metadata in model.overrides
+    overrides = getattr(model, 'overrides', None)
+    if isinstance(overrides, dict):
+        imgsz = overrides.get('imgsz')
+        if imgsz is not None:
+            if isinstance(imgsz, (list, tuple)):
+                return int(max(imgsz))
+            return int(imgsz)
+
+    return None
 
 
 class Detection:
-    __slots__ = ('class_id', 'class_name', 'is_red', 'piece_code',
-                 'file', 'rank', 'pixel_x', 'pixel_y', 'confidence')
+    __slots__ = (
+        'class_id', 'class_name', 'is_red', 'piece_code',
+        'file', 'rank', 'pixel_x', 'pixel_y', 'confidence',
+    )
 
-    def __init__(self, class_id, px, py, conf):
+    def __init__(
+        self,
+        class_id: int,
+        px: float,
+        py: float,
+        conf: float,
+        *,
+        class_map: Dict[int, Tuple[bool, int]],
+        class_names: List[str],
+    ):
         self.class_id = class_id
-        self.class_name = CLASS_NAMES[class_id] if class_id < len(CLASS_NAMES) else 'unknown'
-        is_red, code = CLASS_MAP.get(class_id, (True, 0))
+        self.class_name = (
+            class_names[class_id] if 0 <= class_id < len(class_names) else 'unknown'
+        )
+        is_red, code = class_map.get(class_id, (True, 0))
         self.is_red = is_red
         self.piece_code = code
         self.pixel_x = px
@@ -93,13 +195,38 @@ class Detection:
 
 
 class PieceDetector:
-    """Runs YOLOv8n inference on the normalised board image and returns grid occupancy."""
+    """Runs YOLOv8 inference on the normalised board image and returns grid occupancy."""
 
-    def __init__(self, model_path: str, confidence_threshold: float = 0.5):
+    def __init__(
+        self,
+        model_path: str,
+        confidence_threshold: float = 0.5,
+        yolo_imgsz: int = 0,
+    ):
         if not YOLO_AVAILABLE:
-            raise ImportError("ultralytics package not installed")
+            raise ImportError('ultralytics package not installed')
         self._model = YOLO(model_path)
         self._conf_threshold = confidence_threshold
+        if yolo_imgsz > 0:
+            self._infer_imgsz = int(yolo_imgsz)
+        else:
+            self._infer_imgsz = _trained_imgsz_from_model(self._model) or 640
+        raw_names = _yolo_model_names(self._model)
+        if raw_names:
+            self._class_map, self._class_names = build_class_map_from_names(raw_names)
+            _log.info(
+                'YOLO class layout from weights (%d classes), e.g. 0=%s; infer imgsz=%d',
+                len(self._class_names),
+                self._class_names[0] if self._class_names else '?',
+                self._infer_imgsz,
+            )
+        else:
+            self._class_map = dict(_LEGACY_CLASS_MAP)
+            self._class_names = list(_LEGACY_CLASS_NAMES)
+            _log.warning(
+                'YOLO model has no names metadata; using legacy v4 class layout; infer imgsz=%d',
+                self._infer_imgsz,
+            )
 
     def detect(self, board_image: np.ndarray) -> Tuple[List[Detection], np.ndarray]:
         """
@@ -108,21 +235,15 @@ class PieceDetector:
         Returns:
             (detections, annotated_image)
         """
-        # Cap at 640 - YOLO resizes internally, and 640px is more than enough resolution
-        # for a Xiangqi board (each grid square ~70px at this size). Passing the full
-        # 890x800 warp to YOLO was causing ~2s/frame on CPU; 640 brings it to ~300-500ms.
-        MAX_INFER_SIZE = 640
-        h, w = board_image.shape[:2]
-        scale = min(MAX_INFER_SIZE / h, MAX_INFER_SIZE / w, 1.0)
-        infer_h = int(round(h * scale / 32) * 32) or 32
-        infer_w = int(round(w * scale / 32) * 32) or 32
+        # Use training imgsz (e.g. v8x @ 1024). Older code capped at 640 and never upscaled,
+        # which heavily hurts models trained at 1024. Scalar imgsz lets Ultralytics letterbox.
         ctx = torch.no_grad() if TORCH_AVAILABLE else _nullctx()
         with ctx:
             results = self._model.predict(
                 board_image,
                 conf=self._conf_threshold,
                 verbose=False,
-                imgsz=(infer_h, infer_w),
+                imgsz=self._infer_imgsz,
             )
 
         detections: List[Detection] = []
@@ -132,21 +253,34 @@ class PieceDetector:
                 conf = float(box.conf[0].item())
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-                det = Detection(cls_id, cx, cy, conf)
+                det = Detection(
+                    cls_id, cx, cy, conf,
+                    class_map=self._class_map,
+                    class_names=self._class_names,
+                )
                 if det.valid:
                     detections.append(det)
 
         annotated = results[0].plot() if results else board_image.copy()
         return detections, annotated
 
-    def detections_to_grid(self, detections: List[Detection]) -> np.ndarray:
-        """Convert a list of detections to a flat int8[90] grid array."""
+    def detections_to_grid(
+        self, detections: List[Detection]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert detections to (grid int8[90], cell_confidence float32[90]).
+
+        When multiple detections fall on the same cell, the one with the highest
+        confidence wins — both for the piece code and the confidence value.
+        """
         grid = np.zeros(BOARD_FILES * BOARD_RANKS, dtype=np.int8)
+        cell_conf = np.zeros(BOARD_FILES * BOARD_RANKS, dtype=np.float32)
         for det in detections:
             if det.valid:
                 idx = det.rank * BOARD_FILES + det.file
-                grid[idx] = det.grid_value
-        return grid
+                if det.confidence > cell_conf[idx]:
+                    cell_conf[idx] = det.confidence
+                    grid[idx] = det.grid_value
+        return grid, cell_conf
 
     def mean_confidence(self, detections: List[Detection]) -> float:
         if not detections:

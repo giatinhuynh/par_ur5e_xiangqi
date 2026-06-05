@@ -10,6 +10,9 @@
 #   USE_XIANGQI_IMAGE=1      force ur5e_xiangqi:latest compose override
 #   USE_XIANGQI_IMAGE=0      force stock ros:humble + pip deps
 #   SKIP_DEPS=1              only docker-compose up (no dep install)
+#   SKIP_ONNX_EXPORT=1       skip automatic yolo .pt -> .onnx export after deps
+#   FORCE_ONNX_EXPORT=1      re-export ONNX even if file exists
+#   YOLO_PT=...              weights path inside container (default v4_best.pt)
 #
 # After start:
 #   cd ~/UR5e_Env && ./docker-attach.sh
@@ -98,8 +101,11 @@ if ! docker ps --format '{{.Names}}' | grep -qx "$CONTAINER"; then
 fi
 
 if [[ "${SKIP_DEPS:-}" != "1" ]]; then
-  echo "==> Ensuring Xiangqi Python / engine dependencies..."
+  echo "==> Ensuring Xiangqi Python / engine dependencies (+ optional ONNX export)..."
   REPO="$REPO" CONTAINER="$CONTAINER" "$REPO/tools/lab_ensure_deps.sh"
+elif [[ "${SKIP_ONNX_EXPORT:-}" != "1" && -x "$REPO/tools/lab_export_yolo_onnx.sh" ]]; then
+  echo "==> SKIP_DEPS=1 — running ONNX export check only..."
+  REPO="$REPO" CONTAINER="$CONTAINER" "$REPO/tools/lab_export_yolo_onnx.sh"
 else
   echo "==> SKIP_DEPS=1 — not running lab_ensure_deps.sh"
 fi

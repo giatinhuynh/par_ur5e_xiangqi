@@ -131,6 +131,7 @@ let lastMove    = null;
 // True from Start/Reset click until backend leaves idle (or timeout)
 let gameStarting = false;
 let gameStartingTimer = null;
+let gameStartingLeftGameOver = false;
 const GAME_START_TIMEOUT_MS = 45000;
 
 // ── Flow helpers ──────────────────────────────────────────────────
@@ -141,6 +142,8 @@ function isGameStarting() {
 
 function beginGameStart(label) {
   gameStarting = true;
+  const initGs = (state.game_status || 'idle').toLowerCase();
+  gameStartingLeftGameOver = initGs !== 'game_over';
   if (gameStartingTimer) clearTimeout(gameStartingTimer);
   const text = document.getElementById('board-loading-text');
   if (text) text.textContent = label || 'Starting game…';
@@ -165,7 +168,12 @@ function endGameStart() {
 function checkGameStartComplete() {
   if (!gameStarting) return;
   const gs = (state.game_status || 'idle').toLowerCase();
-  if (gs !== 'idle') {
+  if (gs !== 'game_over') gameStartingLeftGameOver = true;
+  if (gs === 'game_over' && gameStartingLeftGameOver) {
+    endGameStart();
+    return;
+  }
+  if (gs !== 'idle' && gs !== 'game_over') {
     endGameStart();
     return;
   }

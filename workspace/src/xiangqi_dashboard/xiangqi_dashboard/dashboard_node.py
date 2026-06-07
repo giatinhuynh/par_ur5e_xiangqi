@@ -833,11 +833,15 @@ class DashboardNode(Node):
         # Active game: low threshold (moves must reflect quickly).
         self._stable_display_grid: list = [0] * 90
         self._cell_absence_count: list = [0] * 90
-        # Per-cell highest YOLO confidence seen, so the displayed piece type locks to
-        # the most confident reading and never jitters down to a lower-confidence type.
-        self._cell_best_confidence: list = [0.0] * 90
-        self._CELL_ABSENCE_THRESHOLD_IDLE = 2
-        self._CELL_ABSENCE_THRESHOLD_GAME = 2
+        # Per-cell type-change streak: counts consecutive frames where vision
+        # reports a different (non-zero) piece than what is currently displayed.
+        # A type change only commits after this streak reaches _TYPE_CHANGE_THRESHOLD,
+        # preventing brief YOLO misclassifications from flipping the display type.
+        self._cell_type_change_streak: list = [0] * 90
+        self._cell_type_change_candidate: list = [0] * 90
+        self._CELL_ABSENCE_THRESHOLD_IDLE = 3
+        self._CELL_ABSENCE_THRESHOLD_GAME = 10  # ~3 s at 3 Hz — piece must be absent consistently
+        self._TYPE_CHANGE_THRESHOLD = 6          # ~2 s at 3 Hz — type must be stable before committing
         # Post-move lock: after the game manager publishes an authoritative board
         # (conf=1.0), suppress all vision grid updates for this many seconds so
         # jittery YOLO frames can't overwrite the clean post-move display.
@@ -936,7 +940,8 @@ class DashboardNode(Node):
                 # Sync hysteresis state so vision resumes from the correct baseline.
                 self._stable_display_grid = list(new_grid)
                 self._cell_absence_count = [0] * 90
-                self._cell_best_confidence = [0.0] * 90
+                self._cell_type_change_streak = [0] * 90
+                self._cell_type_change_candidate = [0] * 90
                 _state['board_grid'] = new_grid
                 _state['board_source'] = 'game'
                 if msg.fen:
@@ -971,21 +976,40 @@ class DashboardNode(Node):
                 else [0.0] * 90
             )
             for i in range(90):
-                vision_has = new_grid[i] != 0
-                stable_has = self._stable_display_grid[i] != 0
+                vision_val = new_grid[i]
+                vision_has = vision_val != 0
+                stable_val = self._stable_display_grid[i]
+                stable_has = stable_val != 0
                 if vision_has:
                     self._cell_absence_count[i] = 0
-                    # Register on first sight, and keep the highest-confidence type.
-                    if not stable_has or cell_conf[i] > self._cell_best_confidence[i]:
-                        self._stable_display_grid[i] = new_grid[i]
-                        self._cell_best_confidence[i] = cell_conf[i]
-                    # else: keep the locked best-confidence type (ignore lower-conf jitter).
+                    if not stable_has:
+                        # Empty → piece: register immediately.
+                        self._stable_display_grid[i] = vision_val
+                        self._cell_type_change_streak[i] = 0
+                        self._cell_type_change_candidate[i] = 0
+                    elif vision_val == stable_val:
+                        # Same type: streak resets — no pending change.
+                        self._cell_type_change_streak[i] = 0
+                        self._cell_type_change_candidate[i] = 0
+                    else:
+                        # Different type (same or different colour): require a
+                        # streak before committing so brief YOLO flips don't show.
+                        if vision_val == self._cell_type_change_candidate[i]:
+                            self._cell_type_change_streak[i] += 1
+                        else:
+                            self._cell_type_change_candidate[i] = vision_val
+                            self._cell_type_change_streak[i] = 1
+                        if self._cell_type_change_streak[i] >= self._TYPE_CHANGE_THRESHOLD:
+                            self._stable_display_grid[i] = vision_val
+                            self._cell_type_change_streak[i] = 0
+                            self._cell_type_change_candidate[i] = 0
                 else:
+                    self._cell_type_change_streak[i] = 0
+                    self._cell_type_change_candidate[i] = 0
                     self._cell_absence_count[i] += 1
                     if self._cell_absence_count[i] >= threshold and stable_has:
-                        # Piece left this square — clear it and reset its best confidence.
+                        # Piece genuinely left — clear.
                         self._stable_display_grid[i] = 0
-                        self._cell_best_confidence[i] = 0.0
             _state['board_grid'] = list(self._stable_display_grid)
             _state['board_source'] = 'vision'
             if msg.fen:
@@ -1021,7 +1045,8 @@ class DashboardNode(Node):
                 if seed_fen and all(v == 0 for v in self._stable_display_grid):
                     self._stable_display_grid = fen_to_grid(seed_fen)
                     self._cell_absence_count = [0] * 90
-                    self._cell_best_confidence = [0.0] * 90
+                    self._cell_type_change_streak = [0] * 90
+                    self._cell_type_change_candidate = [0] * 90
             _state['is_red_turn'] = msg.is_red_turn
             prev_moves = _state.get('move_count', 0)
             _state['move_count'] = msg.move_count

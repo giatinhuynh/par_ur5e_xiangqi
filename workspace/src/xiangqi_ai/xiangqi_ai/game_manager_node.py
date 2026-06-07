@@ -9,6 +9,7 @@ Publishes GameStatus and MoveHistory for the dashboard and planner.
 from __future__ import annotations
 from enum import Enum, auto
 import json
+import time
 
 import rclpy
 from rclpy.node import Node
@@ -185,6 +186,12 @@ class GameManagerNode(Node):
         self._human_watch_reference_grid: list | None = None
         self._pending_human_move: str | None = None
 
+        # Topic-based scan collection (avoids redundant YOLO calls)
+        self._collecting_ai_scan: bool = False
+        self._ai_verify_scan_start: float = 0.0
+        self._collecting_human_scan: bool = False
+        self._human_scan_start: float = 0.0
+
         # AI move bookkeeping - apply to FEN only after action server confirms completion
         self._pending_ai_move: str | None = None
         self._pending_ai_eval_cp: int = 0
@@ -233,6 +240,34 @@ class GameManagerNode(Node):
         if float(msg.detection_confidence) >= 0.999:
             return
         self._latest_board_state = msg
+        now = time.monotonic()
+
+        # AI verify scan: collect frames from the background detection stream so we
+        # never trigger a redundant synchronous YOLO inference via force_rescan.
+        if self._collecting_ai_scan and now >= self._ai_verify_scan_start:
+            if self._game_state == GameState.EXECUTING_MOVE:
+                self._ai_verify_scan_grids.append(list(msg.grid))
+                if len(self._ai_verify_scan_grids) >= self._AI_VERIFY_SCAN_ROUNDS:
+                    self._collecting_ai_scan = False
+                    finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
+                    finisher()
+                    return
+
+        # Human move scan: same approach — collect from the live topic stream.
+        elif self._collecting_human_scan and now >= self._human_scan_start:
+            if self._game_state == GameState.DETECTING_MOVE:
+                self._human_move_scan_grids.append(list(msg.grid))
+                if len(self._human_move_scan_grids) >= self._HUMAN_SCAN_ROUNDS:
+                    self._collecting_human_scan = False
+                    merged = self._merge_startup_grids(self._human_move_scan_grids)
+                    synthetic = BoardState()
+                    synthetic.grid = [int(v) for v in merged]
+                    synthetic.fen = self._grid_to_fen(merged, self._current_fen)
+                    synthetic.detection_confidence = 0.5
+                    self._latest_board_state = synthetic
+                    self._process_human_move()
+                    return
+
         # Interference check: in ai_vs_human hardware mode, if the human touches
         # any piece during COMPUTING_AI, declare the AI the winner.
         if (self._game_state == GameState.COMPUTING_AI
@@ -432,109 +467,33 @@ class GameManagerNode(Node):
             return False
         return val > 0 if human_red else val < 0
 
-    _HUMAN_SCAN_ROUNDS = 5       # scans to accumulate before inferring human move
-    _HUMAN_SCAN_INTERVAL = 0.20  # seconds between scans
+    _HUMAN_SCAN_ROUNDS = 5       # frames to collect from the live topic before inferring
+    _HUMAN_VERIFY_SETTLE_DELAY = 1.2  # seconds to wait (settle) before collecting starts
 
     def _begin_human_move_detection(self) -> None:
-        """Transition to DETECTING_MOVE and refresh vision before move inference."""
+        """Transition to DETECTING_MOVE and start collecting board frames from the topic."""
         self._tell_vision_to_watch(False)
         self._game_state = GameState.DETECTING_MOVE
         self._publish_status()
         if self._simulation_mode:
             self._process_human_move()
             return
-        if not self._get_board_state_cli.service_is_ready():
-            self._process_human_move()
-            return
-        self._human_move_scan_grids: list = []
-        self._human_scan_retry_timer = None
-        self._do_human_move_scan()
-
-    def _do_human_move_scan(self) -> None:
-        req = GetBoardState.Request()
-        req.force_rescan = True
-        future = self._get_board_state_cli.call_async(req)
-        future.add_done_callback(self._on_human_move_scan_done)
-
-    def _on_human_move_scan_done(self, future) -> None:
-        if self._game_state != GameState.DETECTING_MOVE:
-            return
-        try:
-            resp = future.result()
-            if resp is not None and resp.success and resp.board_state is not None:
-                self._human_move_scan_grids.append(list(resp.board_state.grid))
-        except Exception as e:
-            self.get_logger().warn(f'Human-move rescan failed: {e}')
-
-        n = len(self._human_move_scan_grids)
-        if n < self._HUMAN_SCAN_ROUNDS:
-            # Schedule next scan - gives camera time to deliver a fresh frame
-            self._human_scan_retry_timer = self.create_timer(
-                self._HUMAN_SCAN_INTERVAL, self._on_human_scan_timer
-            )
-            return
-
-        # All rounds done - merge and run move inference
-        if self._human_move_scan_grids:
-            merged = self._merge_startup_grids(self._human_move_scan_grids)
-            # Inject the merged grid as the board state for move inference
-            synthetic = BoardState()
-            synthetic.grid = [int(v) for v in merged]
-            synthetic.fen = self._grid_to_fen(merged, self._current_fen)
-            synthetic.detection_confidence = 0.5
-            self._latest_board_state = synthetic
-        self._process_human_move()
-
-    def _on_human_scan_timer(self) -> None:
-        if hasattr(self, '_human_scan_retry_timer') and self._human_scan_retry_timer:
-            self.destroy_timer(self._human_scan_retry_timer)
-            self._human_scan_retry_timer = None
-        if self._game_state != GameState.DETECTING_MOVE:
-            return
-        self._do_human_move_scan()
+        self._human_move_scan_grids = []
+        self._collecting_human_scan = True
+        self._human_scan_start = time.monotonic() + self._HUMAN_VERIFY_SETTLE_DELAY
 
     # ------------------------------------------------------------------
     # AI verify-failure recovery via multi-scan
     # ------------------------------------------------------------------
 
-    _AI_VERIFY_SCAN_ROUNDS = 5
-    _AI_VERIFY_SCAN_INTERVAL = 0.20
+    _AI_VERIFY_SCAN_ROUNDS = 5      # frames to collect from the live topic before verifying
+    _AI_VERIFY_SETTLE_DELAY = 1.5   # seconds to wait (settle) before collecting starts
 
-    def _do_ai_verify_scan(self) -> None:
-        if not self._get_board_state_cli.service_is_ready():
-            finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
-            finisher()
-            return
-        req = GetBoardState.Request()
-        req.force_rescan = True
-        future = self._get_board_state_cli.call_async(req)
-        future.add_done_callback(self._on_ai_verify_scan_done)
-
-    def _on_ai_verify_scan_done(self, future) -> None:
-        if self._game_state != GameState.EXECUTING_MOVE:
-            return
-        try:
-            resp = future.result()
-            if resp is not None and resp.success and resp.board_state is not None:
-                self._ai_verify_scan_grids.append(list(resp.board_state.grid))
-        except Exception as e:
-            self.get_logger().warn(f'AI verify rescan failed: {e}')
-
-        if len(self._ai_verify_scan_grids) < self._AI_VERIFY_SCAN_ROUNDS:
-            self._ai_verify_scan_timer = self.create_timer(
-                self._AI_VERIFY_SCAN_INTERVAL, self._on_ai_verify_scan_timer
-            )
-            return
-        finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
-        finisher()
-
-    def _on_ai_verify_scan_timer(self) -> None:
-        if hasattr(self, '_ai_verify_scan_timer') and self._ai_verify_scan_timer:
-            self.destroy_timer(self._ai_verify_scan_timer)
-            self._ai_verify_scan_timer = None
-        if self._game_state != GameState.EXECUTING_MOVE:
-            return
-        self._do_ai_verify_scan()
+    def _begin_ai_verify_scan(self) -> None:
+        """Start multi-frame verify scan by collecting from the live board-state topic."""
+        self._ai_verify_scan_grids = []
+        self._collecting_ai_scan = True
+        self._ai_verify_scan_start = time.monotonic() + self._AI_VERIFY_SETTLE_DELAY
 
     def _finish_robot_move_complete(self) -> None:
         """Planner reported success: check for interference, then commit the move."""
@@ -699,17 +658,13 @@ class GameManagerNode(Node):
                     'robot_move_complete but no pending AI move - ignoring'
                 )
                 return
-            self._ai_verify_scan_grids = []
-            self._ai_verify_scan_timer = None
             self._verify_scan_finisher = self._finish_robot_move_complete
-            self._do_ai_verify_scan()
+            self._begin_ai_verify_scan()
             return
 
         if status_code == ExecuteMove.Result.BOARD_VERIFY_FAILED:
-            self._ai_verify_scan_grids = []
-            self._ai_verify_scan_timer = None
             self._verify_scan_finisher = self._finish_ai_verify_recovery
-            self._do_ai_verify_scan()
+            self._begin_ai_verify_scan()
             return
 
         if status_code == ExecuteMove.Result.AI_MOTION_FAILED:
@@ -1274,7 +1229,13 @@ class GameManagerNode(Node):
         return self._human_color == 'red'
 
     def _extra_changes_for_move(
-        self, move: str, ref_grid: list, observed_grid: list, human_sign: int
+        self,
+        move: str,
+        ref_grid: list,
+        observed_grid: list,
+        human_sign: int,
+        *,
+        sign_only: bool = False,
     ) -> list:
         """Return cell indices that changed beyond what a single legal `move` explains.
 
@@ -1284,6 +1245,9 @@ class GameManagerNode(Node):
                          ref=opponent for a capture)
         Any other differing cell is an unexpected extra change (piece removed, piece
         relocated elsewhere, etc.) and is returned in the list.
+
+        When ``sign_only`` is True, only red/black/empty changes count (YOLO type
+        noise on an unchanged square is ignored).
         """
         try:
             parsed = _resolver_parse_move(move)
@@ -1297,7 +1261,10 @@ class GameManagerNode(Node):
         extra = []
         for i in range(90):
             old, new = ref_grid[i], observed_grid[i]
-            if old == new:
+            if sign_only:
+                if (old > 0) == (new > 0) and (old < 0) == (new < 0):
+                    continue
+            elif old == new:
                 continue
             if i == from_i and old * human_sign > 0 and new == 0:
                 continue  # expected: human piece left source
@@ -1307,17 +1274,23 @@ class GameManagerNode(Node):
         return extra
 
     def _execution_interference_detected(self) -> bool:
-        """Return True if non-planned squares clearly changed after execution.
+        """Return True if the board changed beyond the pending robot move.
 
-        Uses all verify-scan rounds for consensus: a cell is flagged only if its
-        colour (red/black/empty) changed in the majority of scan frames, which
-        distinguishes a genuine piece removal from a YOLO false-negative in one frame.
+        Anchors each scan frame to the expected post-move state via
+        ``_extra_changes_for_move``: only cells that changed *outside* the
+        planned from/to squares count.  This ignores YOLO type noise on the
+        move squares and also catches pieces appearing on squares that were
+        empty before the move (the old pre-move colour-diff skipped those).
+
+        A cell is flagged only when it is an extra change in a near-unanimous
+        majority of scan frames (4/5 when n=5).
         """
         move = self._pending_ai_move
         if not move:
             return False
         ref = self._fen_to_grid(self._current_fen)
         planned = move_critical_indices(move)
+        robot_sign = 1 if self._robot_is_red else -1
 
         raw_grids = getattr(self, '_ai_verify_scan_grids', None)
         if not raw_grids and self._latest_board_state is not None:
@@ -1326,20 +1299,24 @@ class GameManagerNode(Node):
             return False
 
         n = len(raw_grids)
-        majority = n // 2 + 1  # strict majority
+        # Near-unanimity for irreversible game-over (4/5 when n=5).
+        majority = max(n - 1, n // 2 + 1)
+
+        extra_counts = [0] * 90
+        for g in raw_grids:
+            for i in self._extra_changes_for_move(
+                move, ref, g, robot_sign, sign_only=True
+            ):
+                extra_counts[i] += 1
 
         for i in range(90):
-            if i in planned or ref[i] == 0:
-                continue  # planned squares or empty ref cells don't count
-            # Count frames where this cell's colour changed from the reference
-            changed_in = sum(
-                1 for g in raw_grids
-                if (ref[i] > 0) != (g[i] > 0) or (ref[i] < 0) != (g[i] < 0)
-            )
-            if changed_in >= majority:
+            if i in planned:
+                continue
+            count = extra_counts[i]
+            if count >= majority:
                 self.get_logger().warn(
-                    f'Execution interference: cell {i} (ref={ref[i]}) absent in '
-                    f'{changed_in}/{n} scan frames'
+                    f'Execution interference: cell {i} (ref={ref[i]}) extra change in '
+                    f'{count}/{n} scan frames'
                 )
                 return True
         return False
@@ -1446,7 +1423,8 @@ class GameManagerNode(Node):
         # piece count (a move relocates one piece; a capture removes an OPPONENT piece).
         # If more human pieces vanished than appeared, the human removed their own
         # piece(s) — possibly alongside a real move. Illegal, game over.
-        if len(disappeared_human_def) > len(appeared_human_def):
+        # Allow 1 extra disappeared piece as potential jitter; 2+ is unambiguous removal.
+        if len(disappeared_human_def) > len(appeared_human_def) + 1:
             sqs = ', '.join(
                 f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in disappeared_human_def
             )
@@ -1476,7 +1454,9 @@ class GameManagerNode(Node):
                 legal = []
             if candidate in legal:
                 # Confirm no extra pieces were disturbed alongside the valid move.
-                extra = self._extra_changes_for_move(candidate, ref_for_side, grid, human_sign)
+                # sign_only=True ignores YOLO type-jitter (cannon↔rook same colour);
+                # only genuine colour changes (disappearing or opponent piece) count.
+                extra = self._extra_changes_for_move(candidate, ref_for_side, grid, human_sign, sign_only=True)
                 if extra:
                     sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
                     self.get_logger().warn(
@@ -1601,7 +1581,9 @@ class GameManagerNode(Node):
                 self.get_logger().warn(f'Ghost move check error: {e}')
 
         # Final interference check: confirm no extra pieces were disturbed.
-        extra = self._extra_changes_for_move(detected_move, ref_for_side, grid, human_sign)
+        # sign_only=True ignores YOLO type-jitter (cannon↔rook same colour);
+        # only genuine colour changes (disappearing or opponent piece) count.
+        extra = self._extra_changes_for_move(detected_move, ref_for_side, grid, human_sign, sign_only=True)
         if extra:
             sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
             self.get_logger().warn(

@@ -178,19 +178,19 @@ class GridStabilizer:
     Three asymmetric thresholds:
     - *appear*      (empty → piece):            fast  — genuine placements confirmed quickly
     - *type_change* (piece → same-colour piece): medium — prevents YOLO type-jitter committing
-    - *vanish*      (piece → empty):             fast  — game logic must see cleared squares quickly
+    - *vanish*      (piece → empty):             medium — brief YOLO misses rarely erase a piece
 
-    With appear=3 / type_change=8 / vanish=3 at 3 Hz:
+    With appear=3 / type_change=8 / vanish=10 at 3 Hz:
       appear      ≈ 1 s   (feels immediate)
       type_change ≈ 2.7 s (YOLO must consistently misclassify for ~3 s to change type)
-      vanish      ≈ 1 s   (fast — display persistence handled separately in dashboard layer)
+      vanish      ≈ 3.3 s (display persistence handled separately in dashboard layer)
     """
 
     def __init__(
         self,
         appear_frames: int = 3,
         type_change_frames: int = 8,
-        vanish_frames: int = 3,
+        vanish_frames: int = 10,
         n_cells: int = 90,
     ):
         self._appear_n      = max(1, appear_frames)
@@ -257,7 +257,7 @@ class VisionNode(Node):
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('grid_smooth_frames', 3)
         self.declare_parameter('grid_type_change_frames', 8)
-        self.declare_parameter('grid_vanish_frames', 3)
+        self.declare_parameter('grid_vanish_frames', 10)
         self.declare_parameter('poll_rate_hz', 3.0)
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
         # Piece detection preprocessing (warped board, before YOLO)

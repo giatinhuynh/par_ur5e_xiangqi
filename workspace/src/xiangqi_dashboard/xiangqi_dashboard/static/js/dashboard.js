@@ -1528,6 +1528,18 @@ function stopGame() {
     .catch(() => showToast('Failed to stop game'));
 }
 
+function backToIdle() {
+  if (state.estop_active) { showToast('Release E-Stop first'); return; }
+  selectedIdx = null;
+  legalDests  = [];
+  lastMove    = null;
+  applyIdleUiState();
+  renderAll();
+  fetch('/api/stop_game', { method: 'POST' })
+    .then(() => { renderAll(); })
+    .catch(() => showToast('Failed to return to idle'));
+}
+
 function resetGame() {
   if (state.estop_active) {
     showToast('Release E-Stop first');

@@ -39,7 +39,7 @@ manipulation_node:
     # Gripper widths (mm) - sized for piece_diameter_mm
     open_width:    50.0   # ~2.5× diameter (clearance)
     grasp_width:   18.0   # diameter − compression
-    release_width: 34.0   # ~1.7× diameter
+    release_width: 45.0   # aggressive open to ensure clean piece drop
     grasp_force:   15.0   # Gripping force in Newtons
     # Graveyard XY positions (base_link, metres) — Z = board_z (acquired from ArUco at startup).
     # These are fixed off-board locations where captured pieces are placed.
@@ -78,7 +78,7 @@ gripper_controller_node:
     gripper_port: 502
     open_width:    50.0
     grasp_width:   18.0
-    release_width: 34.0
+    release_width: 45.0
     default_force: 15.0
 
 safety_monitor_node:

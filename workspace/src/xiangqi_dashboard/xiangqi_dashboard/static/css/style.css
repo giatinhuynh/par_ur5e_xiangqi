@@ -334,6 +334,21 @@ body {
   font-size: 12px;
   color: var(--text-secondary);
 }
+.result-idle-btn {
+  margin-top: 10px;
+  padding: 5px 14px;
+  font-size: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-hi);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.result-idle-btn:hover {
+  background: var(--bg-card);
+  color: var(--ink);
+  border-color: var(--ink);
+}
 
 .estop-banner {
   width: 100%;

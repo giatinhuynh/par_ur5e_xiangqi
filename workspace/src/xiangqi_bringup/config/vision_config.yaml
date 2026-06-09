@@ -13,6 +13,15 @@ vision_node:
     camera_topic: "/camera/camera/color/image_raw"
     camera_config_file: "/home/rosuser/workspace/config/camera_config.yaml"
 
+    # ResNet-34 occupancy model (trained on real board images; replaces classical CV occupancy)
+    # Trained with CELL_PX=107, X_SQUEEZE_PX=12 (see tools/kaggle_train_real_board.py).
+    cv_occ_model_path: "/home/rosuser/workspace/src/xiangqi_vision/models/occupancy_real_board.pth"
+    cv_occ_resnet_roi_fraction: 1.00
+    cv_occ_cell_px: 107              # reference cell size for ROI; 0 = use board spacing (89px)
+    cv_occ_x_squeeze_px: 12        # shift files a-d right / i-f left toward center e (px at outermost file)
+    cv_occ_y_squeeze_px: 0         # v1 model trained without y-squeeze
+    cv_occ_threshold: 0.5          # P(occupied) threshold; lower if pieces are missed
+
     # Piece preprocessing (warped board -> YOLO). Off by default; enable when tuning lighting.
     piece_preprocess_enabled: false
     piece_preprocess_preset: "none"   # none | bright | bright_sharp (dim+soft) | clahe | lab_default | ...

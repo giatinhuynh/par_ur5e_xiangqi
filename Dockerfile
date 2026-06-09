@@ -47,6 +47,7 @@ RUN if id -u rosuser >/dev/null 2>&1; then \
 RUN pip3 install --no-cache-dir \
     pymodbus==2.5.3 \
     ultralytics \
+    torchvision \
     flask \
     flask-cors \
     flask-socketio \

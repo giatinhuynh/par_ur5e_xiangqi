@@ -7,6 +7,28 @@ PIECE_CODES = {
     'k': 1, 'a': 2, 'b': 3, 'n': 4, 'r': 5, 'c': 6, 'p': 7,
 }
 
+
+def fen_to_grid(fen: str) -> list:
+    """Parse Xiangqi FEN board part into int8[90] grid (rank 0 = Red home).
+
+    FEN lists ranks top-to-bottom (rank 9 first, rank 0 last).
+    Uppercase letters = Red pieces (positive codes), lowercase = Black (negative).
+    """
+    board_part = fen.split()[0]
+    rows = board_part.split('/')  # rows[0]=rank9 (Black home), rows[9]=rank0 (Red home)
+    grid = [0] * 90
+    for i, row in enumerate(rows):
+        rank = 9 - i
+        f = 0
+        for ch in row:
+            if ch.isdigit():
+                f += int(ch)
+            else:
+                code = PIECE_CODES.get(ch, 0)
+                grid[rank * 9 + f] = code if ch.isupper() else -code
+                f += 1
+    return grid
+
 PIECE_CHARS = {1: 'K', 2: 'A', 3: 'B', 4: 'N', 5: 'R', 6: 'C', 7: 'P'}
 
 DEFAULT_FEN_TAIL = 'w - - 0 1'

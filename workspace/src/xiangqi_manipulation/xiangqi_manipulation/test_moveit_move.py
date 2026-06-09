@@ -5,6 +5,9 @@ Standalone MoveIt motion test (lab / hardware).
 Run AFTER arm_drivers + moveit_config_driver, pendant on Play (External Control).
 Does NOT require xiangqi_system.launch.py.
 
+--move / --capture use the same motion stack as manipulation_node: 20% velocity,
+joint-space approach/lift (4-patch bilinear), IK descend to grasp/place height.
+
   ros2 run xiangqi_manipulation test_moveit_move --check
   ros2 run xiangqi_manipulation test_moveit_move --joints                          # from calibration YAML
   ros2 run xiangqi_manipulation test_moveit_move --joints -1.321 -0.452 -0.046 -1.983 0.302 2.282
@@ -14,6 +17,7 @@ Does NOT require xiangqi_system.launch.py.
   ros2 run xiangqi_manipulation test_moveit_move --ompl --nudge-z 0.02
   ros2 run xiangqi_manipulation test_moveit_move --board e5              # approach only
   ros2 run xiangqi_manipulation test_moveit_move --board e5 --grasp      # approach + grip + lift
+  ros2 run xiangqi_manipulation test_moveit_move --move d4 a0          # full pick-and-place (game motion)
   ros2 run xiangqi_manipulation test_moveit_move --move e5 e7            # full pick-and-place e5 → e7
   ros2 run xiangqi_manipulation test_moveit_move --capture e5 e7 --captured-red
       # capture demo: remove piece on e7 to red graveyard, then move e5 → e7
@@ -32,8 +36,15 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from moveit_msgs.action import MoveGroup
 
-from xiangqi_manipulation.moveit_ompl_client import MoveGroupOmplClient, _wait_on_future
-from xiangqi_manipulation.move_translator import BoardCalibration
+from sensor_msgs.msg import JointState as SensorJointState
+from geometry_msgs.msg import PoseStamped
+from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.msg import PositionIKRequest, RobotState as MoveItRobotState, MoveItErrorCodes
+
+from xiangqi_manipulation.moveit_ompl_client import (
+    MoveGroupOmplClient, _wait_on_future, yaw_to_downward_quaternion,
+)
+from xiangqi_manipulation.move_translator import BoardCalibration, CARTESIAN_GRASP_DROP
 from xiangqi_manipulation.calibration_paths import resolve_manipulation_calibration_path
 
 try:
@@ -54,6 +65,15 @@ GRASP_WIDTH   = 18.0
 RELEASE_WIDTH = 34.0
 GRASP_FORCE   = 15.0
 OPEN_FORCE    = 10.0
+
+# Match manipulation_config.yaml / manipulation_node defaults
+GAME_VELOCITY_SCALING = 0.2
+GAME_ACCELERATION_SCALING = 0.2
+GAME_ALLOWED_PLANNING_TIME = 5.0
+GAME_NUM_PLANNING_ATTEMPTS = 10
+GAME_PLANNER_ID = 'RRTConnectkConfigDefault'
+GAME_PIPELINE_ID = 'move_group'
+DEFAULT_SCAN_YAW = -1.23353
 
 
 def _gripper(node: Node, width: float, force: float, timeout_sec: float = 10.0) -> bool:
@@ -99,20 +119,147 @@ def _parse_square(node: Node, square: str):
     return ord(sq[0]) - ord('a'), rank
 
 
-def _cell_joints(node: Node, cal: BoardCalibration, square: str):
-    """Return (approach_j, grasp_j) for a board square, or (None, None) on error."""
-    parsed = _parse_square(node, square)
-    if parsed is None:
-        return None, None
-    file_idx, rank = parsed
-    approach = cal.interpolate_approach_joints(float(file_idx), float(rank))
-    grasp    = cal.interpolate_board_joints(float(file_idx), float(rank))
-    if approach is None or grasp is None:
-        node.get_logger().error(
-            'Board joint configs missing - run calibration_tool Step 2 first'
+def _scan_yaw_from_cal(cal: BoardCalibration) -> float:
+    if cal.scan_pose and 'yaw' in cal.scan_pose:
+        return float(cal.scan_pose['yaw'])
+    if cal.initial_pose and 'yaw' in cal.initial_pose:
+        return float(cal.initial_pose['yaw'])
+    return DEFAULT_SCAN_YAW
+
+
+def _square_grasp_xyz(cal: BoardCalibration, file_idx: int, rank_idx: int):
+    """Return (x, y, grasp_z, board_z) for a board cell (same Z logic as MoveTranslator)."""
+    xyz = cal.grid_to_world(file_idx, rank_idx)
+    board_z = float(xyz[2])
+    grasp_z = board_z + cal.grasp_height_mm / 1000.0 - CARTESIAN_GRASP_DROP
+    return float(xyz[0]), float(xyz[1]), grasp_z, board_z
+
+
+def _ik_seed_at_xy(
+    cal: BoardCalibration, x: float, y: float, for_approach: bool
+) -> tuple[list, list] | None:
+    return cal.ik_seed_joints(x, y, for_approach)
+
+
+def _compute_ik(
+    node: Node,
+    x: float, y: float, z: float,
+    scan_yaw: float,
+    arm_joint_names: list,
+    seed_names: list | None = None,
+    seed_positions: list | None = None,
+) -> tuple[list, list] | None:
+    client = node.create_client(GetPositionIK, '/compute_ik')
+    if not client.wait_for_service(timeout_sec=2.0):
+        node.get_logger().warn('/compute_ik not available')
+        node.destroy_client(client)
+        return None
+
+    req = GetPositionIK.Request()
+    ik_req = PositionIKRequest()
+    ik_req.group_name = 'ur_manipulator_end_effector'
+    ik_req.avoid_collisions = True
+
+    ps = PoseStamped()
+    ps.header.frame_id = 'base_link'
+    ps.header.stamp = node.get_clock().now().to_msg()
+    ps.pose.position.x = float(x)
+    ps.pose.position.y = float(y)
+    ps.pose.position.z = float(z)
+    ps.pose.orientation = yaw_to_downward_quaternion(scan_yaw)
+    ik_req.pose_stamped = ps
+
+    rs = MoveItRobotState()
+    if seed_names and seed_positions:
+        js = SensorJointState()
+        js.name = list(seed_names)
+        js.position = [float(p) for p in seed_positions]
+        rs.joint_state = js
+        rs.is_diff = False
+    else:
+        rs.is_diff = True
+    ik_req.robot_state = rs
+    ik_req.timeout.sec = 1
+
+    req.ik_request = ik_req
+    future = client.call_async(req)
+    deadline = time.monotonic() + 4.0
+    while not future.done():
+        if time.monotonic() > deadline:
+            node.get_logger().warn(f'IK timed out for ({x:.3f},{y:.3f},{z:.3f})')
+            node.destroy_client(client)
+            return None
+        time.sleep(0.05)
+
+    try:
+        resp = future.result()
+    except Exception as exc:
+        node.get_logger().error(f'IK service error: {exc}')
+        return None
+    finally:
+        node.destroy_client(client)
+
+    if resp.error_code.val != MoveItErrorCodes.SUCCESS:
+        node.get_logger().warn(
+            f'IK no solution for ({x:.3f},{y:.3f},{z:.3f}): error_code={resp.error_code.val}'
         )
-        return None, None
-    return approach, grasp
+        return None
+
+    js = resp.solution.joint_state
+    if arm_joint_names:
+        pairs = [(n, p) for n, p in zip(js.name, js.position) if n in arm_joint_names]
+        if len(pairs) >= len(arm_joint_names):
+            pairs.sort(key=lambda np_: arm_joint_names.index(np_[0]))
+            names, positions = zip(*pairs)
+            return list(names), list(positions)
+    return list(js.name), list(js.position)
+
+
+def _move_via_ik(
+    node: Node,
+    client: MoveGroupOmplClient,
+    x: float, y: float, z: float,
+    scan_yaw: float,
+    arm_joint_names: list,
+    seed_names: list | None = None,
+    seed_positions: list | None = None,
+) -> bool:
+    ik = _compute_ik(
+        node, x, y, z, scan_yaw, arm_joint_names, seed_names, seed_positions,
+    )
+    if ik is not None:
+        return client.move_to_joints(ik[0], ik[1])
+    node.get_logger().warn(f'IK failed for ({x:.3f},{y:.3f},{z:.3f}) — falling back to OMPL')
+    return client.move_to_pose(x, y, z, scan_yaw)
+
+
+def _move_board_approach(
+    node: Node,
+    client: MoveGroupOmplClient,
+    cal: BoardCalibration,
+    x: float, y: float, z: float,
+    scan_yaw: float,
+    arm_joint_names: list,
+) -> bool:
+    seed = _ik_seed_at_xy(cal, x, y, for_approach=True)
+    if seed:
+        return client.move_to_joints(seed[0], seed[1])
+    node.get_logger().warn(f'No taught approach joints at ({x:.3f},{y:.3f}) — IK fallback')
+    return _move_via_ik(node, client, x, y, z, scan_yaw, arm_joint_names)
+
+
+def _move_grasp_descend(
+    node: Node,
+    client: MoveGroupOmplClient,
+    x: float, y: float, z: float,
+    scan_yaw: float,
+    arm_joint_names: list,
+    seed_names: list | None = None,
+    seed_positions: list | None = None,
+) -> bool:
+    return _move_via_ik(
+        node, client, x, y, z, scan_yaw, arm_joint_names, seed_names, seed_positions,
+    )
 
 
 def _graveyard_joints(node: Node, cal: BoardCalibration, is_red: bool):
@@ -273,30 +420,14 @@ def _run_joints(node: Node, cal_path: str, explicit_positions: list) -> bool:
     for name, pos in zip(joint_names, joint_positions):
         node.get_logger().info(f'  {name}: {pos:.4f} rad')
 
-    client = MoveGroupOmplClient(
-        node,
-        velocity_scaling=0.05,
-        acceleration_scaling=0.05,
-        allowed_planning_time=10.0,
-        num_planning_attempts=10,
-        action_timeout_sec=120.0,
-        spin_node=False,
-    )
+    client = _make_client(node)
     if not client.wait_for_server(timeout_sec=15.0):
         return False
     return client.move_to_joints(joint_names, joint_positions)
 
 
 def _run_ompl(node: Node, x: float, y: float, z: float, yaw: float) -> bool:
-    client = MoveGroupOmplClient(
-        node,
-        velocity_scaling=0.05,
-        acceleration_scaling=0.05,
-        allowed_planning_time=10.0,
-        num_planning_attempts=10,
-        action_timeout_sec=120.0,
-        spin_node=False,   # executor is already spinning in thread
-    )
+    client = _make_client(node)
     if not client.wait_for_server(timeout_sec=15.0):
         return False
     node.get_logger().info(
@@ -308,17 +439,19 @@ def _run_ompl(node: Node, x: float, y: float, z: float, yaw: float) -> bool:
 def _make_client(node: Node) -> MoveGroupOmplClient:
     return MoveGroupOmplClient(
         node,
-        velocity_scaling=0.05,
-        acceleration_scaling=0.05,
-        allowed_planning_time=10.0,
-        num_planning_attempts=10,
+        velocity_scaling=GAME_VELOCITY_SCALING,
+        acceleration_scaling=GAME_ACCELERATION_SCALING,
+        allowed_planning_time=GAME_ALLOWED_PLANNING_TIME,
+        num_planning_attempts=GAME_NUM_PLANNING_ATTEMPTS,
+        planner_id=GAME_PLANNER_ID,
+        pipeline_id=GAME_PIPELINE_ID,
         action_timeout_sec=120.0,
         spin_node=False,
     )
 
 
 def _run_board_cell(node: Node, cal_path: str, square: str, go_to_grasp: bool) -> bool:
-    """Move to a board cell.  Sequence: scan → approach → (open, grasp, grip, lift) → scan."""
+    """Move to a board cell.  Sequence: scan → approach → (open, IK descend, grip, lift) → scan."""
     resolved = resolve_manipulation_calibration_path(cal_path, node.get_logger())
     try:
         cal = BoardCalibration.load(resolved)
@@ -326,12 +459,14 @@ def _run_board_cell(node: Node, cal_path: str, square: str, go_to_grasp: bool) -
         node.get_logger().error(f'Cannot load calibration: {e}')
         return False
 
-    approach_j, grasp_j = _cell_joints(node, cal, square)
-    if approach_j is None:
+    parsed = _parse_square(node, square)
+    if parsed is None:
         return False
+    file_idx, rank = parsed
+    pick_x, pick_y, pick_gr_z, pick_board_z = _square_grasp_xyz(cal, file_idx, rank)
+    approach_h = cal.approach_height_mm / 1000.0
+    pick_ap_z = pick_board_z + approach_h
 
-    approach_names, approach_pos = approach_j
-    grasp_names,    grasp_pos    = grasp_j
     scan_names = cal.scan_joint_names or []
     scan_pos   = cal.scan_joint_positions or []
     if not scan_names:
@@ -339,13 +474,10 @@ def _run_board_cell(node: Node, cal_path: str, square: str, go_to_grasp: bool) -
         return False
 
     sq = square.strip().upper()
-    node.get_logger().info(f'--board {sq}: approach joints:')
-    for n, p in zip(approach_names, approach_pos):
-        node.get_logger().info(f'  {n}: {p:.4f}')
-    if go_to_grasp:
-        node.get_logger().info(f'--board {sq}: grasp joints:')
-        for n, p in zip(grasp_names, grasp_pos):
-            node.get_logger().info(f'  {n}: {p:.4f}')
+    scan_yaw = _scan_yaw_from_cal(cal)
+    arm_joint_names = scan_names
+    pick_gr_seed = _ik_seed_at_xy(cal, pick_x, pick_y, for_approach=False)
+    pick_gr_n, pick_gr_p = pick_gr_seed or (None, None)
 
     client = _make_client(node)
     if not client.wait_for_server(timeout_sec=15.0):
@@ -356,55 +488,64 @@ def _run_board_cell(node: Node, cal_path: str, square: str, go_to_grasp: bool) -
         return False
 
     node.get_logger().info(f'→ approach {sq}')
-    if not client.move_to_joints(approach_names, approach_pos):
+    if not _move_board_approach(
+        node, client, cal, pick_x, pick_y, pick_ap_z, scan_yaw, arm_joint_names,
+    ):
         return False
 
     if go_to_grasp:
-        _gripper(node, OPEN_WIDTH, OPEN_FORCE)
-        node.get_logger().info(f'→ grasp {sq}')
-        if not client.move_to_joints(grasp_names, grasp_pos):
+        if not _gripper(node, OPEN_WIDTH, OPEN_FORCE):
+            return False
+        node.get_logger().info(f'→ descend {sq} (IK)')
+        if not _move_grasp_descend(
+            node, client, pick_x, pick_y, pick_gr_z,
+            scan_yaw, arm_joint_names, pick_gr_n, pick_gr_p,
+        ):
             return False
         _gripper(node, GRASP_WIDTH, GRASP_FORCE)
         _gripper(node, RELEASE_WIDTH, OPEN_FORCE)
         node.get_logger().info(f'→ lift back to approach {sq}')
-        client.move_to_joints(approach_names, approach_pos)
+        _move_board_approach(
+            node, client, cal, pick_x, pick_y, pick_ap_z, scan_yaw, arm_joint_names,
+        )
 
     node.get_logger().info('→ scan pose')
     client.move_to_joints(scan_names, scan_pos)
     return True
 
 
-def _run_pick_place(
+def _run_game_pick_place_leg(
     node: Node,
     client: MoveGroupOmplClient,
-    scan_names: list,
-    scan_pos: list,
-    pick_approach: tuple,
-    pick_grasp: tuple,
-    place_approach: tuple,
-    place_release: tuple,
+    cal: BoardCalibration,
+    scan_yaw: float,
+    arm_joint_names: list,
+    pick_x: float,
+    pick_y: float,
+    pick_gr_z: float,
+    pick_board_z: float,
+    place_x: float,
+    place_y: float,
+    place_gr_z: float,
+    place_board_z: float,
     pick_label: str,
     place_label: str,
-    pick_transit: tuple | None = None,
+    *,
     place_joint_approach: tuple | None = None,
     place_joint_grasp: tuple | None = None,
-    return_scan: bool = True,
+    return_scan: bool = False,
+    scan_names: list | None = None,
+    scan_pos: list | None = None,
 ) -> bool:
-    """One pick-and-place leg (mirrors manipulation_node step order).
-
-    Board pick (approach / grasp / lift): always pick_approach & pick_grasp (IK on hardware).
-
-    place_joint_approach / place_joint_grasp: when set (capture → graveyard), transit and
-    place use taught graveyard joints instead of IK/board interpolation.
-
-    pick_transit: optional IK transit between pick lift and place (board-to-board only).
-    """
-    pa_n, pa_p = pick_approach
-    pg_n, pg_p = pick_grasp
-    da = place_joint_approach or place_approach
-    dr = place_joint_grasp or place_release
-    da_n, da_p = da
-    dr_n, dr_p = dr
+    """One pick-and-place leg matching manipulation_node (joint approach/lift, IK descend)."""
+    approach_h = cal.approach_height_mm / 1000.0
+    pick_ap_z = pick_board_z + approach_h
+    place_ap_z = place_board_z + approach_h
+    pick_gr_seed = _ik_seed_at_xy(cal, pick_x, pick_y, for_approach=False) or (None, None)
+    place_gr_seed = _ik_seed_at_xy(cal, place_x, place_y, for_approach=False) or (None, None)
+    pick_gr_n, pick_gr_p = pick_gr_seed
+    place_gr_n, place_gr_p = place_gr_seed
+    place_is_graveyard = place_joint_approach is not None
 
     def step(label: str, fn) -> bool:
         node.get_logger().info(f'→ {label}')
@@ -415,32 +556,79 @@ def _run_pick_place(
 
     if not step('open gripper', lambda: _gripper(node, OPEN_WIDTH, OPEN_FORCE)):
         return False
-    if scan_names and not step('scan pose', lambda: client.move_to_joints(scan_names, scan_pos)):
+    if return_scan and scan_names and not step(
+        'scan pose', lambda: client.move_to_joints(scan_names, scan_pos)
+    ):
         return False
-    if not step(f'approach {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
+    if not step(
+        f'approach {pick_label}',
+        lambda: _move_board_approach(
+            node, client, cal, pick_x, pick_y, pick_ap_z, scan_yaw, arm_joint_names,
+        ),
+    ):
         return False
-    if not step(f'grasp {pick_label}', lambda: client.move_to_joints(pg_n, pg_p)):
+    if not step(
+        f'descend {pick_label}',
+        lambda: _move_grasp_descend(
+            node, client, pick_x, pick_y, pick_gr_z,
+            scan_yaw, arm_joint_names, pick_gr_n, pick_gr_p,
+        ),
+    ):
         return False
     if not step('grip', lambda: _gripper(node, GRASP_WIDTH, GRASP_FORCE)):
         return False
-    if not step(f'lift {pick_label}', lambda: client.move_to_joints(pa_n, pa_p)):
+    if not step(
+        f'lift {pick_label}',
+        lambda: _move_board_approach(
+            node, client, cal, pick_x, pick_y, pick_ap_z, scan_yaw, arm_joint_names,
+        ),
+    ):
         return False
-    if place_joint_approach is not None:
+    if place_is_graveyard:
         gy_n, gy_p = place_joint_approach
         if not step('transit to graveyard', lambda: client.move_to_joints(gy_n, gy_p)):
             return False
-    elif pick_transit is not None:
-        tr_n, tr_p = pick_transit
-        if not step('transit', lambda: client.move_to_joints(tr_n, tr_p)):
+        da_n, da_p = place_joint_approach
+        if place_joint_grasp is not None:
+            dr_n, dr_p = place_joint_grasp
+        else:
+            dr_n, dr_p = da_n, da_p
+        if not step(f'approach {place_label}', lambda: client.move_to_joints(da_n, da_p)):
             return False
-    if not step(f'approach {place_label}', lambda: client.move_to_joints(da_n, da_p)):
-        return False
-    if not step(f'place {place_label}', lambda: client.move_to_joints(dr_n, dr_p)):
-        return False
+        if not step(f'descend {place_label}', lambda: client.move_to_joints(dr_n, dr_p)):
+            return False
+    else:
+        if not step(
+            f'approach {place_label}',
+            lambda: _move_board_approach(
+                node, client, cal, place_x, place_y, place_ap_z, scan_yaw, arm_joint_names,
+            ),
+        ):
+            return False
+        if not step(
+            f'descend {place_label}',
+            lambda: _move_grasp_descend(
+                node, client, place_x, place_y, place_gr_z,
+                scan_yaw, arm_joint_names, place_gr_n, place_gr_p,
+            ),
+        ):
+            return False
+
     if not step('release', lambda: _gripper(node, RELEASE_WIDTH, OPEN_FORCE)):
         return False
-    if not step(f'lift {place_label}', lambda: client.move_to_joints(da_n, da_p)):
+
+    if place_is_graveyard:
+        da_n, da_p = place_joint_approach
+        if not step(f'lift {place_label}', lambda: client.move_to_joints(da_n, da_p)):
+            return False
+    elif not step(
+        f'lift {place_label}',
+        lambda: _move_board_approach(
+            node, client, cal, place_x, place_y, place_ap_z, scan_yaw, arm_joint_names,
+        ),
+    ):
         return False
+
     if return_scan and scan_names and not step(
         'scan pose', lambda: client.move_to_joints(scan_names, scan_pos)
     ):
@@ -448,34 +636,19 @@ def _run_pick_place(
     return True
 
 
-def _run_joint_pick_place(
-    node: Node,
-    client: MoveGroupOmplClient,
-    scan_names: list,
-    scan_pos: list,
-    pick_approach_j: tuple,
-    pick_grasp_j: tuple,
-    place_approach_j: tuple,
-    place_grasp_j: tuple,
-    pick_label: str,
-    place_label: str,
-) -> bool:
-    """One fully joint-space pick-and-place leg."""
-    return _run_pick_place(
-        node, client, scan_names, scan_pos,
-        pick_approach_j, pick_grasp_j,
-        place_approach_j, place_grasp_j,
-        pick_label, place_label,
-    )
+def _load_calibration(node: Node, cal_path: str) -> BoardCalibration | None:
+    resolved = resolve_manipulation_calibration_path(cal_path, node.get_logger())
+    try:
+        return BoardCalibration.load(resolved)
+    except Exception as e:
+        node.get_logger().error(f'Cannot load calibration: {e}')
+        return None
 
 
 def _load_cal_and_scan(node: Node, cal_path: str):
     """Return (BoardCalibration, scan_names, scan_pos) or (None, None, None)."""
-    resolved = resolve_manipulation_calibration_path(cal_path, node.get_logger())
-    try:
-        cal = BoardCalibration.load(resolved)
-    except Exception as e:
-        node.get_logger().error(f'Cannot load calibration: {e}')
+    cal = _load_calibration(node, cal_path)
+    if cal is None:
         return None, None, None
     scan_names = cal.scan_joint_names or []
     scan_pos = cal.scan_joint_positions or []
@@ -486,29 +659,38 @@ def _load_cal_and_scan(node: Node, cal_path: str):
 
 
 def _run_board_move(node: Node, cal_path: str, from_sq: str, to_sq: str) -> bool:
-    """Full pick-and-place between two board squares using joint-space interpolation."""
-    cal, scan_names, scan_pos = _load_cal_and_scan(node, cal_path)
+    """Full pick-and-place between two board squares (matches manipulation_node)."""
+    cal = _load_calibration(node, cal_path)
     if cal is None:
         return False
+    scan_names = cal.scan_joint_names or []
 
-    pick_approach_j, pick_grasp_j = _cell_joints(node, cal, from_sq)
-    place_approach_j, place_grasp_j = _cell_joints(node, cal, to_sq)
-    if pick_approach_j is None or place_approach_j is None:
+    from_parsed = _parse_square(node, from_sq)
+    to_parsed = _parse_square(node, to_sq)
+    if from_parsed is None or to_parsed is None:
         return False
 
+    pick_x, pick_y, pick_gr_z, pick_board_z = _square_grasp_xyz(cal, *from_parsed)
+    place_x, place_y, place_gr_z, place_board_z = _square_grasp_xyz(cal, *to_parsed)
+
     node.get_logger().info(
-        f'Pick-and-place {from_sq.upper()} → {to_sq.upper()} (joint-space, 5% speed)'
+        f'Pick-and-place {from_sq.upper()} → {to_sq.upper()} '
+        f'(joint approach/lift, IK descend, {int(GAME_VELOCITY_SCALING * 100)}% speed)'
     )
 
     client = _make_client(node)
     if not client.wait_for_server(timeout_sec=15.0):
         return False
 
-    return _run_joint_pick_place(
-        node, client, scan_names, scan_pos,
-        pick_approach_j, pick_grasp_j,
-        place_approach_j, place_grasp_j,
+    scan_yaw = _scan_yaw_from_cal(cal)
+    arm_joint_names = scan_names or cal.scan_joint_names or []
+
+    return _run_game_pick_place_leg(
+        node, client, cal, scan_yaw, arm_joint_names,
+        pick_x, pick_y, pick_gr_z, pick_board_z,
+        place_x, place_y, place_gr_z, place_board_z,
         from_sq.upper(), to_sq.upper(),
+        return_scan=False,
     )
 
 
@@ -534,15 +716,17 @@ def _run_capture_move(
     if cal is None:
         return False
 
-    cap_pick_approach_j, cap_pick_grasp_j = _cell_joints(node, cal, to_sq)
     gy_approach_j, gy_grasp_j = _graveyard_joints(node, cal, captured_is_red)
-    pick_approach_j, pick_grasp_j = _cell_joints(node, cal, from_sq)
-    place_approach_j, place_grasp_j = _cell_joints(node, cal, to_sq)
-    if None in (
-        cap_pick_approach_j, gy_approach_j,
-        pick_approach_j, place_approach_j,
-    ):
+    to_parsed = _parse_square(node, to_sq)
+    from_parsed = _parse_square(node, from_sq)
+    if gy_approach_j is None or to_parsed is None or from_parsed is None:
         return False
+
+    cap_pick_x, cap_pick_y, cap_pick_gr_z, cap_pick_board_z = _square_grasp_xyz(
+        cal, *to_parsed,
+    )
+    pick_x, pick_y, pick_gr_z, pick_board_z = _square_grasp_xyz(cal, *from_parsed)
+    place_x, place_y, place_gr_z, place_board_z = _square_grasp_xyz(cal, *to_parsed)
 
     # Red captured piece → red graveyard joints; black → black graveyard joints.
     gy_zone = 'red graveyard' if captured_is_red else 'black graveyard'
@@ -556,25 +740,30 @@ def _run_capture_move(
     if not client.wait_for_server(timeout_sec=15.0):
         return False
 
+    scan_yaw = _scan_yaw_from_cal(cal)
+    arm_joint_names = scan_names or cal.scan_joint_names or []
+
     node.get_logger().info(
         f'--- Phase 1: capture {to_sq.upper()} → {gy_zone} (board pick, joint graveyard) ---'
     )
-    if not _run_pick_place(
-        node, client, scan_names, scan_pos,
-        cap_pick_approach_j, cap_pick_grasp_j,
-        gy_approach_j, gy_grasp_j,
+    if not _run_game_pick_place_leg(
+        node, client, cal, scan_yaw, arm_joint_names,
+        cap_pick_x, cap_pick_y, cap_pick_gr_z, cap_pick_board_z,
+        0.0, 0.0, 0.0, 0.0,  # unused for graveyard place leg
         to_sq.upper(), gy_zone,
         place_joint_approach=gy_approach_j,
         place_joint_grasp=gy_grasp_j,
+        return_scan=False,
     ):
         return False
 
     node.get_logger().info('--- Phase 2: main pick-and-place ---')
-    return _run_joint_pick_place(
-        node, client, scan_names, scan_pos,
-        pick_approach_j, pick_grasp_j,
-        place_approach_j, place_grasp_j,
+    return _run_game_pick_place_leg(
+        node, client, cal, scan_yaw, arm_joint_names,
+        pick_x, pick_y, pick_gr_z, pick_board_z,
+        place_x, place_y, place_gr_z, place_board_z,
         from_sq.upper(), to_sq.upper(),
+        return_scan=False,
     )
 
 
@@ -720,7 +909,8 @@ def main(argv=None) -> None:
             use_cartesian = False  # default OMPL
 
         node.get_logger().info(
-            'Ensure pendant is on Play (External Control). Move may take 30–90 s at 5% speed.'
+            f'Ensure pendant is on Play (External Control). '
+            f'Moves run at {int(GAME_VELOCITY_SCALING * 100)}% speed (same as game).'
         )
         time.sleep(1.0)
 

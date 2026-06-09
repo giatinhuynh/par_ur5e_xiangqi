@@ -175,19 +175,27 @@ class GridStabilizer:
     """
     Per-cell temporal smoothing for the raw YOLO detection grid.
 
-    Each of the 90 board cells only changes its committed value after the
-    *same* value has been observed in `smooth_frames` consecutive raw
-    detection frames.  A single flickering frame is silently ignored;
-    genuine piece placements/removals are committed after a short delay
-    (~smooth_frames / poll_rate_hz seconds).
+    Three asymmetric thresholds:
+    - *appear*      (empty → piece):            fast  — genuine placements confirmed quickly
+    - *type_change* (piece → same-colour piece): medium — prevents YOLO type-jitter committing
+    - *vanish*      (piece → empty):             medium — brief YOLO misses rarely erase a piece
 
-    With smooth_frames=3 at 3 Hz the delay is ~1 s - short enough to feel
-    immediate to the human, long enough to absorb YOLO glitches.
-    Setting smooth_frames=1 disables smoothing entirely.
+    With appear=3 / type_change=8 / vanish=10 at 3 Hz:
+      appear      ≈ 1 s   (feels immediate)
+      type_change ≈ 2.7 s (YOLO must consistently misclassify for ~3 s to change type)
+      vanish      ≈ 3.3 s (display persistence handled separately in dashboard layer)
     """
 
-    def __init__(self, smooth_frames: int = 3, n_cells: int = 90):
-        self._n = max(1, smooth_frames)
+    def __init__(
+        self,
+        appear_frames: int = 3,
+        type_change_frames: int = 8,
+        vanish_frames: int = 10,
+        n_cells: int = 90,
+    ):
+        self._appear_n      = max(1, appear_frames)
+        self._type_change_n = max(1, type_change_frames)
+        self._vanish_n      = max(1, vanish_frames)
         # Last committed (output) grid - starts all-empty
         self._committed = np.zeros(n_cells, dtype=np.int8)
         # Candidate value per cell (what we are counting towards)
@@ -203,8 +211,24 @@ class GridStabilizer:
         changed = ~same
         self._candidate[changed] = raw[changed]
         self._streak[changed] = 1
-        # Commit cells whose streak has reached the threshold
-        ready = self._streak >= self._n
+
+        # Select threshold per cell based on what transition is in progress:
+        #   candidate == 0                         → vanishing (slow)
+        #   committed == 0 and candidate != 0      → appearing from empty (fast)
+        #   same sign, different value             → type jitter within colour (medium)
+        #   sign change (red↔black)                → treated as appear (fast — real event)
+        vanishing    = self._candidate == 0
+        appearing    = (self._committed == 0) & (self._candidate != 0)
+        type_jitter  = (
+            ~vanishing & ~appearing
+            & (np.sign(self._committed) == np.sign(self._candidate))
+            & (self._committed != self._candidate)
+        )
+        threshold = np.where(vanishing,   self._vanish_n,
+                    np.where(type_jitter, self._type_change_n,
+                                          self._appear_n))
+
+        ready = self._streak >= threshold
         self._committed[ready] = self._candidate[ready]
         return self._committed.copy()
 
@@ -232,6 +256,8 @@ class VisionNode(Node):
         self.declare_parameter('yolo_imgsz', 0)
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('grid_smooth_frames', 3)
+        self.declare_parameter('grid_type_change_frames', 8)
+        self.declare_parameter('grid_vanish_frames', 10)
         self.declare_parameter('poll_rate_hz', 3.0)
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
         # Piece detection preprocessing (warped board, before YOLO)
@@ -257,7 +283,9 @@ class VisionNode(Node):
         conf_thresh = self.get_parameter('confidence_threshold').value
         yolo_imgsz = int(self.get_parameter('yolo_imgsz').value)
         stability = self.get_parameter('stability_frames').value
-        grid_smooth = int(self.get_parameter('grid_smooth_frames').value)
+        grid_smooth       = int(self.get_parameter('grid_smooth_frames').value)
+        grid_type_change  = int(self.get_parameter('grid_type_change_frames').value)
+        grid_vanish       = int(self.get_parameter('grid_vanish_frames').value)
         self._poll_rate = self.get_parameter('poll_rate_hz').value
         require_yolo = bool(self.get_parameter('require_yolo_weights').value)
         yolo_url = str(self.get_parameter('yolo_download_url').value or '')
@@ -304,7 +332,11 @@ class VisionNode(Node):
             )
 
         self._turn_detector = TurnDetector(stability_frames=stability)
-        self._grid_stabilizer = GridStabilizer(smooth_frames=grid_smooth)
+        self._grid_stabilizer = GridStabilizer(
+            appear_frames=grid_smooth,
+            type_change_frames=grid_type_change,
+            vanish_frames=grid_vanish,
+        )
         self._bridge = CvBridge()
 
         # --- TF2 for camera→base_link transform (fallback if no auto-calibration) ---

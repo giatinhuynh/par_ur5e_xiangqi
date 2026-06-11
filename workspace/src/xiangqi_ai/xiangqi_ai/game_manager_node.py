@@ -908,6 +908,28 @@ class GameManagerNode(Node):
         )
 
         if scan_empty and yolo_empty and live_empty:
+            # Final veto: check whether the piece was returned to the source square
+            # instead of being dropped/lost.  This happens when the user physically moves
+            # the robot's piece back to its origin (e.g. to test retry behaviour): the
+            # destination goes empty while the source becomes occupied.  In that case the
+            # retry path should handle recovery — do not declare game over here.
+            if self._latest_board_state.grid[from_idx] != 0:
+                src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                self.get_logger().info(
+                    f'Move {move}: destination empty but live board shows source '
+                    f'{src_sq} occupied — piece returned to source, not declaring '
+                    f'game over (retry path will handle it)'
+                )
+                return False
+            if raw_scan and len(raw_scan) >= 1:
+                _recent_n = min(3, len(raw_scan))
+                if any(raw_scan[-(i + 1)][from_idx] != 0 for i in range(_recent_n)):
+                    src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                    self.get_logger().info(
+                        f'Move {move}: destination empty but source {src_sq} occupied '
+                        f'in recent {_recent_n} occ frames — piece returned to source'
+                    )
+                    return False
             sq = f"{chr(ord('a') + to_idx % 9)}{to_idx // 9 + 1}"
             self.get_logger().warn(
                 f'Move {move}: destination {sq} is empty in occ scan, YOLO scan, and live filter '
@@ -957,40 +979,52 @@ class GameManagerNode(Node):
             else list(self._latest_board_state.grid)
         )
         if occ_only[from_idx] == 0:
-            return False  # piece gone from source — move succeeded, don't retry
-
-        # Final-say veto: check the most recent raw occ frames.
-        # The 0.8-threshold merge can be skewed by early frames captured while the arm
-        # was still retracting (arm shadow → transient occ hit). The latest frames are
-        # what "What the robot is seeing" currently reflects. If all of the last 3 frames
-        # show the source square empty, the piece has moved — skip the retry.
-        if raw_scan and len(raw_scan) >= 1:
-            _recent_n = min(3, len(raw_scan))
-            _recent = raw_scan[-_recent_n:]
-            if all(frame[from_idx] == 0 for frame in _recent):
-                src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
-                self.get_logger().info(
-                    f'Retry skipped: last {_recent_n} occ frames confirm source {src_sq} '
-                    f'empty — merged threshold was misled by early frames, piece has moved'
-                )
-                return False
-
-        # YOLO veto: if the YOLO scan (which drives "What the robot is seeing") also
-        # shows the source square empty, trust it over the occ threshold count.
-        _yolo_scan = self._ai_scan_merged_yolo
-        if _yolo_scan and _yolo_scan[from_idx] == 0:
-            # Also check the live YOLO grid for a second data point.
-            _live_yolo_empty = (
-                self._latest_yolo_grid is not None
-                and self._latest_yolo_grid[from_idx] == 0
+            # Merged scan says source empty — move likely succeeded.
+            # Live-state override: if the piece was physically returned to the source
+            # square AFTER the scan window closed (or placed back during the tail of the
+            # scan), the scan won't capture enough frames to cross the 0.8 threshold, but
+            # the live board state will show it occupied.  Honour the live reading and
+            # proceed to retry rather than silently declaring the move a success.
+            if self._latest_board_state.grid[from_idx] == 0:
+                return False  # live also confirms empty — piece truly moved, no retry
+            src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+            self.get_logger().info(
+                f'Retry: merged scan shows source {src_sq} empty but live board sees '
+                f'piece there — piece returned to source after (or during tail of) scan '
+                f'window, overriding scan result and proceeding to retry'
             )
-            if _live_yolo_empty:
-                src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
-                self.get_logger().info(
-                    f'Retry skipped: both YOLO scan and live YOLO confirm source '
-                    f'{src_sq} empty — occ threshold count overruled'
+            # Fall through to retry dispatch; skip the scan-based vetoes below
+            # since those are only meaningful when the scan itself shows occupancy.
+        else:
+            # Scan says source is occupied — apply veto checks to rule out transients
+            # (e.g. arm-shadow frames at the start of the settle window).
+
+            # Final-say veto: check the most recent raw occ frames.
+            if raw_scan and len(raw_scan) >= 1:
+                _recent_n = min(3, len(raw_scan))
+                _recent = raw_scan[-_recent_n:]
+                if all(frame[from_idx] == 0 for frame in _recent):
+                    src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                    self.get_logger().info(
+                        f'Retry skipped: last {_recent_n} occ frames confirm source {src_sq} '
+                        f'empty — merged threshold was misled by early frames, piece has moved'
+                    )
+                    return False
+
+            # YOLO veto: if the YOLO scan also shows the source square empty, trust it.
+            _yolo_scan = self._ai_scan_merged_yolo
+            if _yolo_scan and _yolo_scan[from_idx] == 0:
+                _live_yolo_empty = (
+                    self._latest_yolo_grid is not None
+                    and self._latest_yolo_grid[from_idx] == 0
                 )
-                return False
+                if _live_yolo_empty:
+                    src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                    self.get_logger().info(
+                        f'Retry skipped: both YOLO scan and live YOLO confirm source '
+                        f'{src_sq} empty — occ threshold count overruled'
+                    )
+                    return False
 
         # Destination square occupied in reference → capture move
         is_capture = self._is_capture_move(self._current_fen, move)

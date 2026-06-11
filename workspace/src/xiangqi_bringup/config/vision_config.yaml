@@ -1,7 +1,7 @@
 # vision_config.yaml: Vision node and board calibration parameters
 vision_node:
   ros__parameters:
-    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt"
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.onnx"
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     require_yolo_weights: true
     yolo_download_url: ""
@@ -9,7 +9,8 @@ vision_node:
     yolo_imgsz: 0   # 0 = auto from .pt (v4 → 640)
     stability_frames: 4           # Frames to confirm a stable human move (~32s at 0.125Hz on CPU)
     grid_smooth_frames: 2         # 2 = require 2 consecutive agreeing frames to commit any cell change
-    poll_rate_hz: 4.0
+    grid_type_change_frames: 5    # 5 = faster type-change commit (was 8 default)
+    poll_rate_hz: 6.0             # 6 Hz publish cadence (was 4.0)
     camera_topic: "/camera/camera/color/image_raw"
     camera_config_file: "/home/rosuser/workspace/config/camera_config.yaml"
 

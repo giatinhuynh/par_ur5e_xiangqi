@@ -125,6 +125,7 @@ _state = {
     'game_mode': 'ai_vs_human',   # 'ai_vs_ai' | 'ai_vs_human'
     'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
+    'pending_illegal_alert': '',
     # Board scan (hardware pre-game calibration check)
     'board_scan_status': 'none',   # 'none' | 'scanning' | 'ok' | 'fail'
     'board_scan_pieces': 0,
@@ -743,6 +744,21 @@ def api_simulate_move():
     return jsonify({'ok': True, 'move': move})
 
 
+@_flask_app.route('/api/confirm_illegal', methods=['POST'])
+def api_confirm_illegal():
+    """Confirm or override an illegal-move detection (PENDING_ILLEGAL state)."""
+    data = request.json or {}
+    confirmed = data.get('confirmed', True)
+    decision = 'confirm' if confirmed else 'cancel'
+    pub = _ros_publishers.get('confirm_illegal')
+    if pub is None:
+        return jsonify({'ok': False, 'error': 'ROS publisher not ready'}), 503
+    msg = String()
+    msg.data = decision
+    pub.publish(msg)
+    return jsonify({'ok': True, 'decision': decision})
+
+
 @_socketio.on('connect')
 def on_connect():
     with _state_lock:
@@ -787,6 +803,7 @@ class DashboardNode(Node):
         self._human_move_pub = self.create_publisher(String, '/xiangqi/simulate_human_move', 10)
         self._game_mode_pub = self.create_publisher(String, '/xiangqi/game_mode', 10)
         self._ai_engines_pub = self.create_publisher(String, '/xiangqi/ai_engines', 10)
+        self._confirm_illegal_pub = self.create_publisher(String, '/xiangqi/confirm_illegal', 10)
         self._stop_game_pub = self.create_publisher(Empty, '/xiangqi/stop_game', 10)
         self._reset_game_pub = self.create_publisher(Empty, '/xiangqi/reset_game', 10)
         self._human_color_pub = self.create_publisher(String, '/xiangqi/human_color', 10)
@@ -802,6 +819,7 @@ class DashboardNode(Node):
         _ros_publishers['resync'] = self._resync_pub
         _ros_publishers['human_color'] = self._human_color_pub
         _ros_publishers['starting_fen'] = self._starting_fen_pub
+        _ros_publishers['confirm_illegal'] = self._confirm_illegal_pub
         _ros_publishers['set_engine_cli'] = self.create_client(SetEngine, 'set_engine')
         _ros_publishers['get_board_state_cli'] = self.create_client(GetBoardState, 'get_board_state')
         _ros_publishers['move_to_scan_pose_cli'] = self.create_client(
@@ -852,7 +870,7 @@ class DashboardNode(Node):
         self._acc_code: list = [0] * 90       # piece code with highest confidence seen
         self._acc_conf: list = [0.0] * 90    # peak confidence for that code
         self._acc_vanish: list = [0] * 90    # consecutive absent-frames counter per cell
-        self._ACC_VANISH_FRAMES: int = 3     # frames before a cell is cleared
+        self._ACC_VANISH_FRAMES: int = 2     # frames before a cell is cleared
         self._latest_occ_grid: list | None = None  # binary 0/1 from /occupancy_state
 
     def _sync_game_mode_once(self) -> None:
@@ -1125,6 +1143,7 @@ class DashboardNode(Node):
             _state['system_state'] = msg.system_state
             _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
             _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
+            _state['pending_illegal_alert'] = getattr(msg, 'pending_illegal_alert', '')
             # Sim: logical FEN drives the board (no camera). Hardware: vision drives the grid;
             # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:

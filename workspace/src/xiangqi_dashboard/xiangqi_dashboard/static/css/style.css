@@ -230,6 +230,7 @@ body {
 .flow-banner.phase-playing  { border-color: var(--ink-mid); color: var(--ink); }
 .flow-banner.phase-over     { border-color: var(--border-hi); }
 .flow-banner.phase-estop    { border-color: var(--red); color: var(--red); }
+.flow-banner.phase-illegal  { border-color: #e67e22; color: #e67e22; font-weight: 600; }
 
 /* ── Control Buttons ─────────────────────────────────────────────── */
 .header-controls {
@@ -381,6 +382,7 @@ body {
 .phase-chip.phase-playing  { color: var(--ink);      border-color: var(--ink-mid); }
 .phase-chip.phase-over     { color: var(--ink);      border-color: var(--ink-mid); }
 .phase-chip.phase-estop    { color: var(--red);      border-color: var(--red); }
+.phase-chip.phase-illegal  { color: #e67e22;          border-color: #e67e22; }
 
 /* Board loading overlay */
 #board-wrapper { position: relative; }
@@ -992,3 +994,75 @@ body {
   .coord-files   { max-width: min(480px, calc(100vw - 80px)); }
   .coord-ranks-left { display: none; }
 }
+
+/* ── Illegal-move confirmation modal ─────────────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, .55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.hidden { display: none !important; }
+
+.modal-box {
+  background: #fff;
+  border-radius: 10px;
+  padding: 32px 36px 28px;
+  max-width: 420px;
+  width: 90%;
+  text-align: center;
+  box-shadow: 0 8px 32px rgba(0,0,0,.25);
+}
+
+.modal-icon {
+  font-size: 40px;
+  color: #e67e22;
+  margin-bottom: 10px;
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 12px;
+}
+
+.modal-message {
+  font-size: 14px;
+  color: var(--ink-mid);
+  line-height: 1.5;
+  margin-bottom: 22px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+}
+
+.btn {
+  padding: 9px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background .15s, color .15s;
+}
+
+.btn-danger {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+.btn-danger:hover { background: var(--red-dim); border-color: var(--red-dim); }
+
+.btn-secondary {
+  background: #fff;
+  color: var(--ink-mid);
+  border-color: var(--border-hi);
+}
+.btn-secondary:hover { background: var(--bg-card); color: var(--ink); }

@@ -42,11 +42,20 @@ from xiangqi_vision.fen_util import grid_to_fen
 from xiangqi_msgs.srv import GetBoardState, GetBoardTransform
 
 from .board_detector import BoardDetector, BoardCalibration
-from .board_layout import _compute_4xa3_grid_mm as _blay_compute
+from .board_layout import (
+    _compute_4xa3_grid_mm as _blay_compute,
+    norm_pixel_at_intersection as _blay_intersection,
+    _cell_pixel_spacing as _blay_cell_spacing,
+)
 from .image_preprocess import PreprocessConfig, apply_piece_preprocess, stack_comparison
 from .piece_detector import PieceDetector
 from .turn_detector import TurnDetector, TurnDetectorState
-from .weights_util import resolve_calibration_path, resolve_yolo_model_path
+from .weights_util import (
+    resolve_calibration_path,
+    resolve_occupancy_model_path,
+    resolve_yolo_model_path,
+)
+from .cell_occupancy_net import ResNetOccupancyDetector, CellDataCollector, apply_occupancy_nms
 
 
 def _tf_rotation_matrix(r) -> np.ndarray:
@@ -239,6 +248,247 @@ class GridStabilizer:
         self._streak[:] = 0
 
 
+class CvOccupancyDetector:
+    """Binary occupancy detection on the warped board image (800×890 BGR).
+
+    Returns 1=piece present, 0=empty for each of the 90 intersections.
+    Colour and piece type are handled entirely by YOLO.
+
+    Three complementary signals — a cell is occupied if ANY one fires:
+      1. std_V  — brightness variance: piece 3-D surface vs flat board.
+      2. std_S  — saturation variance: OR fallback for pieces in heavy shadow.
+      3. edge density — Canny edges computed once on the full warped image then
+         sampled per-cell.  Piece rim + character strokes produce many edges;
+         an empty board intersection has almost none.  Shadow edges are smooth
+         gradients whereas piece rims are sharp — Canny thresholds filter them.
+
+    Shadow robustness:
+      - Canny is run on a Gaussian-blurred grayscale image, which suppresses soft
+        shadow gradients while keeping the hard piece edges.
+      - std_V + std_S OR combination means shadow on one channel is caught by the
+        other.
+      - Circular ROI mask excludes corner shadow spillover from adjacent pieces.
+      - NMS suppresses the weaker of two adjacent occupied cells.
+
+    No GPU required; runs in < 10 ms on CPU.
+    All thresholds are tunable via ROS parameters at launch time.
+    """
+
+    def __init__(
+        self,
+        roi_fraction: float = 0.38,
+        occ_std_v_thresh: float = 18.0,
+        occ_std_s_thresh: float = 22.0,
+        occ_edge_thresh: float = 0.08,
+        canny_low: int = 30,
+        canny_high: int = 80,
+        depth_piece_mm: float = 20.0,
+    ):
+        spacing = _blay_cell_spacing()
+        self._half = max(8, int(spacing * roi_fraction))
+        self._occ_std_v_thresh  = occ_std_v_thresh
+        self._occ_std_s_thresh  = occ_std_s_thresh
+        self._occ_edge_thresh   = occ_edge_thresh
+        self._canny_low         = canny_low
+        self._canny_high        = canny_high
+        self._depth_piece_mm    = depth_piece_mm
+
+        self._centers: list = []
+        for r in range(10):
+            for f in range(9):
+                cx, cy = _blay_intersection(f, r)
+                self._centers.append((int(round(cx)), int(round(cy))))
+
+        roi_d = 2 * self._half
+        yy, xx = np.mgrid[0:roi_d, 0:roi_d]
+        self._circ_mask: np.ndarray = (
+            (xx - self._half) ** 2 + (yy - self._half) ** 2
+        ) <= self._half ** 2
+        self._circ_n: int = int(np.count_nonzero(self._circ_mask))
+        # Cached per-frame depth results — written by detect(), read by debug publisher
+        self._last_depth_occ:        np.ndarray = np.zeros(90, dtype=np.int8)
+        self._last_depth_elevations: np.ndarray = np.zeros(90, dtype=np.float32)
+        self._last_depth_available:  bool       = False
+
+    def detect(
+        self,
+        warped_bgr: np.ndarray,
+        depth_img: np.ndarray | None = None,
+        H: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return occ_grid int8[90]: 1=occupied, 0=empty.
+
+        depth_img — aligned uint16 depth image (mm) from RealSense, or None.
+        H         — homography used to warp warped_bgr (needed to map cell
+                    centres back to camera pixel coords for depth sampling).
+        """
+        hsv  = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2HSV)
+        s_ch = hsv[:, :, 1]
+        v_ch = hsv[:, :, 2]
+
+        gray    = cv2.cvtColor(warped_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edge_map = cv2.Canny(blurred, self._canny_low, self._canny_high)
+
+        occ    = np.zeros(90, dtype=np.int8)
+        scores = np.zeros(90, dtype=np.float32)
+        half   = self._half
+        img_h, img_w = warped_bgr.shape[:2]
+        circ   = self._circ_mask
+        circ_n = self._circ_n
+
+        for idx, (cx, cy) in enumerate(self._centers):
+            y1, y2 = max(0, cy - half), min(img_h, cy + half)
+            x1, x2 = max(0, cx - half), min(img_w, cx + half)
+            rs = s_ch[y1:y2, x1:x2]
+            rv = v_ch[y1:y2, x1:x2]
+            re = edge_map[y1:y2, x1:x2]
+
+            full_roi = rs.shape == circ.shape
+            if full_roi:
+                rs = rs[circ]; rv = rv[circ]; re = re[circ]
+                n = circ_n
+            else:
+                n = rs.size
+            if n == 0:
+                continue
+
+            std_v        = float(np.std(rv))
+            std_s        = float(np.std(rs))
+            edge_density = float(np.count_nonzero(re)) / n
+
+            sig_v = std_v        / self._occ_std_v_thresh
+            sig_s = std_s        / self._occ_std_s_thresh
+            sig_e = edge_density / self._occ_edge_thresh
+
+            if sig_v >= 1.0 or sig_s >= 1.0 or sig_e >= 1.0:
+                occ[idx]    = 1
+                scores[idx] = max(sig_v, sig_s, sig_e)
+
+        # Depth signal — OR with CV results; depth is decisive when available
+        self._last_depth_available = depth_img is not None and H is not None
+        if self._last_depth_available:
+            depth_occ, depth_scores, depth_elev = self._detect_depth(depth_img, H)
+            self._last_depth_occ        = depth_occ
+            self._last_depth_elevations = depth_elev
+            for i in range(90):
+                if depth_occ[i]:
+                    occ[i]    = 1
+                    scores[i] = max(scores[i], depth_scores[i])
+        else:
+            self._last_depth_occ[:]        = 0
+            self._last_depth_elevations[:] = 0.0
+
+        return apply_occupancy_nms(occ, scores)
+
+    def _detect_depth(
+        self,
+        depth_img: np.ndarray,   # uint16, mm
+        H: np.ndarray,           # warped→original homography
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return (occ int8[90], scores float32[90], elevations float32[90]) from depth.
+
+        Algorithm:
+          1. Map each cell centre from warped coords → camera pixel via H⁻¹.
+          2. Sample a 5×5 median depth window at each camera pixel (robust to
+             single-pixel depth holes which RealSense produces near edges).
+          3. Fit an affine board-plane depth = a·u + b·v + c using the 60%
+             deepest valid samples — those are the empty cells (empty = board
+             surface = furthest from camera).
+          4. elevation = plane_depth − actual_depth.  A piece (~12 mm thick)
+             brings the surface closer; elevation ≥ depth_piece_mm → occupied.
+        """
+        occ   = np.zeros(90, dtype=np.int8)
+        scores = np.zeros(90, dtype=np.float32)
+        elevations = np.zeros(90, dtype=np.float32)
+
+        try:
+            H_inv = np.linalg.inv(H)
+        except np.linalg.LinAlgError:
+            return occ, scores, elevations
+
+        h_d, w_d = depth_img.shape[:2]
+
+        # --- Step 1+2: project and sample ---
+        us     = np.zeros(90, dtype=np.float32)
+        vs     = np.zeros(90, dtype=np.float32)
+        depths = np.zeros(90, dtype=np.float32)
+        valid  = np.zeros(90, dtype=bool)
+
+        for idx, (cx, cy) in enumerate(self._centers):
+            p  = H_inv @ np.array([cx, cy, 1.0], dtype=np.float64)
+            u  = p[0] / p[2]
+            v  = p[1] / p[2]
+            us[idx] = u
+            vs[idx] = v
+            ui, vi = int(round(u)), int(round(v))
+            if not (2 <= vi < h_d - 2 and 2 <= ui < w_d - 2):
+                continue
+            roi = depth_img[vi-2:vi+3, ui-2:ui+3].astype(np.float32)
+            nz  = roi[roi > 0]
+            if len(nz) >= 5:
+                depths[idx] = float(np.median(nz))
+                valid[idx]  = True
+
+        n_valid = int(np.count_nonzero(valid))
+        if n_valid < 10:
+            return occ, scores, elevations
+
+        # --- Step 3: fit board plane using deepest 60% (= empty cells) ---
+        vidx         = np.where(valid)[0]
+        sorted_deep  = vidx[np.argsort(depths[vidx])[::-1]]   # deepest first
+        n_plane      = max(10, int(n_valid * 0.60))
+        plane_idx    = sorted_deep[:n_plane]
+
+        A        = np.column_stack([us[plane_idx], vs[plane_idx], np.ones(n_plane)])
+        b_vec    = depths[plane_idx]
+        coeffs, _, _, _ = np.linalg.lstsq(A, b_vec, rcond=None)
+        a_c, b_c, c_c   = coeffs
+
+        # --- Step 4: elevation check ---
+        for i in vidx:
+            d_plane      = float(a_c * us[i] + b_c * vs[i] + c_c)
+            elevation    = d_plane - depths[i]     # positive = closer = piece
+            elevations[i] = elevation
+            if elevation >= self._depth_piece_mm:
+                occ[i]    = 1
+                scores[i] = elevation / self._depth_piece_mm
+
+        return occ, scores, elevations
+
+
+class OccupancyStabilizer:
+    """Temporal smoothing for the fast CV occupancy grid (values ±1/0).
+
+    appear_frames (0 → ±1 or colour flip): 2 frames ≈ 0.2 s at 10 Hz
+    vanish_frames (±1 → 0):               3 frames ≈ 0.3 s at 10 Hz
+    """
+
+    def __init__(self, appear_frames: int = 2, vanish_frames: int = 3, n_cells: int = 90):
+        self._appear_n = max(1, appear_frames)
+        self._vanish_n = max(1, vanish_frames)
+        self._committed = np.zeros(n_cells, dtype=np.int8)
+        self._candidate = np.zeros(n_cells, dtype=np.int8)
+        self._streak    = np.zeros(n_cells, dtype=np.int32)
+
+    def update(self, raw: np.ndarray) -> np.ndarray:
+        same = raw == self._candidate
+        self._streak[same] += 1
+        changed = ~same
+        self._candidate[changed] = raw[changed]
+        self._streak[changed] = 1
+        vanishing = self._candidate == 0
+        threshold = np.where(vanishing, self._vanish_n, self._appear_n)
+        ready = self._streak >= threshold
+        self._committed[ready] = self._candidate[ready]
+        return self._committed.copy()
+
+    def reset(self) -> None:
+        self._committed[:] = 0
+        self._candidate[:] = 0
+        self._streak[:] = 0
+
+
 class VisionNode(Node):
     def __init__(self):
         super().__init__('vision_node')
@@ -257,8 +507,33 @@ class VisionNode(Node):
         self.declare_parameter('stability_frames', 8)
         self.declare_parameter('grid_smooth_frames', 3)
         self.declare_parameter('grid_type_change_frames', 8)
-        self.declare_parameter('grid_vanish_frames', 10)
+        self.declare_parameter('grid_vanish_frames', 3)
         self.declare_parameter('poll_rate_hz', 3.0)
+        # CV occupancy fast path (no YOLO required)
+        # Red detection uses H+S only — no V threshold (shadow-robust).
+        # Occupancy uses std of S channel — shadow-invariant (shadows reduce V, not S).
+        # Circular ROI mask excludes corner spillover from adjacent piece shadows.
+        self.declare_parameter('cv_occ_roi_fraction', 0.38)
+        self.declare_parameter('cv_occ_std_v_thresh', 18.0)   # brightness variance threshold
+        self.declare_parameter('cv_occ_std_s_thresh', 22.0)   # saturation variance threshold
+        self.declare_parameter('cv_occ_edge_thresh', 0.08)    # Canny edge density threshold
+        self.declare_parameter('cv_occ_canny_low', 30)        # Canny lower hysteresis
+        self.declare_parameter('cv_occ_canny_high', 80)       # Canny upper hysteresis
+        self.declare_parameter('cv_occ_rate_hz', 10.0)
+        # ResNet-34 occupancy model (empty = use classical CV fallback)
+        self.declare_parameter('cv_occ_model_path', '')
+        self.declare_parameter('cv_occ_resnet_roi_fraction', 1.00)
+        self.declare_parameter('cv_occ_cell_px', 107)  # reference cell size; 0 = use board spacing
+        self.declare_parameter('cv_occ_x_squeeze_px', 12)   # inward x-shift at outer files (0=off)
+        self.declare_parameter('cv_occ_y_squeeze_px', 0)   # inward y-shift at outer ranks (0=off)
+        self.declare_parameter('cv_occ_threshold', 0.5)
+        # Data collection (set dir to enable; crops saved when YOLO conf >= threshold)
+        self.declare_parameter('cv_occ_collect_dir', '')
+        self.declare_parameter('cv_occ_collect_min_conf', 0.80)
+        # Depth-based occupancy (RealSense aligned depth, completely lighting-independent)
+        self.declare_parameter('cv_occ_depth_topic',
+                               '/camera/camera/depth/image_rect_raw')
+        self.declare_parameter('cv_occ_depth_piece_mm', 20.0)  # min elevation (mm) for a piece (~2 cm)
         self.declare_parameter('camera_topic', '/camera/camera/color/image_raw')
         # Piece detection preprocessing (warped board, before YOLO)
         self.declare_parameter('piece_preprocess_enabled', False)
@@ -337,6 +612,37 @@ class VisionNode(Node):
             type_change_frames=grid_type_change,
             vanish_frames=grid_vanish,
         )
+        _model_path = resolve_occupancy_model_path(
+            str(self.get_parameter('cv_occ_model_path').value or ''),
+            self.get_logger(),
+        )
+        self._occ_detector = ResNetOccupancyDetector(
+            model_path=_model_path or None,
+            roi_fraction=float(self.get_parameter('cv_occ_resnet_roi_fraction').value),
+            cell_px=int(self.get_parameter('cv_occ_cell_px').value),
+            x_squeeze_px=int(self.get_parameter('cv_occ_x_squeeze_px').value),
+            y_squeeze_px=int(self.get_parameter('cv_occ_y_squeeze_px').value),
+            threshold=float(self.get_parameter('cv_occ_threshold').value),
+        )
+        if self._occ_detector.model_loaded:
+            self.get_logger().info(f'ResNet-34 occupancy model loaded from {_model_path}')
+        else:
+            self.get_logger().info(
+                'ResNet-34 occupancy model not loaded — using classical CV fallback. '
+                'Set cv_occ_model_path to activate the neural classifier.'
+            )
+        _collect_dir = str(self.get_parameter('cv_occ_collect_dir').value or '')
+        self._data_collector: CellDataCollector | None = (
+            CellDataCollector(_collect_dir) if _collect_dir else None
+        )
+        self._collect_min_conf = float(self.get_parameter('cv_occ_collect_min_conf').value)
+        self._occ_stabilizer = OccupancyStabilizer(appear_frames=1, vanish_frames=5)
+        self._cached_H: np.ndarray | None = None
+        self._cached_H_lock = threading.Lock()
+        self._occ_frame_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._latest_depth_img: np.ndarray | None = None
+        self._depth_lock = threading.Lock()
+        self._depth_camera_matrix: np.ndarray | None = None
         self._bridge = CvBridge()
 
         # --- TF2 for camera→base_link transform (fallback if no auto-calibration) ---
@@ -398,6 +704,19 @@ class VisionNode(Node):
             self._image_callback,
             camera_qos,
         )
+        _depth_topic = str(self.get_parameter('cv_occ_depth_topic').value or '')
+        if _depth_topic:
+            self._depth_sub = self.create_subscription(
+                Image, _depth_topic, self._depth_callback, camera_qos,
+            )
+            _depth_info_topic = _depth_topic.replace('image_rect_raw', 'camera_info')
+            self._depth_info_sub = self.create_subscription(
+                CameraInfo, _depth_info_topic, self._depth_info_callback, cam_info_qos,
+            )
+            self.get_logger().info(f'Depth occupancy enabled: {_depth_topic}')
+        else:
+            self._depth_sub      = None
+            self._depth_info_sub = None
         camera_info_topic = self.get_parameter('camera_topic').value.replace(
             'image_raw', 'camera_info'
         )
@@ -422,6 +741,8 @@ class VisionNode(Node):
 
         # --- Publishers ---
         self._board_state_pub = self.create_publisher(BoardState, '/xiangqi/board_state', 10)
+        self._occ_state_pub = self.create_publisher(BoardState, '/xiangqi/occupancy_state', 10)
+        self._occ_debug_pub = self.create_publisher(Image, '/xiangqi/debug_occupancy', sensor_qos)
         self._move_detected_pub = self.create_publisher(Bool, '/xiangqi/human_move_detected', 10)
         # BEST_EFFORT so publish() is always non-blocking (RELIABLE can stall on large images)
         self._debug_img_pub = self.create_publisher(Image, '/xiangqi/debug_image', sensor_qos)
@@ -439,6 +760,12 @@ class VisionNode(Node):
             target=self._run_detection_loop, daemon=True, name='vision_detection'
         )
         self._detection_thread.start()
+
+        # --- Fast CV occupancy thread (no YOLO, runs at cv_occ_rate_hz) ---
+        self._occ_thread = threading.Thread(
+            target=self._run_occupancy_loop, daemon=True, name='vision_occupancy'
+        )
+        self._occ_thread.start()
 
         # --- Publish timer (executor thread only - no heavy work here) ---
         period = 1.0 / self._poll_rate
@@ -500,8 +827,36 @@ class VisionNode(Node):
                 except queue.Empty:
                     pass
                 self._frame_queue.put_nowait(img)    # put latest
+            # Also feed the fast CV occupancy thread (independent of YOLO)
+            try:
+                self._occ_frame_queue.put_nowait(img)
+            except queue.Full:
+                try:
+                    self._occ_frame_queue.get_nowait()
+                except queue.Empty:
+                    pass
+                self._occ_frame_queue.put_nowait(img)
         except Exception as e:
             self.get_logger().error(f'Image conversion error: {e}')
+
+    def _depth_callback(self, msg: Image) -> None:
+        try:
+            # passthrough gives uint16 (mm); keep as-is — _detect_depth works in mm
+            depth = self._bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough').copy()
+            with self._depth_lock:
+                first = self._latest_depth_img is None
+                self._latest_depth_img = depth
+            if first:
+                self.get_logger().info(
+                    f'First depth frame received ({depth.shape[1]}x{depth.shape[0]})'
+                )
+        except Exception as e:
+            self.get_logger().error(f'Depth image error: {e}', throttle_duration_sec=5.0)
+
+    def _depth_info_callback(self, msg: CameraInfo) -> None:
+        if self._depth_camera_matrix is None:
+            self._depth_camera_matrix = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+            self.get_logger().info('Depth camera intrinsics received')
 
     # ------------------------------------------------------------------
     # Other callbacks - all fast, no YOLO/ArUco here
@@ -843,6 +1198,54 @@ class VisionNode(Node):
         self.get_logger().info('Detection loop thread exiting')
 
     # ------------------------------------------------------------------
+    # Fast CV occupancy loop — no YOLO, runs at cv_occ_rate_hz (~10 Hz)
+    # ------------------------------------------------------------------
+
+    def _run_occupancy_loop(self) -> None:
+        """Detect occupancy from warped board image — no YOLO required.
+
+        Publishes to /xiangqi/occupancy_state at up to cv_occ_rate_hz.
+        Grid values: 1=piece present, 0=empty.  Colour and type are not determined
+        here; the game manager fuses this with YOLO for piece identity.
+        Uses the homography cached by _process_frame so ArUco runs only once per YOLO frame.
+        """
+        rate_hz = float(self.get_parameter('cv_occ_rate_hz').value)
+        interval = 1.0 / max(1.0, rate_hz)
+        self.get_logger().info('Occupancy loop thread started')
+        while rclpy.ok():
+            try:
+                image = self._occ_frame_queue.get(timeout=interval)
+            except queue.Empty:
+                continue
+            with self._cached_H_lock:
+                H = self._cached_H
+            if H is None:
+                continue
+            try:
+                warped = self._board_detector.warp_board(image, H)
+                raw_occ = self._occ_detector.detect(warped)
+                occ = self._occ_stabilizer.update(raw_occ)
+
+                stamp = self.get_clock().now().to_msg()
+
+                msg = BoardState()
+                msg.header = Header()
+                msg.header.stamp = stamp
+                msg.header.frame_id = 'camera_color_optical_frame'
+                msg.grid = occ.tolist()
+                msg.detection_confidence = 0.0   # marks this as occupancy-only (no type info)
+                msg.cell_confidence = [0.0] * 90
+                msg.fen = ''
+                self._occ_state_pub.publish(msg)
+
+                self._publish_occ_debug(warped, raw_occ, occ, stamp)
+            except Exception as e:
+                self.get_logger().error(
+                    f'Occupancy detection error: {e}', throttle_duration_sec=5.0
+                )
+        self.get_logger().info('Occupancy loop thread exiting')
+
+    # ------------------------------------------------------------------
     # Core frame processing - pure computation, called only from detection thread
     # ------------------------------------------------------------------
 
@@ -858,6 +1261,10 @@ class VisionNode(Node):
                 throttle_duration_sec=5.0,
             )
             return None, debug, False
+
+        # Share the latest valid homography with the fast occupancy thread
+        with self._cached_H_lock:
+            self._cached_H = H
 
         warped = self._board_detector.warp_board(image, H)
         preprocess_cfg = self._piece_preprocess_config()
@@ -896,6 +1303,15 @@ class VisionNode(Node):
         msg.cell_confidence = cell_conf.tolist()
         msg.fen = grid_to_fen(msg.grid)
 
+        # Auto-collect labeled cell crops for ResNet training when YOLO is confident
+        if self._data_collector is not None and mean_conf >= self._collect_min_conf:
+            n = self._data_collector.collect(warped, msg.fen)
+            if n:
+                self.get_logger().debug(
+                    f'Collected {n} crops (total={self._data_collector.total_saved})',
+                    throttle_duration_sec=10.0,
+                )
+
         move_detected = False
         if run_turn_detector:
             grid_arr = np.array(msg.grid, dtype=np.int8)
@@ -905,6 +1321,64 @@ class VisionNode(Node):
         return msg, debug_out, move_detected
 
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Occupancy debug image - called from occupancy thread
+    # ------------------------------------------------------------------
+
+    def _publish_occ_debug(
+        self,
+        warped: np.ndarray,
+        raw_occ: np.ndarray,
+        committed_occ: np.ndarray,
+        stamp,
+    ) -> None:
+        """Draw occupancy overlay matching the training script's draw_board_overlay.
+
+        Green ring  = occupied (committed)
+        Blue ring   = empty (committed)
+        Yellow ring = stabilizer still deciding (raw ≠ committed)
+        P(occ) printed at each cell center.
+        """
+        try:
+            det    = self._occ_detector
+            # Flip horizontally so a0=top-right, i0=top-left, a9=bottom-right, i9=bottom-left.
+            # Flip the base image first, then draw using mirrored x-coordinates so text is readable.
+            dbg    = cv2.flip(warped, 1).copy()
+            img_w  = dbg.shape[1]
+            half   = det._half
+            ring_r = max(4, int(half * 0.88))   # half=71 → ring_r≈62px at roi_fraction=0.80
+            probs  = det._last_probs  # P(occupied) per cell from last ResNet pass
+
+            for idx, (cx, cy) in enumerate(det._centers):
+                fcx = img_w - 1 - cx  # mirrored x after horizontal flip
+                com_val = int(committed_occ[idx])
+                raw_val = int(raw_occ[idx])
+
+                if (raw_val != 0) != (com_val != 0):
+                    # stabilizer still deciding
+                    cv2.circle(dbg, (fcx, cy), ring_r, (0, 180, 255), 2)
+                else:
+                    color = (0, 200, 0) if com_val != 0 else (60, 60, 200)
+                    cv2.circle(dbg, (fcx, cy), ring_r, color, 2)
+
+                p = float(probs[idx]) if idx < len(probs) else 0.0
+                cv2.putText(dbg, f'{p:.2f}', (fcx - 18, cy + 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.28, (255, 255, 0), 1, cv2.LINE_AA)
+
+            n_occ = int(np.count_nonzero(committed_occ))
+            label = f'Occ  present={n_occ}  empty={90 - n_occ}'
+            cv2.putText(dbg, label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(dbg, label, (8, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 200), 2, cv2.LINE_AA)
+
+            ros_img = self._bridge.cv2_to_imgmsg(np.ascontiguousarray(dbg), encoding='bgr8')
+            ros_img.header.stamp = stamp
+            ros_img.header.frame_id = 'camera_color_optical_frame'
+            self._occ_debug_pub.publish(ros_img)
+        except Exception as e:
+            self.get_logger().error(
+                f'_publish_occ_debug failed: {e}', throttle_duration_sec=10.0
+            )
+
     # Debug image publishing - called from executor thread (_publish_tick)
     # ------------------------------------------------------------------
 

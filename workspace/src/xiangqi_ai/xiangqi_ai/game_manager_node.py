@@ -48,6 +48,7 @@ class GameState(Enum):
     COMPUTING_AI = auto()
     EXECUTING_MOVE = auto()
     GAME_OVER = auto()
+    PENDING_ILLEGAL = auto()  # waiting for human to confirm/override an illegal-move detection
 
 
 class GameManagerNode(Node):
@@ -105,6 +106,11 @@ class GameManagerNode(Node):
             BoardState, '/xiangqi/board_state', self._board_state_cb, 10,
             callback_group=cb_group
         )
+        # Fast CV occupancy topic (10 Hz, no YOLO) — used exclusively for AI-turn interference
+        self._occ_state_sub = self.create_subscription(
+            BoardState, '/xiangqi/occupancy_state', self._occupancy_state_cb, 10,
+            callback_group=cb_group
+        )
         self._human_move_detected_sub = self.create_subscription(
             Bool, '/xiangqi/human_move_detected', self._human_move_detected_cb, 10,
             callback_group=cb_group
@@ -155,6 +161,10 @@ class GameManagerNode(Node):
         self._estop_sub = self.create_subscription(
             Bool, '/xiangqi/estop', self._estop_cb, 10, callback_group=cb_group
         )
+        self._confirm_illegal_sub = self.create_subscription(
+            String, '/xiangqi/confirm_illegal', self._confirm_illegal_cb, 10,
+            callback_group=cb_group,
+        )
 
         # Publishers
         self._game_status_pub = self.create_publisher(GameStatus, '/xiangqi/game_status', 10)
@@ -183,6 +193,9 @@ class GameManagerNode(Node):
         self._status_timer = self.create_timer(1.0, self._publish_status)
 
         self._latest_board_state: BoardState | None = None
+        self._latest_yolo_grid: list = [0] * 90   # last YOLO classification grid (never synthetic)
+        self._latest_yolo_time: float = 0.0        # monotonic timestamp of last YOLO frame
+        self._latest_occ_raw_grid: list = [0] * 90  # latest single raw occ frame (pre-fusion)
         self._human_watch_reference_grid: list | None = None
         self._pending_human_move: str | None = None
 
@@ -191,6 +204,17 @@ class GameManagerNode(Node):
         self._ai_verify_scan_start: float = 0.0
         self._collecting_human_scan: bool = False
         self._human_scan_start: float = 0.0
+        # Parallel YOLO scan collection (10 frames alongside occ)
+        self._collecting_human_yolo: bool = False
+        self._collecting_ai_yolo: bool = False
+        self._human_move_yolo_grids: list = []
+        self._ai_verify_yolo_grids: list = []
+        self._human_scan_merged_yolo: list = [0] * 90  # 0.8 threshold (move detection)
+        self._human_scan_extra_yolo: list = [0] * 90  # 0.9 threshold (extra-change GAME_OVER guard)
+        self._ai_scan_merged_yolo: list = [0] * 90
+        # Rolling 3-frame YOLO window: "What the robot is seeing" final-say filter.
+        self._live_acc_frames: list = []
+        self._LIVE_ACC_FRAMES: int = 3
 
         # AI move bookkeeping - apply to FEN only after action server confirms completion
         self._pending_ai_move: str | None = None
@@ -210,6 +234,11 @@ class GameManagerNode(Node):
         self._ai_fen_at_request: str | None = None
         self._game_result: str = "ongoing"
         self._game_result_reason: str = ""
+
+        # Pending illegal confirmation: game pauses here until human confirms or overrides.
+        self._pending_illegal_result: str = ''
+        self._pending_illegal_alert: str = ''
+        self._pending_illegal_has_ai_move: bool = False
         # FEN forwarded by dashboard after a successful Scan Board press.
         # Consumed once in _begin_new_game to skip the startup rescan.
         self._prescan_fen: str | None = None
@@ -217,7 +246,9 @@ class GameManagerNode(Node):
         # Interference detection: track consecutive frames where board differs
         # from reference FEN during AI's turn (COMPUTING_AI only).
         self._ai_interference_streak: int = 0
-        self._AI_INTERFERENCE_THRESHOLD: int = 3
+        self._AI_INTERFERENCE_THRESHOLD: int = 6  # 0.6 s at 10 Hz; raised from 3 to absorb YOLO-fusion noise
+        # Suppress interference checks for N seconds after the arm completes a move (arm returning home).
+        self._ai_interference_settle_until: float = 0.0
 
         # Move retry: track retries for the current AI move (reset each new move).
         self._ai_move_retry_count: int = 0
@@ -239,40 +270,39 @@ class GameManagerNode(Node):
         # Ignore logical snapshots we publish ourselves (confidence 1.0).
         if float(msg.detection_confidence) >= 0.999:
             return
+        # Keep the latest YOLO grid so _fuse_occ_with_yolo can read piece types.
         self._latest_board_state = msg
-        now = time.monotonic()
+        self._latest_yolo_grid = [int(x) for x in msg.grid]
+        self._latest_yolo_time = time.monotonic()
+        # Maintain rolling 3-frame window for live final-say filter.
+        self._live_acc_frames.append(self._latest_yolo_grid)
+        if len(self._live_acc_frames) > self._LIVE_ACC_FRAMES:
+            self._live_acc_frames.pop(0)
 
-        # AI verify scan: collect frames from the background detection stream so we
-        # never trigger a redundant synchronous YOLO inference via force_rescan.
-        if self._collecting_ai_scan and now >= self._ai_verify_scan_start:
-            if self._game_state == GameState.EXECUTING_MOVE:
-                self._ai_verify_scan_grids.append(list(msg.grid))
-                if len(self._ai_verify_scan_grids) >= self._AI_VERIFY_SCAN_ROUNDS:
-                    self._collecting_ai_scan = False
-                    finisher = getattr(self, '_verify_scan_finisher', None) or self._finish_ai_verify_recovery
-                    finisher()
-                    return
-
-        # Human move scan: same approach — collect from the live topic stream.
-        elif self._collecting_human_scan and now >= self._human_scan_start:
-            if self._game_state == GameState.DETECTING_MOVE:
-                self._human_move_scan_grids.append(list(msg.grid))
-                if len(self._human_move_scan_grids) >= self._HUMAN_SCAN_ROUNDS:
-                    self._collecting_human_scan = False
-                    merged = self._merge_startup_grids(self._human_move_scan_grids)
-                    synthetic = BoardState()
-                    synthetic.grid = [int(v) for v in merged]
-                    synthetic.fen = self._grid_to_fen(merged, self._current_fen)
-                    synthetic.detection_confidence = 0.5
-                    self._latest_board_state = synthetic
-                    self._process_human_move()
-                    return
-
-        # Interference check: in ai_vs_human hardware mode, if the human touches
-        # any piece during COMPUTING_AI, declare the AI the winner.
-        if (self._game_state == GameState.COMPUTING_AI
-                and not self._simulation_mode):
-            self._check_ai_turn_interference(list(msg.grid))
+        # Collect YOLO frames in parallel with occ scan frames.
+        # YOLO only needs _YOLO_SCAN_ROUNDS (3) frames — enough for consensus — while occ
+        # collects more. Both must complete before the scan finalizes (dual-sensor gate).
+        now = self._latest_yolo_time
+        if self._collecting_human_yolo and self._game_state == GameState.DETECTING_MOVE:
+            if now >= self._human_scan_start:
+                self._human_move_yolo_grids.append([int(x) for x in msg.grid])
+                n = len(self._human_move_yolo_grids)
+                if n >= self._YOLO_SCAN_ROUNDS:
+                    self._collecting_human_yolo = False
+                elif n >= self._YOLO_EARLY_EXIT_CONSECUTIVE:
+                    tail = self._human_move_yolo_grids[-self._YOLO_EARLY_EXIT_CONSECUTIVE:]
+                    if all(t != self._ZERO90 for t in tail) and all(tail[i] == tail[0] for i in range(1, len(tail))):
+                        self._collecting_human_yolo = False
+        elif self._collecting_ai_yolo and self._game_state == GameState.EXECUTING_MOVE:
+            if now >= self._ai_verify_scan_start:
+                self._ai_verify_yolo_grids.append([int(x) for x in msg.grid])
+                n = len(self._ai_verify_yolo_grids)
+                if n >= self._YOLO_SCAN_ROUNDS:
+                    self._collecting_ai_yolo = False
+                elif n >= self._YOLO_EARLY_EXIT_CONSECUTIVE:
+                    tail = self._ai_verify_yolo_grids[-self._YOLO_EARLY_EXIT_CONSECUTIVE:]
+                    if all(t != self._ZERO90 for t in tail) and all(tail[i] == tail[0] for i in range(1, len(tail))):
+                        self._collecting_ai_yolo = False
 
     def _apply_dashboard_mode(self, mode: str) -> None:
         """Apply sim play style from dashboard mode (ai_vs_ai = both sides AI)."""
@@ -467,8 +497,20 @@ class GameManagerNode(Node):
             return False
         return val > 0 if human_red else val < 0
 
-    _HUMAN_SCAN_ROUNDS = 5       # frames to collect from the live topic before inferring
-    _HUMAN_VERIFY_SETTLE_DELAY = 1.2  # seconds to wait (settle) before collecting starts
+    _HUMAN_SCAN_ROUNDS         = 6    # occ frames to collect before inferring (was 9)
+    _HUMAN_VERIFY_SETTLE_DELAY = 0.8  # seconds to wait (settle) before collecting starts (was 1.2)
+
+    # YOLO collects fewer frames than occ — 3 consensus frames is enough for reliable
+    # type+color verification; reducing this is the primary fix for slow-CPU latency.
+    # Both occ AND YOLO must complete before the scan finalizes (dual-sensor gate).
+    _YOLO_SCAN_ROUNDS = 3
+
+    # Early-exit: stop collecting once N consecutive identical frames confirm board is stable.
+    _OCC_EARLY_EXIT_CONSECUTIVE  = 4
+    _YOLO_EARLY_EXIT_CONSECUTIVE = 3
+
+    # Pre-allocated empty grid constant — avoids per-tick allocation in _board_state_cb.
+    _ZERO90: list = [0] * 90
 
     def _begin_human_move_detection(self) -> None:
         """Transition to DETECTING_MOVE and start collecting board frames from the topic."""
@@ -479,20 +521,26 @@ class GameManagerNode(Node):
             self._process_human_move()
             return
         self._human_move_scan_grids = []
+        self._human_move_yolo_grids = []
         self._collecting_human_scan = True
+        self._collecting_human_yolo = True
+        self._human_occ_done = False
         self._human_scan_start = time.monotonic() + self._HUMAN_VERIFY_SETTLE_DELAY
 
     # ------------------------------------------------------------------
     # AI verify-failure recovery via multi-scan
     # ------------------------------------------------------------------
 
-    _AI_VERIFY_SCAN_ROUNDS = 5      # frames to collect from the live topic before verifying
-    _AI_VERIFY_SETTLE_DELAY = 1.5   # seconds to wait (settle) before collecting starts
+    _AI_VERIFY_SCAN_ROUNDS    = 6    # occ frames to collect before verifying (was 9)
+    _AI_VERIFY_SETTLE_DELAY   = 1.0  # seconds to wait (settle) before collecting starts (was 1.5)
 
     def _begin_ai_verify_scan(self) -> None:
         """Start multi-frame verify scan by collecting from the live board-state topic."""
         self._ai_verify_scan_grids = []
+        self._ai_verify_yolo_grids = []
         self._collecting_ai_scan = True
+        self._collecting_ai_yolo = True
+        self._ai_occ_done = False
         self._ai_verify_scan_start = time.monotonic() + self._AI_VERIFY_SETTLE_DELAY
 
     def _finish_robot_move_complete(self) -> None:
@@ -500,7 +548,11 @@ class GameManagerNode(Node):
         if self._game_state != GameState.EXECUTING_MOVE or not self._pending_ai_move:
             return
         if self._ai_verify_scan_grids:
-            merged = self._merge_startup_grids(self._ai_verify_scan_grids)
+            merged = self._merge_startup_grids(self._ai_verify_scan_grids, threshold=0.8)
+            # Fold in YOLO scan (50% threshold) to recover pieces occ may have missed
+            for _i in range(90):
+                if merged[_i] == 0 and self._ai_scan_merged_yolo[_i] != 0:
+                    merged[_i] = 1
             synthetic = BoardState()
             synthetic.grid = [int(v) for v in merged]
             synthetic.fen = self._grid_to_fen(merged, self._current_fen)
@@ -511,15 +563,26 @@ class GameManagerNode(Node):
         # execution) — interference, regardless of which side's piece. Game over.
         if self._execution_interference_detected():
             result = 'red_wins' if self._robot_is_red else 'black_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                "Illegal: a piece was moved or removed during the robot's move — game over."
-            )
-            self._illegal_move_pub.publish(alert)
-            self._pending_ai_move = None
-            self._active_goal_handle = None
-            self._publish_status()
+            self._flag_illegal_move(result, "Illegal: a piece was moved or removed during the robot's move.")
+            return
+
+        # Even if the planner reports success, verify the piece actually left the source
+        # square — a failed grasp produces no interference (source/dest are planned cells)
+        # but still means the move didn't happen.  Reuse the BOARD_VERIFY_FAILED retry path.
+        if self._retry_ai_move_lower_grasp():
+            return
+
+        # For capture moves: if the destination is also empty after the source cleared,
+        # both pieces fell off the board during execution — game over.
+        if self._capture_destination_vanished(self._pending_ai_move):
+            result = 'black_wins' if self._robot_is_red else 'red_wins'
+            self._flag_illegal_move(result, 'Robot dropped both pieces during capture execution.')
+            return
+
+        # For non-capture moves: if the destination is empty, the robot piece was lost.
+        if self._robot_piece_lost_after_move(self._pending_ai_move):
+            result = 'black_wins' if self._robot_is_red else 'red_wins'
+            self._flag_illegal_move(result, 'Robot piece missing from destination after move.')
             return
 
         # Clean board — commit the robot's move and advance the game.
@@ -539,6 +602,8 @@ class GameManagerNode(Node):
             self._publish_status()
             return
         if self._self_play:
+            # Give the arm 5 s to return to home before interference detection resumes.
+            self._ai_interference_settle_until = time.monotonic() + 5.0
             self.get_logger().info('Self-play: computing next AI move immediately')
             self._game_state = GameState.COMPUTING_AI
             self._publish_status()
@@ -552,7 +617,11 @@ class GameManagerNode(Node):
     def _finish_ai_verify_recovery(self) -> None:
         """Use merged multi-scan grid to retry AI move verification after BOARD_VERIFY_FAILED."""
         if self._ai_verify_scan_grids:
-            merged = self._merge_startup_grids(self._ai_verify_scan_grids)
+            merged = self._merge_startup_grids(self._ai_verify_scan_grids, threshold=0.8)
+            # Fold in YOLO scan (50% threshold) to recover pieces occ may have missed
+            for _i in range(90):
+                if merged[_i] == 0 and self._ai_scan_merged_yolo[_i] != 0:
+                    merged[_i] = 1
             synthetic = BoardState()
             synthetic.grid = [int(v) for v in merged]
             synthetic.fen = self._grid_to_fen(merged, self._current_fen)
@@ -563,19 +632,25 @@ class GameManagerNode(Node):
         # during execution — that's interference regardless of which side's piece it was.
         if self._execution_interference_detected():
             result = 'red_wins' if self._robot_is_red else 'black_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                "Illegal: a piece was moved or removed during the robot's execution — game over."
-            )
-            self._illegal_move_pub.publish(alert)
-            self._pending_ai_move = None
-            self._active_goal_handle = None
-            self._publish_status()
+            self._flag_illegal_move(result, "Illegal: a piece was moved or removed during the robot's execution.")
             return
 
         if self._retry_ai_move_lower_grasp():
             return
+
+        # For capture moves: if the destination is also empty after the source cleared,
+        # both pieces fell off the board — game over.
+        if self._capture_destination_vanished(self._pending_ai_move):
+            result = 'black_wins' if self._robot_is_red else 'red_wins'
+            self._flag_illegal_move(result, 'Robot dropped both pieces during capture execution.')
+            return
+
+        # For non-capture moves: if the destination is empty, the robot piece was lost.
+        if self._robot_piece_lost_after_move(self._pending_ai_move):
+            result = 'black_wins' if self._robot_is_red else 'red_wins'
+            self._flag_illegal_move(result, 'Robot piece missing from destination after move.')
+            return
+
         if self._commit_pending_ai_after_robot(
             'Board verify failed - committing pending AI move (trust_robot)'
         ):
@@ -733,6 +808,114 @@ class GameManagerNode(Node):
             self._publish_status()
         return True
 
+    def _capture_destination_vanished(self, move: str) -> bool:
+        """Return True when a capture move's destination is confirmed empty by all three sources.
+
+        After a successful grasp (source cleared), if the destination is also empty in the
+        occ+YOLO merged scan AND in the 3-frame live YOLO window, both pieces have vanished
+        from the board.  This is a catastrophic drop — declare game over rather than
+        committing a ghost board state.
+        """
+        try:
+            parsed = _resolver_parse_move(move)
+            if parsed is None:
+                return False
+            _, (to_f, to_r) = parsed
+            to_idx = (to_r - 1) * 9 + (ord(to_f) - ord('a'))
+        except Exception:
+            return False
+
+        ref = self._fen_to_grid(self._current_fen)
+        robot_sign = 1 if self._robot_is_red else -1
+        # Only relevant for capture moves (opponent piece at destination in pre-move FEN).
+        if ref[to_idx] == 0 or (ref[to_idx] > 0) == (robot_sign > 0):
+            return False
+
+        if self._latest_board_state is None:
+            return False
+
+        # Raw occ primary check + YOLO-folded confirmation (rules out single-sensor noise).
+        raw_scan = getattr(self, '_ai_verify_scan_grids', None)
+        if raw_scan:
+            occ_only = self._merge_startup_grids(raw_scan, threshold=0.8)
+            occ_empty = (occ_only[to_idx] == 0)
+        else:
+            occ_empty = (self._latest_board_state.grid[to_idx] == 0)
+        yolo_folded_empty = (self._latest_board_state.grid[to_idx] == 0)
+
+        # 3-frame live YOLO window also confirms empty.
+        live_empty = (
+            bool(self._live_acc_frames)
+            and all(frame[to_idx] == 0 for frame in self._live_acc_frames)
+        )
+
+        if occ_empty and yolo_folded_empty and live_empty:
+            sq = f"{chr(ord('a') + to_idx % 9)}{to_idx // 9 + 1}"
+            self.get_logger().warn(
+                f'Capture {move}: destination {sq} is empty in occ scan, YOLO scan, and live filter '
+                f'— both pieces vanished, declaring game over'
+            )
+            return True
+        return False
+
+    def _robot_piece_lost_after_move(self, move: str) -> bool:
+        """Return True when the robot's piece is missing from the destination after a non-capture move.
+
+        After the source clears (robot picked up), if the destination is also empty in both
+        the occ scan and the 3-frame live YOLO window, the piece was dropped or removed.
+        Only applies to non-capture moves (capture case is handled by _capture_destination_vanished).
+        """
+        try:
+            parsed = _resolver_parse_move(move)
+            if parsed is None:
+                return False
+            (from_f, from_r), (to_f, to_r) = parsed
+            from_idx = (from_r - 1) * 9 + (ord(from_f) - ord('a'))
+            to_idx = (to_r - 1) * 9 + (ord(to_f) - ord('a'))
+        except Exception:
+            return False
+
+        ref = self._fen_to_grid(self._current_fen)
+        # Only for non-capture moves (destination was empty before the move).
+        if ref[to_idx] != 0:
+            return False
+
+        if self._latest_board_state is None:
+            return False
+
+        # Compute raw occ merged grid once (used for both source and destination checks).
+        raw_scan = getattr(self, '_ai_verify_scan_grids', None)
+        if raw_scan:
+            occ_only = self._merge_startup_grids(raw_scan, threshold=0.8)
+        else:
+            occ_only = list(self._latest_board_state.grid)
+
+        # Guard: if the source is still occupied, the robot never picked up the piece —
+        # this is a failed grasp, not a lost piece. Do not fire game over here;
+        # _retry_ai_move_lower_grasp handles the retry / abort for that case.
+        if occ_only[from_idx] != 0:
+            return False
+
+        scan_empty = (occ_only[to_idx] == 0)
+
+        # Also require YOLO-folded scan to agree (rules out occ false negatives).
+        yolo_empty = (self._latest_board_state.grid[to_idx] == 0)
+
+        # 3-frame live YOLO window also confirms empty.
+        live_empty = (
+            bool(self._live_acc_frames)
+            and all(frame[to_idx] == 0 for frame in self._live_acc_frames)
+        )
+
+        if scan_empty and yolo_empty and live_empty:
+            sq = f"{chr(ord('a') + to_idx % 9)}{to_idx // 9 + 1}"
+            self.get_logger().warn(
+                f'Move {move}: destination {sq} is empty in occ scan, YOLO scan, and live filter '
+                f'after non-capture — robot piece lost, declaring game over'
+            )
+            return True
+        return False
+
     def _retry_ai_move_lower_grasp(self) -> bool:
         """Re-issue the same AI move with a lower grasp height if the piece was never picked up.
 
@@ -748,28 +931,69 @@ class GameManagerNode(Node):
         if self._latest_board_state is None:
             return False
 
-        # Check source square: if piece is still there, the robot never picked it up.
-        indices = move_critical_indices(move)
-        if not indices:
+        # Check source square only: if the piece is still there, the robot never
+        # picked it up. We must parse the FROM square explicitly — move_critical_indices
+        # returns {from, to} and for captures ref_grid[to] != 0 (opponent piece) AND
+        # occ_only[to] != 0 (robot piece now there), so iterating over the set would
+        # wrongly select the destination as "from" and trigger a false retry.
+        try:
+            _parsed = _resolver_parse_move(move)
+            if _parsed is None:
+                return False
+            (from_f, from_r), _ = _parsed
+            from_idx = (from_r - 1) * 9 + (ord(from_f) - ord('a'))
+        except Exception:
             return False
         ref_grid = self._fen_to_grid(self._current_fen)
-        observed = list(self._latest_board_state.grid)
-        # from-square: the critical index that has a piece in the reference FEN AND still
-        # shows that same piece in the observed grid (i.e. nothing moved).
-        # Sign-only: piece still at source if it has the same colour as in ref
-        # (YOLO may misidentify type but colour is reliable).
-        from_idx = next(
-            (i for i in indices
-             if ref_grid[i] != 0
-             and (observed[i] > 0) == (ref_grid[i] > 0)
-             and (observed[i] < 0) == (ref_grid[i] < 0)),
-            None,
+        if ref_grid[from_idx] == 0:
+            return False
+        # Use raw occ frames (no YOLO fold-in) to check the source square.
+        # The YOLO-folded synthetic grid can falsely show the source as occupied when
+        # stale YOLO still sees the piece there even after occ confirms it moved away.
+        raw_scan = getattr(self, '_ai_verify_scan_grids', None)
+        occ_only = (
+            self._merge_startup_grids(raw_scan, threshold=0.8)
+            if raw_scan
+            else list(self._latest_board_state.grid)
         )
-        if from_idx is None:
-            return False  # piece gone from source — partial move, don't retry
+        if occ_only[from_idx] == 0:
+            return False  # piece gone from source — move succeeded, don't retry
+
+        # Final-say veto: check the most recent raw occ frames.
+        # The 0.8-threshold merge can be skewed by early frames captured while the arm
+        # was still retracting (arm shadow → transient occ hit). The latest frames are
+        # what "What the robot is seeing" currently reflects. If all of the last 3 frames
+        # show the source square empty, the piece has moved — skip the retry.
+        if raw_scan and len(raw_scan) >= 1:
+            _recent_n = min(3, len(raw_scan))
+            _recent = raw_scan[-_recent_n:]
+            if all(frame[from_idx] == 0 for frame in _recent):
+                src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                self.get_logger().info(
+                    f'Retry skipped: last {_recent_n} occ frames confirm source {src_sq} '
+                    f'empty — merged threshold was misled by early frames, piece has moved'
+                )
+                return False
+
+        # YOLO veto: if the YOLO scan (which drives "What the robot is seeing") also
+        # shows the source square empty, trust it over the occ threshold count.
+        _yolo_scan = self._ai_scan_merged_yolo
+        if _yolo_scan and _yolo_scan[from_idx] == 0:
+            # Also check the live YOLO grid for a second data point.
+            _live_yolo_empty = (
+                self._latest_yolo_grid is not None
+                and self._latest_yolo_grid[from_idx] == 0
+            )
+            if _live_yolo_empty:
+                src_sq = f"{chr(ord('a') + from_idx % 9)}{from_idx // 9 + 1}"
+                self.get_logger().info(
+                    f'Retry skipped: both YOLO scan and live YOLO confirm source '
+                    f'{src_sq} empty — occ threshold count overruled'
+                )
+                return False
 
         # Destination square occupied in reference → capture move
-        is_capture = any(i != from_idx and ref_grid[i] != 0 for i in indices)
+        is_capture = self._is_capture_move(self._current_fen, move)
 
         expected_fen_after = ''
         try:
@@ -1060,17 +1284,77 @@ class GameManagerNode(Node):
         self._do_startup_scan()
 
     @staticmethod
-    def _merge_startup_grids(grids: list) -> list:
-        """Majority-vote merge across all N scans (zeros count as votes too).
+    def _merge_startup_grids(grids: list, threshold: float = 0.5) -> list:
+        """Merge across all N scans: cell is 1 if fraction of frames >= threshold.
 
-        Used for short multi-scan windows (human-move detection, AI verify) where
-        a coherent single frame is not guaranteed.
+        Default threshold=0.5 is majority vote (6/10 frames).
+        threshold=0.9 requires 9/10 frames to agree — used for illegal-move guards
+        to prevent transient occlusion from triggering a false GAME_OVER.
         """
+        n = max(len(grids), 1)
         merged = [0] * 90
         for i in range(90):
-            values = [g[i] for g in grids]
-            merged[i] = max(set(values), key=values.count)
+            ones = sum(1 for g in grids if g[i] != 0)
+            merged[i] = 1 if ones / n >= threshold else 0
         return merged
+
+    _YOLO_STALE_SEC = 2.0  # max age of a YOLO frame before we skip verification
+
+    def _yolo_verify_changes(
+        self,
+        disappeared: list,
+        appeared: list,
+        yolo_grid: list | None = None,
+    ) -> tuple[list, list]:
+        """Filter disappeared/appeared cell lists against a YOLO grid.
+
+        Pass ``yolo_grid`` to use a 10-frame merged YOLO result (preferred).
+        If omitted, falls back to the latest single YOLO snapshot; if that is
+        stale the original lists are returned unchanged.
+
+        Disappearance requires DUAL confirmation — both YOLO and the latest raw occ
+        frame must agree the piece is gone. If either sensor still sees the piece the
+        disappearance is vetoed, preventing YOLO false-negatives (and occ jitter) from
+        triggering a false GAME_OVER.
+
+        Appearance requires YOLO to confirm the piece is present.
+        """
+        if yolo_grid is not None:
+            yolo = yolo_grid
+        else:
+            age = time.monotonic() - self._latest_yolo_time
+            if age > self._YOLO_STALE_SEC:
+                # YOLO is offline/stale — fall back to latest raw occ as the sole
+                # live sensor rather than returning unfiltered (which would let
+                # occ-threshold noise pass through unchecked).
+                self.get_logger().warn(
+                    f'YOLO frame is {age:.1f}s old — using raw occ only as final say'
+                )
+                occ_raw = self._latest_occ_raw_grid
+                verified_dis = [i for i in disappeared if occ_raw[i] == 0]
+                verified_app = [i for i in appeared   if occ_raw[i] != 0]
+                return verified_dis, verified_app
+            yolo = self._latest_yolo_grid
+
+        occ_raw = self._latest_occ_raw_grid
+        # Disappeared: YOLO says gone AND latest raw occ also says gone
+        verified_dis = [i for i in disappeared if yolo[i] == 0 and occ_raw[i] == 0]
+        # Appeared: YOLO confirms the piece is present
+        verified_app = [i for i in appeared   if yolo[i] != 0]
+
+        def _sq(i: int) -> str:
+            return f'{chr(ord("a") + i % 9)}{i // 9 + 1}'
+
+        for i in set(disappeared) - set(verified_dis):
+            self.get_logger().info(
+                f'Vetoed disappeared cell {_sq(i)} — occ or YOLO still sees piece'
+            )
+        for i in set(appeared) - set(verified_app):
+            self.get_logger().info(
+                f'YOLO vetoed appeared cell {_sq(i)} — nothing visible, occ jitter'
+            )
+
+        return verified_dis, verified_app
 
     @staticmethod
     def _best_frame_grid(grids: list) -> list:
@@ -1139,12 +1423,16 @@ class GameManagerNode(Node):
         self._current_fen = repaired_fen
         self._move_history = []
         self._move_count = 0
-        self._kick_off_game()
+        self._check_game_over()
+        if self._game_state != GameState.GAME_OVER:
+            self._kick_off_game()
 
     def _kick_off_game(self) -> None:
         """Transition into the first game state and begin play."""
         self._apply_dashboard_mode(self._dashboard_mode)
         if self._robot_is_red or self._self_play:
+            # Suppress interference checks while sensors stabilise at game start.
+            self._ai_interference_settle_until = time.monotonic() + 4.0
             self._game_state = GameState.COMPUTING_AI
             self._align_fen_side_to_play()
             self._publish_status()
@@ -1228,6 +1516,65 @@ class GameManagerNode(Node):
     def _human_side_is_red(self) -> bool:
         return self._human_color == 'red'
 
+    def _live_filter_extra_changes(self, extra: list, ref_grid: list) -> list:
+        """Keep only cells in *extra* that the 3-frame live YOLO window confirms.
+
+        A change is noise if the rolling live view disagrees with the reported
+        state: a disappearance must show empty in all live frames; an appearance
+        must show occupied in all live frames.  If the window is empty (no YOLO
+        frames received yet) the original list is returned unfiltered.
+        """
+        # When YOLO live frames are unavailable, fall back to the latest single raw occ
+        # frame as the live-sensor substitute rather than returning unfiltered.
+        live_frames = self._live_acc_frames
+        if not live_frames:
+            occ_raw = self._latest_occ_raw_grid
+            if not any(occ_raw):
+                # Occ also unavailable — nothing to veto with, pass through unfiltered.
+                return extra
+            self.get_logger().warn(
+                'Live YOLO window empty — using latest raw occ frame as live-filter substitute'
+            )
+            confirmed = []
+            for i in extra:
+                was_occupied = ref_grid[i] != 0
+                if was_occupied:
+                    if occ_raw[i] == 0:
+                        confirmed.append(i)
+                    else:
+                        self.get_logger().info(
+                            f'Live-filter (occ fallback): cell {i} flagged as gone but occ still sees piece — noise'
+                        )
+                else:
+                    if occ_raw[i] != 0:
+                        confirmed.append(i)
+                    else:
+                        self.get_logger().info(
+                            f'Live-filter (occ fallback): cell {i} flagged as appeared but occ sees nothing — noise'
+                        )
+            return confirmed
+
+        confirmed = []
+        for i in extra:
+            was_occupied = ref_grid[i] != 0
+            if was_occupied:
+                # Expected gone — all live frames must show the cell as empty.
+                if all(frame[i] == 0 for frame in live_frames):
+                    confirmed.append(i)
+                else:
+                    self.get_logger().info(
+                        f'Live-filter: cell {i} flagged as gone but live YOLO still sees a piece — noise'
+                    )
+            else:
+                # Expected appeared — all live frames must show the cell as occupied.
+                if all(frame[i] != 0 for frame in live_frames):
+                    confirmed.append(i)
+                else:
+                    self.get_logger().info(
+                        f'Live-filter: cell {i} flagged as appeared but live YOLO does not confirm — noise'
+                    )
+        return confirmed
+
     def _extra_changes_for_move(
         self,
         move: str,
@@ -1262,7 +1609,9 @@ class GameManagerNode(Node):
         for i in range(90):
             old, new = ref_grid[i], observed_grid[i]
             if sign_only:
-                if (old > 0) == (new > 0) and (old < 0) == (new < 0):
+                # Presence-only: ignore piece type and colour (handles binary 0/1
+                # occupancy grids and YOLO ±code grids equally).
+                if (old != 0) == (new != 0):
                     continue
             elif old == new:
                 continue
@@ -1309,38 +1658,239 @@ class GameManagerNode(Node):
             ):
                 extra_counts[i] += 1
 
+        # Pass 1: vote threshold + 10-frame YOLO cross-check
+        yolo = self._ai_scan_merged_yolo
+        suspect = []
         for i in range(90):
             if i in planned:
                 continue
             count = extra_counts[i]
-            if count >= majority:
-                self.get_logger().warn(
-                    f'Execution interference: cell {i} (ref={ref[i]}) extra change in '
-                    f'{count}/{n} scan frames'
+            if count < majority:
+                continue
+            is_appeared = ref[i] == 0
+            if is_appeared and yolo[i] == 0:
+                self.get_logger().info(
+                    f'Execution interference: cell {i} flagged by occ ({count}/{n}) '
+                    f'but YOLO sees nothing — noise'
                 )
-                return True
-        return False
+                continue
+            if not is_appeared and yolo[i] != 0:
+                self.get_logger().info(
+                    f'Execution interference: cell {i} flagged as gone by occ ({count}/{n}) '
+                    f'but YOLO still sees piece — noise'
+                )
+                continue
+            suspect.append(i)
+
+        if not suspect:
+            return False
+
+        # Recent-occ-frames veto: the last 3 raw occ frames are "what the robot is
+        # seeing right now". If a suspect cell no longer shows as changed in these
+        # recent frames, it was a transient early-frame hit (arm shadow, piece wobble
+        # during retraction) — dismiss it so the confirmed scan does not override the
+        # current live picture.
+        if raw_grids and len(raw_grids) >= 1:
+            _recent_n = min(3, len(raw_grids))
+            _recent_raw = raw_grids[-_recent_n:]
+            still_suspect = []
+            for i in suspect:
+                _hit_recent = sum(
+                    1 for g in _recent_raw
+                    if i in self._extra_changes_for_move(
+                        move, ref, g, robot_sign, sign_only=True
+                    )
+                )
+                if _hit_recent > 0:
+                    still_suspect.append(i)
+                else:
+                    self.get_logger().info(
+                        f'Execution interference: cell {i} absent in last {_recent_n} '
+                        f'occ frames — early-frame transient, dismissed'
+                    )
+            suspect = still_suspect
+
+        if not suspect:
+            return False
+
+        # Final say: 3-frame live YOLO window must confirm each suspect cell.
+        suspect = self._live_filter_extra_changes(suspect, ref)
+        if not suspect:
+            return False
+
+        self.get_logger().warn(
+            f'Execution interference confirmed: cells {suspect} persist in YOLO+occ scan + live filter'
+        )
+        return True
+
+    def _occupancy_state_cb(self, msg: BoardState) -> None:
+        """Handle fast CV occupancy frames (~10 Hz).
+
+        Drives all scan collection (AI verify + human move) and AI-turn interference.
+        Grid values are binary 0/1 (presence only); piece identity comes from the
+        authoritative FEN via _fuse_occ_with_fen during human move detection.
+        """
+        now = time.monotonic()
+
+        # Save raw occ frame before fusion (used by _yolo_verify_changes for disappearance veto)
+        self._latest_occ_raw_grid = list(msg.grid)
+
+        # Fuse raw occupancy with YOLO: a cell is occupied if either sensor sees it.
+        # This ensures occ false-negatives (missed pieces) are compensated by YOLO.
+        _frame = list(msg.grid)
+        if (now - self._latest_yolo_time) < self._YOLO_STALE_SEC:
+            for _i in range(90):
+                if _frame[_i] == 0 and self._latest_yolo_grid[_i] != 0:
+                    _frame[_i] = 1
+
+        # AI verify scan: both occ AND YOLO must complete before finalizing.
+        # _collecting_ai_scan stays True until finalization so this block keeps firing.
+        # _ai_occ_done tracks occ completion (by round count or early-exit).
+        if self._collecting_ai_scan and now >= self._ai_verify_scan_start:
+            if self._game_state == GameState.EXECUTING_MOVE:
+                if not self._ai_occ_done:
+                    # Store raw occ (no YOLO fold-in) so interference detection is
+                    # not confused by YOLO position noise on the moved piece.
+                    # YOLO fold-in is applied separately when building the synthetic grid.
+                    self._ai_verify_scan_grids.append(list(msg.grid))
+                    n = len(self._ai_verify_scan_grids)
+                    # Early-exit: board stable when last N occ frames are identical
+                    if n >= self._OCC_EARLY_EXIT_CONSECUTIVE:
+                        tail = self._ai_verify_scan_grids[-self._OCC_EARLY_EXIT_CONSECUTIVE:]
+                        if all(tail[i] == tail[0] for i in range(1, self._OCC_EARLY_EXIT_CONSECUTIVE)):
+                            self._ai_occ_done = True
+                    if n >= self._AI_VERIFY_SCAN_ROUNDS:
+                        self._ai_occ_done = True
+
+                # Finalize only when both sensors are done
+                if self._ai_occ_done and not self._collecting_ai_yolo:
+                    self._collecting_ai_scan = False
+                    self.get_logger().info(
+                        f'AI verify scan done: {len(self._ai_verify_scan_grids)} occ + '
+                        f'{len(self._ai_verify_yolo_grids)} YOLO frames'
+                    )
+                    # 0.5 threshold: inclusive fold-in for AI verify (presence detection)
+                    self._ai_scan_merged_yolo = self._merge_startup_grids(
+                        self._ai_verify_yolo_grids, threshold=0.5
+                    ) if self._ai_verify_yolo_grids else [0] * 90
+                    finisher = (
+                        getattr(self, '_verify_scan_finisher', None)
+                        or self._finish_ai_verify_recovery
+                    )
+                    finisher()
+            return
+
+        # Human move scan: both occ AND YOLO must complete before finalizing.
+        # _collecting_human_scan stays True until finalization so this block keeps firing.
+        # _human_occ_done tracks occ completion (by round count or early-exit).
+        elif self._collecting_human_scan and now >= self._human_scan_start:
+            if self._game_state == GameState.DETECTING_MOVE:
+                if not self._human_occ_done:
+                    self._human_move_scan_grids.append(_frame)
+                    n = len(self._human_move_scan_grids)
+                    # Early-exit: board stable when last N occ frames are identical
+                    if n >= self._OCC_EARLY_EXIT_CONSECUTIVE:
+                        tail = self._human_move_scan_grids[-self._OCC_EARLY_EXIT_CONSECUTIVE:]
+                        if all(tail[i] == tail[0] for i in range(1, self._OCC_EARLY_EXIT_CONSECUTIVE)):
+                            self._human_occ_done = True
+                    if n >= self._HUMAN_SCAN_ROUNDS:
+                        self._human_occ_done = True
+
+                # Finalize only when both sensors are done
+                if self._human_occ_done and not self._collecting_human_yolo:
+                    self._collecting_human_scan = False
+                    self.get_logger().info(
+                        f'Human scan done: {len(self._human_move_scan_grids)} occ + '
+                        f'{len(self._human_move_yolo_grids)} YOLO frames'
+                    )
+                    # Two YOLO merges with different purposes:
+                    #  0.8 threshold → verification grid (conservative, for _yolo_verify_changes)
+                    #  0.5 threshold → fold-in grid (inclusive, supplements occ presence detection)
+                    self._human_scan_merged_yolo = self._merge_startup_grids(
+                        self._human_move_yolo_grids, threshold=0.8
+                    ) if self._human_move_yolo_grids else list(self._latest_yolo_grid)
+                    # 0.6 threshold: 2/3 majority is enough to confirm genuine interference;
+                    # _live_filter_extra_changes provides the second safety layer against false positives.
+                    self._human_scan_extra_yolo = self._merge_startup_grids(
+                        self._human_move_yolo_grids, threshold=0.6
+                    ) if self._human_move_yolo_grids else list(self._latest_yolo_grid)
+                    _yolo_fold = self._merge_startup_grids(
+                        self._human_move_yolo_grids, threshold=0.5
+                    ) if self._human_move_yolo_grids else list(self._latest_yolo_grid)
+                    # Save raw frames for strict-threshold illegal-move checks
+                    self._human_move_scan_grids_raw = list(self._human_move_scan_grids)
+                    merged_occ = self._merge_startup_grids(self._human_move_scan_grids, threshold=0.8)
+                    # Fold in YOLO (50% threshold): a cell seen in majority of YOLO frames counts as occupied
+                    for _i in range(90):
+                        if merged_occ[_i] == 0 and _yolo_fold[_i] != 0:
+                            merged_occ[_i] = 1
+                    # Save binary occ (with YOLO) for capture detection
+                    self._last_human_occ_merged = merged_occ
+                    merged = self._fuse_occ_with_fen(merged_occ)
+                    synthetic = BoardState()
+                    synthetic.grid = [int(v) for v in merged]
+                    synthetic.fen = self._grid_to_fen(merged, self._current_fen)
+                    synthetic.detection_confidence = 0.5
+                    self._latest_board_state = synthetic
+                    self._process_human_move()
+            return
+
+        # Interference detection (not during scan collection).
+        # Settle timer suppresses checks right after the arm completes a move or at game start;
+        # once elapsed, cheating is detected in all modes including AI vs AI.
+        if (self._game_state == GameState.COMPUTING_AI
+                and not self._simulation_mode
+                and time.monotonic() >= self._ai_interference_settle_until):
+            self._check_ai_turn_interference(_frame)
+
+    def _fuse_occ_with_yolo(self, occ_grid: list) -> list:
+        """Merge binary occupancy (0/1) with YOLO grid to restore piece type+colour.
+
+        occ_grid values are binary: 0=empty, 1=occupied.
+        Where occupancy says occupied: use YOLO's piece code (colour+type).
+        Where occupancy says empty: use 0 (CV is reliable for empty detection).
+        If occupancy says occupied but YOLO has no data: keep 1 (unknown occupant).
+        """
+        yolo = list(self._latest_board_state.grid) if self._latest_board_state else [0] * 90
+        return [yolo[i] if occ_grid[i] != 0 and yolo[i] != 0 else (1 if occ_grid[i] != 0 else 0)
+                for i in range(90)]
+
+    def _fuse_occ_with_fen(self, occ_grid: list) -> list:
+        """Blend binary occupancy with the current authoritative FEN for move detection.
+
+        Eliminates YOLO classification dependency during in-game human turn:
+          - Occupied cell present in FEN  → use FEN piece code (authoritative identity)
+          - Occupied cell absent from FEN → piece moved here this turn; use human side's sign
+          - Empty cell                    → 0
+
+        Falls back to _fuse_occ_with_yolo when no FEN is available.
+        """
+        if not self._current_fen:
+            return self._fuse_occ_with_yolo(occ_grid)
+        fen_grid = self._fen_to_grid(self._current_fen)
+        human_sign = 1 if self._human_side_is_red() else -1
+        return [
+            0 if occ_grid[i] == 0
+            else fen_grid[i] if fen_grid[i] != 0
+            else human_sign   # occ=1 but not in FEN → piece moved to this cell
+            for i in range(90)
+        ]
 
     def _check_ai_turn_interference(self, grid: list) -> None:
         """Declare AI win if any piece has moved while the AI is computing its move.
 
         Requires _AI_INTERFERENCE_THRESHOLD consecutive differing frames to avoid
-        triggering on YOLO jitter.
+        triggering on vision jitter.  Uses presence-only comparison (grid is binary
+        0/1 from the CV occupancy layer).
         """
         ref = self._fen_to_grid(self._current_fen)
-        board_changed = any(grid[i] != ref[i] for i in range(90))
+        board_changed = any((grid[i] != 0) != (ref[i] != 0) for i in range(90))
         if board_changed:
             self._ai_interference_streak += 1
             if self._ai_interference_streak >= self._AI_INTERFERENCE_THRESHOLD:
                 self._ai_interference_streak = 0
                 result = 'red_wins' if self._robot_is_red else 'black_wins'
-                self._declare_game_over(result, 'illegal_move')
-                alert = String()
-                alert.data = (
-                    "Illegal: pieces were moved during the AI's turn — AI wins."
-                )
-                self._illegal_move_pub.publish(alert)
-                self._publish_status()
+                self._flag_illegal_move(result, "Illegal: pieces were moved during the AI's turn.")
         else:
             self._ai_interference_streak = 0
 
@@ -1376,20 +1926,35 @@ class GameManagerNode(Node):
         base_tol = int(self.get_parameter('human_move_grid_tolerance').value)
         ref_grid = self._human_watch_reference_grid
         ref_for_side = ref_grid if ref_grid is not None else self._fen_to_grid(self._current_fen)
+
+        # Strict occupancy grid: cell is occupied only if 9/10 raw frames agreed.
+        # Used exclusively for illegal-move guards so transient occlusion or
+        # piece wobble cannot trigger a false GAME_OVER.
+        _raw = getattr(self, '_human_move_scan_grids_raw', [])
+        if len(_raw) >= self._OCC_EARLY_EXIT_CONSECUTIVE:
+            _strict_occ = self._merge_startup_grids(_raw, threshold=0.9)
+            _strict_grid = self._fuse_occ_with_fen(_strict_occ)
+        else:
+            _strict_grid = grid
         human_sign = 1 if human_red else -1
         opp_sign   = -human_sign
 
         # Early guard: if an opponent's piece clearly moved (disappeared from one square,
         # appeared at another), call illegal immediately — BEFORE move inference so a
         # coincidentally low-mismatch legal move cannot mask the wrong-color violation.
-        appeared_opp = [
+        # Uses _strict_grid (9/10 frames) + YOLO second opinion to avoid false GAME_OVERs.
+        appeared_opp_raw = [
             i for i in range(90)
-            if (grid[i] * opp_sign > 0) and not (ref_for_side[i] * opp_sign > 0)
+            if (_strict_grid[i] * opp_sign > 0) and not (ref_for_side[i] * opp_sign > 0)
         ]
-        disappeared_opp = [
+        disappeared_opp_raw = [
             i for i in range(90)
-            if (ref_for_side[i] * opp_sign > 0) and grid[i] == 0
+            if (ref_for_side[i] * opp_sign > 0) and _strict_grid[i] == 0
         ]
+        disappeared_opp, appeared_opp = self._yolo_verify_changes(
+            disappeared_opp_raw, appeared_opp_raw,
+            yolo_grid=self._human_scan_merged_yolo,
+        )
         if len(appeared_opp) == 1 and len(disappeared_opp) == 1:
             ap_i  = appeared_opp[0]
             ap_sq = f"{chr(ord('a') + ap_i % 9)}{ap_i // 9 + 1}"
@@ -1397,34 +1962,71 @@ class GameManagerNode(Node):
                 f'Human moved opponent piece to {ap_sq} — illegal, game over'
             )
             result = 'black_wins' if human_red else 'red_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                f"Illegal move: you moved your opponent's piece to {ap_sq} — game over."
+            self._flag_illegal_move(result, f"Illegal move: you moved your opponent's piece to {ap_sq}.")
+            return
+
+        # Opponent piece disappeared (removed or moved away without reappearing as
+        # an opponent piece at the new location — e.g. the human moved an opponent
+        # piece off the board, or to a cell where fuse assigns human_sign).
+        # A legal capture NEVER removes an opponent cell from the board (the human
+        # piece arrives at that cell, keeping occ=1). Any disappeared_opp is illegal.
+        if len(disappeared_opp) > 0:
+            sqs = ', '.join(
+                f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in disappeared_opp
             )
-            self._illegal_move_pub.publish(alert)
-            self._publish_status()
+            self.get_logger().warn(
+                f'Opponent piece(s) removed/moved from {sqs} — illegal, game over'
+            )
+            result = 'black_wins' if human_red else 'red_wins'
+            self._flag_illegal_move(result, f"Illegal move: opponent piece was removed or moved from {sqs}.")
             return
 
         # Definitive single-piece move: if the human's own piece clearly left exactly one
         # square and appeared at exactly one square, the move is unambiguous. Validate it
         # directly rather than relying on tolerance inference (which can pick a spurious,
         # unrelated legal move — e.g. i10h10 — when the real move is illegal).
+        # Require strict-occ confirmation for appearances to prevent YOLO fold-in
+        # false positives from triggering the 1+1 definitive path on a piece removal.
         appeared_human_def = [
             i for i in range(90)
             if (grid[i] * human_sign > 0) and not (ref_for_side[i] * human_sign > 0)
+            and (_strict_grid[i] * human_sign > 0)
         ]
         disappeared_human_def = [
             i for i in range(90)
             if (ref_for_side[i] * human_sign > 0) and (grid[i] * human_sign <= 0)
         ]
 
+        def _sq(i: int) -> str:
+            return f"{chr(ord('a') + i % 9)}{i // 9 + 1}"
+        ap_sqs  = [_sq(i) for i in appeared_human_def]
+        dis_sqs = [_sq(i) for i in disappeared_human_def]
+        self.get_logger().info(
+            f'Move detection: appeared_human={ap_sqs} disappeared_human={dis_sqs} '
+            f'occ_pieces={sum(1 for x in grid if x != 0)} '
+            f'fen={self._current_fen.split()[0]}'
+        )
+
+        # Strict lists for illegal-move checks (9/10 frames) + YOLO second opinion.
+        _dis_human_raw = [
+            i for i in range(90)
+            if (ref_for_side[i] * human_sign > 0) and (_strict_grid[i] * human_sign <= 0)
+        ]
+        _app_human_raw = [
+            i for i in range(90)
+            if (_strict_grid[i] * human_sign > 0) and not (ref_for_side[i] * human_sign > 0)
+        ]
+        disappeared_human_strict, appeared_human_strict = self._yolo_verify_changes(
+            _dis_human_raw, _app_human_raw,
+            yolo_grid=self._human_scan_merged_yolo,
+        )
+
         # Net loss of the human's own pieces: a legal move never reduces the mover's
         # piece count (a move relocates one piece; a capture removes an OPPONENT piece).
         # If more human pieces vanished than appeared, the human removed their own
         # piece(s) — possibly alongside a real move. Illegal, game over.
-        # Allow 1 extra disappeared piece as potential jitter; 2+ is unambiguous removal.
-        if len(disappeared_human_def) > len(appeared_human_def) + 1:
+        # Uses strict 9/10 threshold so transient occlusion doesn't false-fire.
+        if len(disappeared_human_strict) > len(appeared_human_strict) + 1:
             sqs = ', '.join(
                 f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in disappeared_human_def
             )
@@ -1433,14 +2035,109 @@ class GameManagerNode(Node):
                 f'{len(appeared_human_def)} reappeared — own piece removed, game over'
             )
             result = 'black_wins' if human_red else 'red_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                'Illegal: you removed your own piece from the board — game over.'
-            )
-            self._illegal_move_pub.publish(alert)
-            self._publish_status()
+            self._flag_illegal_move(result, 'Illegal: you removed your own piece from the board.')
             return
+
+        # Capture via occupancy delta: one human piece disappeared but none appeared
+        # (the destination was an opponent cell that remains occupied — binary occ can't
+        # distinguish "same piece" from "replaced piece").  Resolve using pyffish legal
+        # captures from the from-square filtered by which opponent cells are still occupied.
+        if len(appeared_human_def) == 0 and len(disappeared_human_def) == 1 and PYFFISH_OK:
+            from_i = disappeared_human_def[0]
+            from_sq = f"{chr(ord('a') + from_i % 9)}{from_i // 9 + 1}"
+            raw_occ = getattr(self, '_last_human_occ_merged', None)
+            try:
+                legal_all = sf.legal_moves(VARIANT, self._current_fen, [])
+            except Exception:
+                legal_all = []
+            capture_cands = [
+                m for m in legal_all
+                if m.startswith(from_sq) and self._is_capture_move(self._current_fen, m)
+            ]
+            if raw_occ is not None:
+                # Keep only captures where the dest cell is still occupied in binary occ
+                # (confirms the opponent piece is still there = human captured it)
+                occ_filtered = []
+                for m in capture_cands:
+                    try:
+                        parsed = _resolver_parse_move(m)
+                        if parsed is None:
+                            continue
+                        _, (tf, tr) = parsed
+                        di = (tr - 1) * 9 + (ord(tf) - ord('a'))
+                        if raw_occ[di] == 1:
+                            occ_filtered.append(m)
+                    except Exception:
+                        pass
+                capture_cands = occ_filtered
+            if len(capture_cands) == 1:
+                candidate = capture_cands[0]
+                # YOLO must confirm a human piece at the capture destination.
+                # Binary occ alone cannot distinguish a real capture (human piece now
+                # at dest) from a piece removal (opponent piece still at dest — both
+                # show dest as occupied). If YOLO sees the opponent piece at dest, the
+                # human removed their own piece rather than capturing.
+                _cap_yolo_ok = True
+                try:
+                    _pcap = _resolver_parse_move(candidate)
+                    if _pcap is not None:
+                        _, (_ctf, _ctr) = _pcap
+                        _cap_di = (_ctr - 1) * 9 + (ord(_ctf) - ord('a'))
+                        _yolo_dest = self._human_scan_merged_yolo[_cap_di]
+                        # Live latest frame as fallback when merged scan missed.
+                        _yolo_dest_live = self._latest_yolo_grid[_cap_di]
+                        # A valid capture requires a human piece at the destination.
+                        # Accept if EITHER the merged scan OR the live frame confirms it.
+                        # Reject only when both say "not a human piece" — covers the case
+                        # where the user removed their own piece and the opponent's piece
+                        # is still there (even if YOLO only sees it in one of the two sources).
+                        _dest_confirmed = (
+                            _yolo_dest * human_sign > 0
+                            or _yolo_dest_live * human_sign > 0
+                        )
+                        if not _dest_confirmed:
+                            _cap_yolo_ok = False
+                            self.get_logger().warn(
+                                f'Capture {candidate} rejected: neither merged YOLO '
+                                f'(={_yolo_dest}) nor live YOLO (={_yolo_dest_live}) '
+                                f'confirms human piece at destination — own piece removed'
+                            )
+                except Exception:
+                    pass
+                if not _cap_yolo_ok:
+                    result = 'black_wins' if human_red else 'red_wins'
+                    self._flag_illegal_move(result, 'Illegal: you removed your own piece from the board.')
+                    return
+                extra = self._extra_changes_for_move(
+                    candidate, ref_for_side, grid, human_sign, sign_only=True
+                )
+                if extra:
+                    _ex_dis = [i for i in extra if ref_for_side[i] != 0]
+                    _ex_app = [i for i in extra if ref_for_side[i] == 0]
+                    # 0.9 YOLO threshold for extra-change veto
+                    _ex_dis, _ex_app = self._yolo_verify_changes(
+                        _ex_dis, _ex_app, yolo_grid=self._human_scan_extra_yolo
+                    )
+                    extra = _ex_dis + _ex_app
+                if extra:
+                    extra = self._live_filter_extra_changes(extra, ref_for_side)
+                if not extra:
+                    self.get_logger().info(f'Human capture (occupancy delta): {candidate}')
+                    self._apply_move(candidate, is_ai=False)
+                    self._check_game_over()
+                    if self._game_state != GameState.GAME_OVER:
+                        self._game_state = GameState.COMPUTING_AI
+                        self._publish_status()
+                        self._compute_and_emit_ai_move()
+                    return
+                sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
+                self.get_logger().warn(
+                    f'Interference alongside capture {candidate}: extra changes at {sqs} — game over'
+                )
+                result = 'black_wins' if human_red else 'red_wins'
+                self._flag_illegal_move(result, 'Illegal: extra pieces were moved or removed alongside your capture.')
+                return
+            # Multiple candidates or zero: fall through to tolerance-based inference
 
         if len(appeared_human_def) == 1 and len(disappeared_human_def) == 1:
             from_i = disappeared_human_def[0]
@@ -1448,28 +2145,58 @@ class GameManagerNode(Node):
             from_sq = f"{chr(ord('a') + from_i % 9)}{from_i // 9 + 1}"
             to_sq   = f"{chr(ord('a') + to_i % 9)}{to_i // 9 + 1}"
             candidate = f"{from_sq}{to_sq}"
+            self.get_logger().info(f'Definitive 1+1 path: candidate={candidate}')
             try:
                 legal = sf.legal_moves(VARIANT, self._current_fen, [])
-            except Exception:
+            except Exception as _exc:
+                self.get_logger().warn(f'pyffish legal_moves failed: {_exc}')
                 legal = []
             if candidate in legal:
+                # Verify YOLO confirms a human piece at the destination.
+                # _fuse_occ_with_fen assigns human_sign to any new piece at an empty
+                # FEN cell, so an opponent's piece placed there is indistinguishable
+                # from a valid move in occ alone — YOLO is the only way to tell.
+                _def_yolo_ok = True
+                try:
+                    _yolo_to = self._human_scan_merged_yolo[to_i]
+                    _yolo_to_live = self._latest_yolo_grid[to_i]
+                    _to_confirmed = (
+                        _yolo_to * human_sign > 0
+                        or _yolo_to_live * human_sign > 0
+                    )
+                    if not _to_confirmed:
+                        _def_yolo_ok = False
+                        self.get_logger().warn(
+                            f'1+1 path: destination {to_sq} not confirmed as human '
+                            f'piece by YOLO (merged={_yolo_to}, live={_yolo_to_live})'
+                        )
+                except Exception:
+                    pass
+                if not _def_yolo_ok:
+                    result = 'black_wins' if human_red else 'red_wins'
+                    self._flag_illegal_move(result, 'Illegal: opponent piece placed at move destination.')
+                    return
                 # Confirm no extra pieces were disturbed alongside the valid move.
                 # sign_only=True ignores YOLO type-jitter (cannon↔rook same colour);
                 # only genuine colour changes (disappearing or opponent piece) count.
                 extra = self._extra_changes_for_move(candidate, ref_for_side, grid, human_sign, sign_only=True)
+                if extra:
+                    _ex_dis = [i for i in extra if ref_for_side[i] != 0]
+                    _ex_app = [i for i in extra if ref_for_side[i] == 0]
+                    # 0.9 YOLO threshold for extra-change veto
+                    _ex_dis, _ex_app = self._yolo_verify_changes(
+                        _ex_dis, _ex_app, yolo_grid=self._human_scan_extra_yolo
+                    )
+                    extra = _ex_dis + _ex_app
+                if extra:
+                    extra = self._live_filter_extra_changes(extra, ref_for_side)
                 if extra:
                     sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
                     self.get_logger().warn(
                         f'Interference alongside move {candidate}: extra changes at {sqs} — game over'
                     )
                     result = 'black_wins' if human_red else 'red_wins'
-                    self._declare_game_over(result, 'illegal_move')
-                    alert = String()
-                    alert.data = (
-                        'Illegal: extra pieces were moved or removed alongside your move — game over.'
-                    )
-                    self._illegal_move_pub.publish(alert)
-                    self._publish_status()
+                    self._flag_illegal_move(result, 'Illegal: extra pieces were moved or removed alongside your move.')
                     return
                 self.get_logger().info(f'Human move (definitive): {candidate}')
                 self._apply_move(candidate, is_ai=False)
@@ -1483,15 +2210,14 @@ class GameManagerNode(Node):
                 f'Human made illegal move {from_sq}->{to_sq} — game over'
             )
             result = 'black_wins' if human_red else 'red_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                f'Illegal move: {from_sq.upper()}->{to_sq.upper()} is not legal — game over.'
-            )
-            self._illegal_move_pub.publish(alert)
-            self._publish_status()
+            self._flag_illegal_move(result, f'Illegal move: {from_sq.upper()}->{to_sq.upper()} is not a legal move.')
             return
 
+        _changed_sqs = [_sq(i) for i in range(90) if ref_for_side[i] != grid[i]]
+        self.get_logger().info(
+            f'Move inference path: appeared={ap_sqs} disappeared={dis_sqs} '
+            f'changed_cells={_changed_sqs}'
+        )
         detected_move = self._infer_move_from_board(
             self._current_fen,
             grid,
@@ -1518,6 +2244,17 @@ class GameManagerNode(Node):
             detected_move = None
 
         if detected_move is None:
+            board_changed = (
+                len(appeared_human_strict) > 0 or len(disappeared_human_strict) > 0
+            )
+            if board_changed and PYFFISH_OK:
+                self.get_logger().warn(
+                    'Board changed but no legal move explains it — illegal, game over '
+                    f'(appeared={ap_sqs} disappeared={dis_sqs})'
+                )
+                result = 'black_wins' if human_red else 'red_wins'
+                self._flag_illegal_move(result, 'Illegal move: the board change does not correspond to any legal move.')
+                return
             self.get_logger().warn(
                 'Could not infer a valid human move from board state '
                 f'(tol={base_tol}, pieces_on_board={sum(1 for x in grid if x != 0)})'
@@ -1569,34 +2306,53 @@ class GameManagerNode(Node):
                             f'appeared and destination {to_file_ch}{to_rank_1based} is empty'
                         )
                         result = 'black_wins' if human_red else 'red_wins'
-                        self._declare_game_over(result, 'illegal_move')
-                        alert = String()
-                        alert.data = (
-                            'Illegal: your piece was removed from the board — game over.'
-                        )
-                        self._illegal_move_pub.publish(alert)
-                        self._publish_status()
+                        self._flag_illegal_move(result, 'Illegal: your piece was removed from the board.')
                         return
             except Exception as e:
                 self.get_logger().warn(f'Ghost move check error: {e}')
+
+        # Source-square still occupied: if the human's piece is still at the from-square
+        # in the observed grid, no actual move happened — inference matched a phantom.
+        # Classic case: user adds a piece at a legal destination without moving the original.
+        # sign_only is already True for extra-changes, but presence-unchanged cells at the
+        # from-square are skipped by _extra_changes_for_move, so we check it explicitly here.
+        try:
+            _src_parsed = _resolver_parse_move(detected_move)
+            if _src_parsed is not None:
+                (_src_f, _src_r), _ = _src_parsed
+                _src_i = (_src_r - 1) * 9 + (ord(_src_f) - ord('a'))
+                if grid[_src_i] * human_sign > 0:
+                    self.get_logger().warn(
+                        f'Inferred move {detected_move} rejected: human piece still '
+                        f'at from-square {_src_f}{_src_r} — piece added, not moved'
+                    )
+                    result = 'black_wins' if human_red else 'red_wins'
+                    self._flag_illegal_move(result, 'Illegal: a piece was added to the board.')
+                    return
+        except Exception as _src_exc:
+            self.get_logger().warn(f'Source-square check error: {_src_exc}')
 
         # Final interference check: confirm no extra pieces were disturbed.
         # sign_only=True ignores YOLO type-jitter (cannon↔rook same colour);
         # only genuine colour changes (disappearing or opponent piece) count.
         extra = self._extra_changes_for_move(detected_move, ref_for_side, grid, human_sign, sign_only=True)
         if extra:
+            _ex_dis = [i for i in extra if ref_for_side[i] != 0]
+            _ex_app = [i for i in extra if ref_for_side[i] == 0]
+            # 0.9 YOLO threshold: extra-change must be seen in 9/10 YOLO frames to count.
+            _ex_dis, _ex_app = self._yolo_verify_changes(
+                _ex_dis, _ex_app, yolo_grid=self._human_scan_extra_yolo
+            )
+            extra = _ex_dis + _ex_app
+        if extra:
+            extra = self._live_filter_extra_changes(extra, ref_for_side)
+        if extra:
             sqs = ', '.join(f"{chr(ord('a') + i % 9)}{i // 9 + 1}" for i in extra)
             self.get_logger().warn(
                 f'Interference alongside inferred move {detected_move}: extra changes at {sqs} — game over'
             )
             result = 'black_wins' if human_red else 'red_wins'
-            self._declare_game_over(result, 'illegal_move')
-            alert = String()
-            alert.data = (
-                'Illegal: extra pieces were moved or removed alongside your move — game over.'
-            )
-            self._illegal_move_pub.publish(alert)
-            self._publish_status()
+            self._flag_illegal_move(result, 'Illegal: extra pieces were moved or removed alongside your move.')
             return
 
         self.get_logger().info(f'Human move detected: {detected_move}')
@@ -1901,6 +2657,63 @@ class GameManagerNode(Node):
             f'Game over: result={result}, reason={reason}, move={self._move_count}'
         )
 
+    def _flag_illegal_move(self, result: str, alert_text: str) -> None:
+        """Pause game and ask human to confirm or override an illegal-move detection.
+
+        Always enters PENDING_ILLEGAL state (even in AI vs AI) so the operator
+        watching the board can confirm the detection was real or override it.
+        """
+        self._pending_illegal_result = result
+        self._pending_illegal_alert = alert_text
+        self._pending_illegal_has_ai_move = self._pending_ai_move is not None
+        # Cancel any in-flight execution — but keep _pending_ai_move so the
+        # cancel path can reference it for context (it will be cleared in confirm_cb).
+        self._cancel_active_execution()
+        self._game_state = GameState.PENDING_ILLEGAL
+        self.get_logger().warn(
+            f'Illegal move flagged (pending confirmation): {alert_text}'
+        )
+        alert = String()
+        alert.data = alert_text
+        self._illegal_move_pub.publish(alert)
+        self._publish_status()
+
+    def _confirm_illegal_cb(self, msg: String) -> None:
+        """Handle human confirm/cancel from the dashboard illegal-move modal."""
+        if self._game_state != GameState.PENDING_ILLEGAL:
+            return
+        decision = (msg.data or '').strip().lower()
+
+        if decision == 'confirm':
+            # Human confirmed it was illegal — declare game over.
+            self._pending_ai_move = None
+            self._active_goal_handle = None
+            self._declare_game_over(self._pending_illegal_result, 'illegal_move')
+            self._publish_status()
+
+        elif decision == 'cancel':
+            # Human overrode — continue the game.
+            self.get_logger().warn(
+                'Illegal detection overridden by operator — resuming game; '
+                'use Sync Board if physical board does not match the display'
+            )
+            self._pending_ai_move = None
+            self._active_goal_handle = None
+            self._align_fen_side_to_play()
+            alert = String()
+            alert.data = (
+                'Override accepted — verify board state and use Sync Board if needed.'
+            )
+            self._illegal_move_pub.publish(alert)
+            if self._self_play:
+                self._game_state = GameState.COMPUTING_AI
+                self._publish_status()
+                self._compute_and_emit_ai_move()
+            else:
+                self._game_state = GameState.WAITING_HUMAN
+                self._tell_vision_to_watch(True)
+                self._publish_status()
+
     def _terminal_from_game_result(self, gr: int, is_red_turn: bool) -> tuple[str, str] | None:
         """Map pyffish game_result() to (result, reason) when side to move has no moves."""
         if gr == -sf.VALUE_MATE:
@@ -2011,8 +2824,11 @@ class GameManagerNode(Node):
             if expected[idx] != grid[idx]:
                 if not loose:
                     return False
-                if expected[idx] != 0 and grid[idx] != 0 and expected[idx] != grid[idx]:
-                    return False
+                # Loose: both non-zero must be the same color (sign).
+                # This accepts YOLO type noise (cannon vs rook) and binary grids (1 vs 5).
+                if expected[idx] != 0 and grid[idx] != 0:
+                    if (expected[idx] > 0) != (grid[idx] > 0):
+                        return False
         return True
 
     def _infer_move_from_board(
@@ -2153,11 +2969,11 @@ class GameManagerNode(Node):
         self._publish_start_watching()
 
     def _publish_start_watching(self) -> None:
-        # Prefer the latest camera grid so inference matches vision's turn detector.
-        if self._latest_board_state is not None:
-            self._human_watch_reference_grid = list(self._latest_board_state.grid)
-        elif self._current_fen:
+        # Use the authoritative FEN as the reference to avoid YOLO classification noise.
+        if self._current_fen:
             self._human_watch_reference_grid = self._fen_to_grid(self._current_fen)
+        elif self._latest_board_state is not None:
+            self._human_watch_reference_grid = list(self._latest_board_state.grid)
         msg = Bool()
         msg.data = True
         self._start_watching_pub.publish(msg)
@@ -2218,6 +3034,8 @@ class GameManagerNode(Node):
         msg.system_state = self._game_state.name
         msg.game_result = self._game_result
         msg.game_result_reason = self._game_result_reason
+        if self._game_state == GameState.PENDING_ILLEGAL:
+            msg.pending_illegal_alert = self._pending_illegal_alert
         self._game_status_pub.publish(msg)
         if self._simulation_mode:
             self._publish_logical_board_state()

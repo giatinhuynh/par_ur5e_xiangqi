@@ -109,6 +109,36 @@ def _download(url: str, dest_path: str, logger) -> bool:
         return False
 
 
+def resolve_occupancy_model_path(primary: str, logger) -> str:
+    """Return an existing occupancy .pth path, or the primary string unchanged."""
+    p0 = (primary or '').strip()
+    candidates: list[str] = []
+    seen: set[str] = set()
+
+    def _add(path: str) -> None:
+        path = os.path.expanduser(path)
+        if path not in seen:
+            seen.add(path)
+            candidates.append(path)
+
+    if p0:
+        _add(p0)
+
+    base = os.path.basename(p0) if p0 else 'occupancy_real_board.pth'
+    for models_dir in _workspace_models_dirs():
+        _add(os.path.join(models_dir, base))
+    share_models = _share_models_dir()
+    if share_models:
+        _add(os.path.join(share_models, base))
+
+    for p in candidates:
+        if os.path.isfile(p):
+            if p0 and p != p0:
+                logger.info(f'Occupancy model resolved to {p}')
+            return p
+    return p0
+
+
 def resolve_yolo_model_path(
     primary: str,
     *,

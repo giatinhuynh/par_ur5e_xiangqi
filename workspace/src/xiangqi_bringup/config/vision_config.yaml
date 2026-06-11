@@ -1,7 +1,7 @@
 # vision_config.yaml: Vision node and board calibration parameters
 vision_node:
   ros__parameters:
-    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.pt"
+    model_path: "/home/rosuser/workspace/models/xiangqi_kaggle_v4_best.onnx"
     calibration_file: "/home/rosuser/workspace/config/board_calibration.yaml"
     require_yolo_weights: true
     yolo_download_url: ""
@@ -9,9 +9,19 @@ vision_node:
     yolo_imgsz: 0   # 0 = auto from .pt (v4 → 640)
     stability_frames: 4           # Frames to confirm a stable human move (~32s at 0.125Hz on CPU)
     grid_smooth_frames: 2         # 2 = require 2 consecutive agreeing frames to commit any cell change
-    poll_rate_hz: 4.0
+    grid_type_change_frames: 5    # 5 = faster type-change commit (was 8 default)
+    poll_rate_hz: 6.0             # 6 Hz publish cadence (was 4.0)
     camera_topic: "/camera/camera/color/image_raw"
     camera_config_file: "/home/rosuser/workspace/config/camera_config.yaml"
+
+    # ResNet-34 occupancy model (trained on real board images; replaces classical CV occupancy)
+    # Trained with CELL_PX=107, X_SQUEEZE_PX=12 (see tools/kaggle_train_real_board.py).
+    cv_occ_model_path: "/home/rosuser/workspace/src/xiangqi_vision/models/occupancy_real_board.pth"
+    cv_occ_resnet_roi_fraction: 1.00
+    cv_occ_cell_px: 107              # reference cell size for ROI; 0 = use board spacing (89px)
+    cv_occ_x_squeeze_px: 12        # shift files a-d right / i-f left toward center e (px at outermost file)
+    cv_occ_y_squeeze_px: 0         # v1 model trained without y-squeeze
+    cv_occ_threshold: 0.5          # P(occupied) threshold; lower if pieces are missed
 
     # Piece preprocessing (warped board -> YOLO). Off by default; enable when tuning lighting.
     piece_preprocess_enabled: false

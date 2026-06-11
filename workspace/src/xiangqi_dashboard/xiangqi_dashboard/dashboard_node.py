@@ -125,6 +125,7 @@ _state = {
     'game_mode': 'ai_vs_human',   # 'ai_vs_ai' | 'ai_vs_human'
     'human_color': 'red',          # which color the human plays in ai_vs_human
     'last_alert': '',
+    'pending_illegal_alert': '',
     # Board scan (hardware pre-game calibration check)
     'board_scan_status': 'none',   # 'none' | 'scanning' | 'ok' | 'fail'
     'board_scan_pieces': 0,
@@ -743,6 +744,21 @@ def api_simulate_move():
     return jsonify({'ok': True, 'move': move})
 
 
+@_flask_app.route('/api/confirm_illegal', methods=['POST'])
+def api_confirm_illegal():
+    """Confirm or override an illegal-move detection (PENDING_ILLEGAL state)."""
+    data = request.json or {}
+    confirmed = data.get('confirmed', True)
+    decision = 'confirm' if confirmed else 'cancel'
+    pub = _ros_publishers.get('confirm_illegal')
+    if pub is None:
+        return jsonify({'ok': False, 'error': 'ROS publisher not ready'}), 503
+    msg = String()
+    msg.data = decision
+    pub.publish(msg)
+    return jsonify({'ok': True, 'decision': decision})
+
+
 @_socketio.on('connect')
 def on_connect():
     with _state_lock:
@@ -771,6 +787,7 @@ class DashboardNode(Node):
 
         # --- Subscriptions (no duplicates) ---
         self.create_subscription(BoardState, '/xiangqi/board_state', self._board_state_cb, 10)
+        self.create_subscription(BoardState, '/xiangqi/occupancy_state', self._occupancy_state_cb, 10)
         self.create_subscription(GameStatus, '/xiangqi/game_status', self._game_status_cb, 10)
         self.create_subscription(MoveHistory, '/xiangqi/move_history', self._move_history_cb, 10)
         self.create_subscription(EngineInfo, '/xiangqi/engine_info', self._engine_info_cb, 10)
@@ -786,6 +803,7 @@ class DashboardNode(Node):
         self._human_move_pub = self.create_publisher(String, '/xiangqi/simulate_human_move', 10)
         self._game_mode_pub = self.create_publisher(String, '/xiangqi/game_mode', 10)
         self._ai_engines_pub = self.create_publisher(String, '/xiangqi/ai_engines', 10)
+        self._confirm_illegal_pub = self.create_publisher(String, '/xiangqi/confirm_illegal', 10)
         self._stop_game_pub = self.create_publisher(Empty, '/xiangqi/stop_game', 10)
         self._reset_game_pub = self.create_publisher(Empty, '/xiangqi/reset_game', 10)
         self._human_color_pub = self.create_publisher(String, '/xiangqi/human_color', 10)
@@ -801,6 +819,7 @@ class DashboardNode(Node):
         _ros_publishers['resync'] = self._resync_pub
         _ros_publishers['human_color'] = self._human_color_pub
         _ros_publishers['starting_fen'] = self._starting_fen_pub
+        _ros_publishers['confirm_illegal'] = self._confirm_illegal_pub
         _ros_publishers['set_engine_cli'] = self.create_client(SetEngine, 'set_engine')
         _ros_publishers['get_board_state_cli'] = self.create_client(GetBoardState, 'get_board_state')
         _ros_publishers['move_to_scan_pose_cli'] = self.create_client(
@@ -826,22 +845,11 @@ class DashboardNode(Node):
         self._mode_sync_timer = self.create_timer(1.0, self._sync_game_mode_once)
         self._mode_synced = False
 
-        # --- Glitch-filter state (hardware mode) ---
-        # Per-cell hysteresis: pieces register immediately when seen; only
-        # disappear after N consecutive absent frames.
-        # Idle/scanning: high threshold (anti-jitter).
-        # Active game: low threshold (moves must reflect quickly).
-        self._stable_display_grid: list = [0] * 90
-        self._cell_absence_count: list = [0] * 90
-        # Per-cell type-change streak: counts consecutive frames where vision
-        # reports a different (non-zero) piece than what is currently displayed.
-        # A type change only commits after this streak reaches _TYPE_CHANGE_THRESHOLD,
-        # preventing brief YOLO misclassifications from flipping the display type.
-        self._cell_type_change_streak: list = [0] * 90
-        self._cell_type_change_candidate: list = [0] * 90
-        self._CELL_ABSENCE_THRESHOLD_IDLE = 3
-        self._CELL_ABSENCE_THRESHOLD_GAME = 10  # ~3 s at 3 Hz — piece must be absent consistently
-        self._TYPE_CHANGE_THRESHOLD = 6          # ~2 s at 3 Hz — type must be stable before committing
+        # --- Vision display state (hardware mode) ---
+        # _acc_code is used for both pre-game and in-game "what the robot is seeing".
+        # Occupancy (ResNet) is ground truth: occ=0 clears a cell immediately;
+        # occ=1 keeps the best-confidence YOLO classification seen for that cell.
+        self._stable_display_grid: list = [0] * 90  # kept for game-start seeding logic
         # Post-move lock: after the game manager publishes an authoritative board
         # (conf=1.0), suppress all vision grid updates for this many seconds so
         # jittery YOLO frames can't overwrite the clean post-move display.
@@ -853,6 +861,17 @@ class DashboardNode(Node):
         # flicker caused by false human-move triggers.
         self._detecting_move_first_seen: float = 0.0
         self._DETECTING_MOVE_DEBOUNCE = 0.4  # seconds
+
+        # Per-cell best-confidence YOLO accumulator (both pre-game and in-game).
+        # Occupancy + YOLO fusion for "What the robot is seeing":
+        # Pieces appear as soon as either sensor sees them.
+        # Pieces only disappear after _ACC_VANISH_FRAMES consecutive frames of both
+        # occ=0 AND YOLO=0 (slow deregistration prevents jitter-driven clearing).
+        self._acc_code: list = [0] * 90       # piece code with highest confidence seen
+        self._acc_conf: list = [0.0] * 90    # peak confidence for that code
+        self._acc_vanish: list = [0] * 90    # consecutive absent-frames counter per cell
+        self._ACC_VANISH_FRAMES: int = 2     # frames before a cell is cleared
+        self._latest_occ_grid: list | None = None  # binary 0/1 from /occupancy_state
 
     def _sync_game_mode_once(self) -> None:
         if self._mode_synced:
@@ -927,6 +946,11 @@ class DashboardNode(Node):
     # ROS callbacks - update shared state
     # ------------------------------------------------------------------
 
+    def _occupancy_state_cb(self, msg: BoardState) -> None:
+        """Cache the latest binary occupancy grid from /xiangqi/occupancy_state."""
+        with _state_lock:
+            self._latest_occ_grid = [int(x) for x in msg.grid]
+
     def _board_state_cb(self, msg: BoardState) -> None:
         with _state_lock:
             # In sim mode the board is driven exclusively by _game_status_cb (logical FEN).
@@ -937,11 +961,11 @@ class DashboardNode(Node):
             conf = float(msg.detection_confidence)
             if conf >= 0.999:
                 # Authoritative logical board from game manager (post-move FEN).
-                # Sync hysteresis state so vision resumes from the correct baseline.
+                # Overwrite accumulator so next YOLO frames resume from the correct baseline.
                 self._stable_display_grid = list(new_grid)
-                self._cell_absence_count = [0] * 90
-                self._cell_type_change_streak = [0] * 90
-                self._cell_type_change_candidate = [0] * 90
+                self._acc_code = list(new_grid)
+                self._acc_conf = [1.0 if v != 0 else 0.0 for v in new_grid]
+                self._acc_vanish = [0] * 90
                 _state['board_grid'] = new_grid
                 _state['board_source'] = 'game'
                 if msg.fen:
@@ -955,63 +979,108 @@ class DashboardNode(Node):
                 _state['detection_confidence'] = conf
                 _state['_dirty'] = True
                 return
-            # "What the robot is seeing" is the raw vision view, so each cell tracks
-            # what YOLO detects directly:
-            #   - a piece registers IMMEDIATELY the first frame it is seen at a cell, and
-            #   - each cell locks its piece TYPE to the highest-confidence reading seen
-            #     (never downgraded by a lower-confidence frame), so it doesn't jitter.
-            # A cell clears once the piece is absent for N consecutive frames (it left),
-            # which also resets the per-cell best confidence.
-            game_status = _state.get('game_status', 'idle')
-            in_game = game_status not in ('idle', 'game_over')
-            threshold = (
-                self._CELL_ABSENCE_THRESHOLD_IDLE
-                if not in_game
-                else self._CELL_ABSENCE_THRESHOLD_GAME
-            )
             # Per-cell confidence (0.0 when the field is absent/wrong length).
             cell_conf = (
                 [float(c) for c in msg.cell_confidence]
                 if len(msg.cell_confidence) == 90
                 else [0.0] * 90
             )
-            for i in range(90):
-                vision_val = new_grid[i]
-                vision_has = vision_val != 0
-                stable_val = self._stable_display_grid[i]
-                stable_has = stable_val != 0
-                if vision_has:
-                    self._cell_absence_count[i] = 0
-                    if not stable_has:
-                        # Empty → piece: register immediately.
-                        self._stable_display_grid[i] = vision_val
-                        self._cell_type_change_streak[i] = 0
-                        self._cell_type_change_candidate[i] = 0
-                    elif vision_val == stable_val:
-                        # Same type: streak resets — no pending change.
-                        self._cell_type_change_streak[i] = 0
-                        self._cell_type_change_candidate[i] = 0
+            game_status = _state.get('game_status', 'idle')
+            show_physical = game_status in (
+                'waiting_human', 'detecting_move', 'validating_move', 'executing_move'
+            )
+            # game_over uses the idle accumulator (slow-deregister) so the board shows
+            # what's physically on the table after the game ends, not the frozen FEN.
+            non_human_game = game_status not in (
+                'idle', 'game_over',
+                'waiting_human', 'detecting_move', 'validating_move', 'executing_move'
+            )
+
+            occ = self._latest_occ_grid
+            if non_human_game:
+                # AI computing/executing/verifying or game over: display is purely FEN-driven.
+                # Neither YOLO nor occupancy can affect what is shown, so the board never
+                # disappears due to arm movement or camera occlusion.
+                game_fen = _state.get('game_fen', '')
+                if game_fen:
+                    fen_grid = fen_to_grid(game_fen)
+                    self._acc_code = list(fen_grid)
+                    self._acc_conf = [1.0 if v != 0 else 0.0 for v in fen_grid]
+                    _state['board_grid'] = fen_grid
+                    _state['board_source'] = 'fen'
+            elif show_physical:
+                # Human's turn / executing: a cell is present if EITHER occ OR YOLO sees it.
+                # Deregister slow (both absent for _ACC_VANISH_FRAMES) to prevent flicker.
+                # Piece type priority:
+                #   1. FEN type when YOLO agrees on the same color → stable, no YOLO jitter
+                #   2. YOLO type when it disagrees with FEN color → capture: piece replaced
+                #   3. YOLO type when FEN says empty → piece moved to previously empty cell
+                #   4. FEN type as fallback when only occ sees it (YOLO missed)
+                game_fen = _state.get('game_fen', '')
+                fen_grid = fen_to_grid(game_fen) if game_fen else [0] * 90
+                for i in range(90):
+                    occ_sees  = occ is None or occ[i] != 0
+                    yolo_sees = new_grid[i] != 0
+                    if occ_sees or yolo_sees:
+                        self._acc_vanish[i] = 0
+                        if yolo_sees:
+                            c = cell_conf[i] if cell_conf[i] > 0 else 0.5
+                            fen_type  = fen_grid[i]
+                            yolo_type = new_grid[i]
+                            if fen_type != 0 and (fen_type > 0) == (yolo_type > 0):
+                                # Same color as FEN — FEN type is stable and correct
+                                self._acc_code[i] = fen_type
+                                self._acc_conf[i] = 1.0
+                            else:
+                                # YOLO sees different color (capture) or FEN says empty.
+                                # Don't gate on confidence — FEN having conf=1.0 would
+                                # otherwise permanently block the capture type from showing.
+                                self._acc_code[i] = yolo_type
+                                self._acc_conf[i] = c
+                        elif fen_grid[i] != 0:
+                            # Only occ, YOLO missed — FEN fallback
+                            self._acc_code[i] = fen_grid[i]
+                            self._acc_conf[i] = 1.0
+                        # else occ=1, YOLO missed, FEN empty — leave existing acc_code
                     else:
-                        # Different type (same or different colour): require a
-                        # streak before committing so brief YOLO flips don't show.
-                        if vision_val == self._cell_type_change_candidate[i]:
-                            self._cell_type_change_streak[i] += 1
-                        else:
-                            self._cell_type_change_candidate[i] = vision_val
-                            self._cell_type_change_streak[i] = 1
-                        if self._cell_type_change_streak[i] >= self._TYPE_CHANGE_THRESHOLD:
-                            self._stable_display_grid[i] = vision_val
-                            self._cell_type_change_streak[i] = 0
-                            self._cell_type_change_candidate[i] = 0
-                else:
-                    self._cell_type_change_streak[i] = 0
-                    self._cell_type_change_candidate[i] = 0
-                    self._cell_absence_count[i] += 1
-                    if self._cell_absence_count[i] >= threshold and stable_has:
-                        # Piece genuinely left — clear.
-                        self._stable_display_grid[i] = 0
-            _state['board_grid'] = list(self._stable_display_grid)
-            _state['board_source'] = 'vision'
+                        # Both sensors absent — slow deregister (same as idle path)
+                        self._acc_vanish[i] += 1
+                        if self._acc_vanish[i] >= self._ACC_VANISH_FRAMES:
+                            self._acc_code[i] = 0
+                            self._acc_conf[i] = 0.0
+                _state['board_grid'] = list(self._acc_code)
+                _state['board_source'] = 'vision'
+            else:
+                # Pre-game / idle / game-over: register fast (either sensor → show),
+                # deregister slow (both absent for _ACC_VANISH_FRAMES frames).
+                # When occ sees a piece but YOLO hasn't assigned a type yet, fall back
+                # to the FEN piece type so the cell shows immediately.
+                game_fen = _state.get('game_fen', '')
+                fen_grid = fen_to_grid(game_fen) if game_fen else [0] * 90
+                for i in range(90):
+                    occ_sees  = occ is None or occ[i] != 0
+                    yolo_sees = new_grid[i] != 0
+                    if occ_sees or yolo_sees:
+                        self._acc_vanish[i] = 0
+                        if new_grid[i] != 0:
+                            c = cell_conf[i] if cell_conf[i] > 0 else 0.5
+                            if c > self._acc_conf[i]:
+                                self._acc_code[i] = new_grid[i]
+                                self._acc_conf[i] = c
+                        elif self._acc_code[i] == 0 and fen_grid[i] != 0:
+                            # occ sees piece but YOLO hasn't assigned a type — use FEN
+                            self._acc_code[i] = fen_grid[i]
+                            self._acc_conf[i] = 0.5
+                        # else occ=1 but YOLO missed and we already have a code — keep it
+                    else:
+                        # Both sensors say absent — increment vanish counter
+                        self._acc_vanish[i] += 1
+                        if self._acc_vanish[i] >= self._ACC_VANISH_FRAMES:
+                            self._acc_code[i] = 0
+                            self._acc_conf[i] = 0.0
+                _state['board_grid'] = list(self._acc_code)
+                _state['board_source'] = 'accumulator'
+
             if msg.fen:
                 _state['fen'] = msg.fen
             _state['detection_confidence'] = conf
@@ -1037,21 +1106,32 @@ class DashboardNode(Node):
             prev_status = _state.get('game_status', 'idle')
             _state['game_status'] = new_status
             # When transitioning into an active game, seed the live display from
-            # the authoritative FEN so the board never starts from blank.
+            # the accumulator (if it has data) or from the authoritative FEN.
+            # Also clear the accumulator so it doesn't interfere with in-game display.
             if (prev_status in ('idle', 'game_over')
                     and new_status not in ('idle', 'game_over')
                     and not _state.get('simulation_mode', False)):
-                seed_fen = _state.get('game_fen') or _state.get('prescan_fen')
-                if seed_fen and all(v == 0 for v in self._stable_display_grid):
-                    self._stable_display_grid = fen_to_grid(seed_fen)
-                    self._cell_absence_count = [0] * 90
-                    self._cell_type_change_streak = [0] * 90
-                    self._cell_type_change_candidate = [0] * 90
+                # Snapshot the accumulator into _stable_display_grid so the game-start
+                # board shows what was accumulated pre-game. If accumulator is empty,
+                # fall back to FEN. _stable_display_grid is used only for the conf=1.0
+                # (authoritative) board sync path; the accumulator continues to drive
+                # the live display during the game.
+                acc_has_data = any(v != 0 for v in self._acc_code)
+                if acc_has_data:
+                    self._stable_display_grid = list(self._acc_code)
+                else:
+                    seed_fen = _state.get('game_fen') or _state.get('prescan_fen')
+                    if seed_fen and all(v == 0 for v in self._stable_display_grid):
+                        self._stable_display_grid = fen_to_grid(seed_fen)
             _state['is_red_turn'] = msg.is_red_turn
             prev_moves = _state.get('move_count', 0)
             _state['move_count'] = msg.move_count
             if msg.move_count == 0 and prev_moves > 0:
                 _state['move_history'] = []
+                # Restart: restore FEN board to the scanned starting position.
+                prescan = _state.get('prescan_fen', '')
+                if prescan:
+                    _state['game_fen'] = prescan
             _state['engine_type'] = msg.engine_type
             if '|' in (msg.engine_type or ''):
                 red, _, black = msg.engine_type.partition('|')
@@ -1063,6 +1143,7 @@ class DashboardNode(Node):
             _state['system_state'] = msg.system_state
             _state['game_result'] = getattr(msg, 'game_result', 'ongoing')
             _state['game_result_reason'] = getattr(msg, 'game_result_reason', '')
+            _state['pending_illegal_alert'] = getattr(msg, 'pending_illegal_alert', '')
             # Sim: logical FEN drives the board (no camera). Hardware: vision drives the grid;
             # only update FEN here for game metadata - do not reset to STARTING_FEN on every status tick.
             if msg.current_fen:
@@ -1081,10 +1162,22 @@ class DashboardNode(Node):
                 preserve_scan = (
                     not is_sim and prescan and msg.move_count == 0
                 )
+                prev_game_fen = _state.get('game_fen', '')
                 if is_sim or (game_active and not preserve_scan):
                     _state['game_fen'] = msg.current_fen
                 if is_sim or msg.move_count > prev_moves:
-                    _state['board_grid'] = fen_to_grid(msg.current_fen)
+                    new_fen_grid = fen_to_grid(msg.current_fen)
+                    # Force-sync acc_code for cells that changed this move so that YOLO
+                    # misidentification at capture destinations is immediately corrected
+                    # by the authoritative FEN (e.g. b3→b10 capture: acc shows b3's piece at b10).
+                    if prev_game_fen:
+                        old_fen_grid = fen_to_grid(prev_game_fen)
+                        for i in range(90):
+                            if old_fen_grid[i] != new_fen_grid[i]:
+                                self._acc_code[i] = new_fen_grid[i]
+                                self._acc_conf[i] = 1.0 if new_fen_grid[i] != 0 else 0.0
+                                self._acc_vanish[i] = 0
+                    _state['board_grid'] = new_fen_grid
                     _state['board_source'] = 'fen'
             _state['_dirty'] = True
 

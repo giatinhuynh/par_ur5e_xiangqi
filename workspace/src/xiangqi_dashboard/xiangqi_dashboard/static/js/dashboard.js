@@ -208,6 +208,7 @@ function getGamePhase() {
   const gs = (state.game_status || 'idle').toLowerCase();
   if (gs === 'game_over') return 'over';
   if (gs === 'idle') return 'setup';
+  if (gs === 'pending_illegal') return 'illegal';
   return 'playing';
 }
 
@@ -655,6 +656,20 @@ function renderAll() {
   updateSystemPanel();
   updateHistory();
   updateSyncPolling();
+  updateIllegalModal();
+}
+
+function updateIllegalModal() {
+  const modal = document.getElementById('illegal-modal');
+  if (!modal) return;
+  const gs = (state.game_status || '').toLowerCase();
+  if (gs === 'pending_illegal') {
+    const msg = document.getElementById('illegal-modal-message');
+    if (msg) msg.textContent = state.pending_illegal_alert || 'A potentially illegal move was detected.';
+    modal.classList.remove('hidden');
+  } else {
+    modal.classList.add('hidden');
+  }
 }
 
 function updateBoardLoading() {
@@ -908,6 +923,10 @@ function updateFlowBanner() {
     return;
   }
 
+  if (gs === 'pending_illegal') {
+    textEl.textContent = `⚠ Illegal move detected — confirm Game Over or Override in the dialog above`;
+    return;
+  }
   if (gs === 'computing_ai') {
     const aiSide = humanColor === 'red' ? 'Black' : 'Red';
     textEl.textContent = `${mode}: AI (${aiSide}) is thinking…`;
@@ -946,6 +965,7 @@ function updateGameResultBanner() {
       playing: 'In progress',
       over: 'Game over',
       estop: 'E-Stop',
+      illegal: '⚠ Illegal?',
     };
     phaseChip.textContent = labels[phase] || phase;
     phaseChip.className = 'phase-chip phase-' + phase;
@@ -1528,6 +1548,18 @@ function stopGame() {
     .catch(() => showToast('Failed to stop game'));
 }
 
+function backToIdle() {
+  if (state.estop_active) { showToast('Release E-Stop first'); return; }
+  selectedIdx = null;
+  legalDests  = [];
+  lastMove    = null;
+  applyIdleUiState();
+  renderAll();
+  fetch('/api/stop_game', { method: 'POST' })
+    .then(() => { renderAll(); })
+    .catch(() => showToast('Failed to return to idle'));
+}
+
 function resetGame() {
   if (state.estop_active) {
     showToast('Release E-Stop first');
@@ -1657,3 +1689,30 @@ drawBoard();
 
 // Also fetch state immediately via REST as fallback
 fetchStateSnapshot().catch(() => {});
+
+// ── Illegal-move modal buttons ────────────────────────────────────
+(function wireIllegalModal() {
+  const confirmBtn  = document.getElementById('illegal-confirm-btn');
+  const overrideBtn = document.getElementById('illegal-override-btn');
+  if (!confirmBtn || !overrideBtn) return;
+
+  async function sendDecision(confirmed) {
+    try {
+      confirmBtn.disabled = true;
+      overrideBtn.disabled = true;
+      await fetch('/api/confirm_illegal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirmed }),
+      });
+    } catch (e) {
+      console.error('confirm_illegal error:', e);
+    } finally {
+      confirmBtn.disabled = false;
+      overrideBtn.disabled = false;
+    }
+  }
+
+  confirmBtn.addEventListener('click',  () => sendDecision(true));
+  overrideBtn.addEventListener('click', () => sendDecision(false));
+})();

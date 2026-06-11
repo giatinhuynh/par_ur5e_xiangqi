@@ -16,3 +16,6 @@ string game_result
 
 # Free-text reason, e.g. "checkmate", "stalemate", "repetition", "no_legal_moves"
 string game_result_reason
+
+# Populated only when status == "pending_illegal": description of the suspected illegal action
+string pending_illegal_alert

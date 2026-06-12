@@ -95,6 +95,7 @@ class GameManagerNode(Node):
                 self._robot_is_red = False
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
+        self._fen_position_history: list[str] = []  # normalized FEN keys for repetition detection
 
         self._move_count = 0
         self._game_state = GameState.IDLE
@@ -1221,6 +1222,7 @@ class GameManagerNode(Node):
         self._ai_move_retry_count = 0
         self._current_fen = self._prescan_fen if self._prescan_fen else STARTING_FEN
         self._move_history = []
+        self._fen_position_history = []
         self._move_count = 0
         self._game_result = 'ongoing'
         self._game_result_reason = ''
@@ -1284,6 +1286,7 @@ class GameManagerNode(Node):
                 )
             self._current_fen = repaired
             self._move_history = []
+            self._fen_position_history = []
             self._move_count = 0
             self._kick_off_game()
             return
@@ -1456,6 +1459,7 @@ class GameManagerNode(Node):
             )
         self._current_fen = repaired_fen
         self._move_history = []
+        self._fen_position_history = []
         self._move_count = 0
         self._check_game_over()
         if self._game_state != GameState.GAME_OVER:
@@ -2644,6 +2648,10 @@ class GameManagerNode(Node):
             self._current_fen = sf.get_fen(VARIANT, self._current_fen, [move])
             self._move_history.append(move)
             self._move_count += 1
+            # Track position for threefold repetition (piece placement + side to move only)
+            _fen_parts = self._current_fen.split()
+            _pos_key = f'{_fen_parts[0]} {_fen_parts[1]}' if len(_fen_parts) >= 2 else self._current_fen
+            self._fen_position_history.append(_pos_key)
 
             hist_msg = MoveHistory()
             hist_msg.header = Header()
@@ -2814,6 +2822,22 @@ class GameManagerNode(Node):
                 result, reason = self._pyffish_score_to_result(opt_val, is_red_turn, False)
                 self._declare_game_over(result, reason)
                 return
+
+            # ── 2b. Fallback threefold repetition ────────────────────────────
+            # pyffish's is_optional_game_end may not catch pure oscillation loops
+            # (e.g. both engines bouncing the same pair of moves with no check/
+            # chase). Count occurrences of the current position key and declare
+            # a draw on the third occurrence.
+            if self._fen_position_history:
+                _cur_key = self._fen_position_history[-1]
+                _rep_count = self._fen_position_history.count(_cur_key)
+                if _rep_count >= 3:
+                    self.get_logger().warn(
+                        f'Threefold repetition detected (position seen {_rep_count}×): '
+                        f'declaring draw'
+                    )
+                    self._declare_game_over('draw', 'draw_by_repetition')
+                    return
 
             # ── 3. Insufficient material (dead draw) ─────────────────────────
             try:

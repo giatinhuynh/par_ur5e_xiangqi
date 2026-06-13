@@ -95,6 +95,7 @@ class GameManagerNode(Node):
                 self._robot_is_red = False
         self._current_fen = STARTING_FEN
         self._move_history: list[str] = []
+        self._position_counts: dict[str, int] = {}  # normalized FEN → occurrence count
 
         self._move_count = 0
         self._game_state = GameState.IDLE
@@ -1221,6 +1222,7 @@ class GameManagerNode(Node):
         self._ai_move_retry_count = 0
         self._current_fen = self._prescan_fen if self._prescan_fen else STARTING_FEN
         self._move_history = []
+        self._position_counts = {}
         self._move_count = 0
         self._game_result = 'ongoing'
         self._game_result_reason = ''
@@ -1284,6 +1286,7 @@ class GameManagerNode(Node):
                 )
             self._current_fen = repaired
             self._move_history = []
+            self._position_counts = {}
             self._move_count = 0
             self._kick_off_game()
             return
@@ -1456,6 +1459,7 @@ class GameManagerNode(Node):
             )
         self._current_fen = repaired_fen
         self._move_history = []
+        self._position_counts = {}
         self._move_count = 0
         self._check_game_over()
         if self._game_state != GameState.GAME_OVER:
@@ -2621,6 +2625,7 @@ class GameManagerNode(Node):
         engine = self._engine_for_current_turn()
         self._active_ai_engine = engine
         req.engine_type = engine
+        req.moves = list(self._move_history)
 
         self._ai_request_token += 1
         token = self._ai_request_token
@@ -2644,6 +2649,8 @@ class GameManagerNode(Node):
             self._current_fen = sf.get_fen(VARIANT, self._current_fen, [move])
             self._move_history.append(move)
             self._move_count += 1
+            _norm_pos = ' '.join(self._current_fen.split()[:2])
+            self._position_counts[_norm_pos] = self._position_counts.get(_norm_pos, 0) + 1
 
             hist_msg = MoveHistory()
             hist_msg.header = Header()
@@ -2815,7 +2822,13 @@ class GameManagerNode(Node):
                 self._declare_game_over(result, reason)
                 return
 
-            # ── 3. Insufficient material (dead draw) ─────────────────────────
+            # ── 3. Threefold repetition (mutual shuffling not caught by pyffish) ─
+            _norm_fen = ' '.join(fen.split()[:2])
+            if self._position_counts.get(_norm_fen, 0) >= 3:
+                self._declare_game_over('draw', 'draw_by_repetition')
+                return
+
+            # ── 4. Insufficient material (dead draw) ─────────────────────────
             try:
                 red_insuf, blk_insuf = sf.has_insufficient_material(VARIANT, fen, [])
                 if red_insuf and blk_insuf:
@@ -2824,7 +2837,7 @@ class GameManagerNode(Node):
             except AttributeError:
                 pass  # older pyffish build without this function
 
-            # ── 4. Safety-net move limit ──────────────────────────────────────
+            # ── 5. Safety-net move limit ──────────────────────────────────────
             if self._move_count >= self._MAX_HALF_MOVES:
                 self._declare_game_over('draw', 'move_limit')
 

@@ -74,12 +74,21 @@ class AIEngineNode(Node):
 
         try:
             engine = self._get_engine(engine_type)
-            best_move, ponder, depth_reached, eval_cp, elapsed = engine.get_best_move(
-                request.fen, depth=depth, time_limit=time_limit
-            )
+            prior_moves = list(request.moves) if request.moves else None
+            if engine_type == 'minimax' and prior_moves is not None:
+                best_move, ponder, depth_reached, eval_cp, elapsed = engine.get_best_move(
+                    request.fen, depth=depth, time_limit=time_limit,
+                    prior_moves=prior_moves,
+                )
+            else:
+                best_move, ponder, depth_reached, eval_cp, elapsed = engine.get_best_move(
+                    request.fen, depth=depth, time_limit=time_limit
+                )
 
+            # Minimax returns eval already in Red's perspective; FSF returns side-to-move.
             display_cp = int(eval_cp)
             display_depth = depth_reached
+            cp_is_red_perspective = (engine_type == 'minimax')
 
             # Minimax searches with a fast hand-crafted eval; use NNUE for displayed cp
             if (
@@ -95,20 +104,28 @@ class AIEngineNode(Node):
                     )
                     display_cp = nnue_cp
                     display_depth = max(display_depth, nnue_depth)
+                    cp_is_red_perspective = False  # NNUE is side-to-move like FSF
                 except Exception as e:
                     self.get_logger().warn(
                         f'NNUE display eval unavailable, using minimax heuristic: {e}'
                     )
+                    # cp_is_red_perspective stays True (minimax eval, already Red's view)
 
             response.best_move = best_move
             response.ponder_move = ponder
             response.depth_reached = display_depth
+            # Clamp mate-score sentinels (±30000 from FSF, ±100000 from minimax)
+            # to ±2000 so the dashboard shows a meaningful positional score instead
+            # of a misleading near-mate value for positions that aren't actually mated.
+            _MAX_DISPLAY_CP = 2000
             if abs(int(display_cp)) > 50_000:
                 response.evaluation_cp = 0
             else:
-                response.evaluation_cp = eval_to_red_perspective(
-                    request.fen, display_cp
-                )
+                if cp_is_red_perspective:
+                    raw_cp = int(display_cp)  # already Red's view, no conversion
+                else:
+                    raw_cp = eval_to_red_perspective(request.fen, display_cp)
+                response.evaluation_cp = max(-_MAX_DISPLAY_CP, min(_MAX_DISPLAY_CP, raw_cp))
             response.thinking_time_sec = elapsed
             response.success = bool(best_move)
             response.message = 'OK' if best_move else 'No move found'

@@ -51,6 +51,7 @@ class MinimaxEngine:
         fen: str,
         depth: int = 0,
         time_limit: float = 5.0,
+        prior_moves: Optional[List[str]] = None,
     ) -> Tuple[str, str, int, int, float]:
         """
         Search for the best move.
@@ -63,6 +64,20 @@ class MinimaxEngine:
         self._nodes_searched = 0
         self._best_move_so_far = None
 
+        # Build position-count map from game history so we can detect repetitions.
+        self._prior_position_counts: dict[str, int] = {}
+        if prior_moves:
+            _pos = STARTING_FEN
+            for _m in prior_moves:
+                try:
+                    _pos = sf.get_fen(VARIANT, _pos, [_m])
+                    _norm = ' '.join(_pos.split()[:2])
+                    self._prior_position_counts[_norm] = (
+                        self._prior_position_counts.get(_norm, 0) + 1
+                    )
+                except Exception:
+                    break
+
         is_red_turn = 'w' in fen.split()[1] if len(fen.split()) > 1 else True
         moves_so_far: List[str] = []
 
@@ -71,7 +86,7 @@ class MinimaxEngine:
             return '', '', 0, 0, 0.0
 
         best_move = ''
-        best_eval = -INF
+        best_eval = 0  # draw score as safe default (never -INF on a timeout)
         depth_reached = 0
         self._best_move_so_far = legal[0]
 
@@ -124,11 +139,20 @@ class MinimaxEngine:
         best_move = ordered[0]
         best_val = -INF
 
+        root_norm = ' '.join(fen.split()[:2])
+        root_path = frozenset({root_norm})
+
         for move in ordered:
             if self._time_up():
                 raise TimeoutError
             child_fen = sf.get_fen(VARIANT, fen, moves_so_far + [move])
-            val = -self._negamax(child_fen, [], depth - 1, -INF, INF, not is_red)
+            child_norm = ' '.join(child_fen.split()[:2])
+            prior_count = self._prior_position_counts.get(child_norm, 0)
+            if prior_count >= 2:
+                # Third occurrence would be a draw — assign draw score directly.
+                val = DRAW_SCORE
+            else:
+                val = -self._negamax(child_fen, [], depth - 1, -INF, INF, not is_red, root_path)
             if val > best_val:
                 best_val = val
                 best_move = move
@@ -144,27 +168,38 @@ class MinimaxEngine:
         alpha: int,
         beta: int,
         is_red: bool,
+        path_positions: Optional[frozenset] = None,
     ) -> int:
         """Negamax with alpha-beta pruning. Score is always from current player's perspective."""
         self._nodes_searched += 1
         if self._time_up():
             raise TimeoutError
 
+        # Cycle detection: if this position already appeared on the current search path,
+        # it's a draw to avoid infinite recursion and misleading evaluations.
+        norm = ' '.join(fen.split()[:2])
+        if path_positions and norm in path_positions:
+            return DRAW_SCORE
+
+        # Also treat any position already seen 2+ times in the GAME as a draw
+        # (would be a 3rd occurrence), regardless of depth.
+        if self._prior_position_counts.get(norm, 0) >= 2:
+            return DRAW_SCORE
+
         legal_moves = sf.legal_moves(VARIANT, fen, moves_so_far)
 
         # Terminal conditions
-        # Terminal conditions
         if not legal_moves:
-            # If no legal moves, it's either checkmate or stalemate.
-            # We check the game result to see if someone won.
-            res = sf.game_result(VARIANT, fen, moves_so_far)
-            if res in ("1-0", "0-1"):
-                return -CHECKMATE_SCORE + len(moves_so_far)
-            return DRAW_SCORE  # Stalemate
+            # pyffish returns integers: 0 = stalemate/draw, negative = current player mated.
+            gr = sf.game_result(VARIANT, fen, moves_so_far)
+            if gr < 0:
+                return -CHECKMATE_SCORE  # current player is checkmated
+            return DRAW_SCORE  # stalemate
 
         if depth == 0:
             return self._quiescence(fen, moves_so_far, alpha, beta, is_red)
 
+        new_path = (path_positions or frozenset()) | {norm}
         ordered = self._order_moves(legal_moves, fen, moves_so_far)
         best_val = -INF
 
@@ -172,7 +207,7 @@ class MinimaxEngine:
             if self._time_up():
                 raise TimeoutError
             child_fen = sf.get_fen(VARIANT, fen, moves_so_far + [move])
-            val = -self._negamax(child_fen, [], depth - 1, -beta, -alpha, not is_red)
+            val = -self._negamax(child_fen, [], depth - 1, -beta, -alpha, not is_red, new_path)
             best_val = max(best_val, val)
             alpha = max(alpha, val)
             if alpha >= beta:

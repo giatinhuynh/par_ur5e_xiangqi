@@ -3,6 +3,7 @@ string fen           # Current position in Xiangqi FEN
 int32 depth          # Search depth (0 = use time limit)
 float64 time_limit   # Time limit in seconds (0 = use depth)
 string engine_type   # "fairystockfish" | "minimax" | "" (use configured default)
+string[] moves       # Full game move history from starting FEN (for repetition avoidance)
 ---
 string best_move     # Coordinate notation e.g. "h0g2"
 string ponder_move   # Anticipated reply

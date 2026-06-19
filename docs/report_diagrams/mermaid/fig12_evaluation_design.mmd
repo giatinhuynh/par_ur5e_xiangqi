@@ -1,0 +1,37 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  subgraph E1 [Experiment 1 — Piece detection]
+    E1A["N board snapshots<br/>varied layouts"]
+    E1B["Per-class precision/recall<br/>YOLO vs ground truth"]
+    E1C["Confusion matrix<br/>14 piece classes"]
+  end
+
+  subgraph E2 [Experiment 2 — Move inference]
+    E2A["M human moves<br/>on physical board"]
+    E2B["Correct move rate<br/>false positive rate"]
+    E2C["Illegal-move detection rate"]
+  end
+
+  subgraph E3 [Experiment 3 — Manipulation]
+    E3A["K pick-and-place trials<br/>all board regions"]
+    E3B["Grasp success %"]
+    E3C["Placement XY error mm"]
+  end
+
+  subgraph E4 [Experiment 4 — End-to-end]
+    E4A["Complete games<br/>AI vs Human / AI vs AI"]
+    E4B["Mean move cycle time s"]
+    E4C["Human interventions<br/>Confirm move count"]
+  end
+
+  E1A --> E1B --> E1C
+  E2A --> E2B --> E2C
+  E3A --> E3B --> E3C
+  E4A --> E4B --> E4C
+
+  REPORT["Report Results section:<br/>tables + demo video evidence"]
+
+  E1C --> REPORT
+  E2C --> REPORT
+  E3C --> REPORT
+  E4C --> REPORT

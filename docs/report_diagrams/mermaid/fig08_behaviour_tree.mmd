@@ -1,0 +1,35 @@
+flowchart TB
+  ROOT["Root · Sequence"]
+
+  ESTOP["NotEstopped<br/>Inverter(IsEstopActive)<br/>FAIL if e-stop"]
+
+  SEL["MotionOrAbortReport · Selector"]
+
+  MS["MoveSequence · Sequence (memory)"]
+  SETUP["SetupMoveCoordinates<br/>move_translator → blackboard"]
+
+  CAP_SEL["CaptureOrSkip · Selector"]
+  SKIP["NotACapture<br/>Inverter(IsCapture)<br/>SUCCESS → skip capture"]
+  CAP_SEQ["CaptureSequence · Sequence"]
+  GY["PlaceInGraveyardBehaviour<br/>PickAndPlace → graveyard"]
+
+  EX_SEQ["ExecuteMove · Sequence"]
+  PICK["PickPieceBehaviour<br/>PickAndPlace main move"]
+
+  SCAN["ScanPoseBestEffort<br/>FailureIsSuccess(GoToScanPose)"]
+  VER_WRAP["VerifyBestEffort<br/>FailureIsSuccess"]
+  RETRY["RetryVerify<br/>Retry × 4 failures"]
+  VB["VerifyBoardState<br/>grid vs expected_fen"]
+
+  FIN["FinalizeRobotMoveAfterVerify<br/>complete action / result"]
+
+  FAIL["AiMotionFailureFinalizer<br/>if MoveSequence fails"]
+
+  ROOT --> ESTOP --> SEL
+  SEL --> MS
+  SEL --> FAIL
+  MS --> SETUP --> CAP_SEL --> EX_SEQ --> SCAN --> VER_WRAP --> FIN
+  CAP_SEL --> SKIP
+  CAP_SEL --> CAP_SEQ --> GY
+  EX_SEQ --> PICK
+  VER_WRAP --> RETRY --> VB

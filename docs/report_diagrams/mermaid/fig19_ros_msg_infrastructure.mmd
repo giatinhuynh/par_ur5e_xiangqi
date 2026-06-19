@@ -1,0 +1,33 @@
+flowchart TB
+  subgraph msgs [xiangqi_msgs — 15 interface definitions]
+    M["8 messages: BoardState, GameStatus, AiMoveCommand, AiCommandAck, AiExecutionResult, MoveHistory, EngineInfo, PieceDetection"]
+    S["5 services: GetBestMove, GetBoardState, GetBoardTransform, GripperControl, SetEngine"]
+    A["2 actions: PickAndPlace, ExecuteMove"]
+  end
+
+  subgraph tier3 [Tier 3 — xiangqi_ai]
+    GM[game_manager_node]
+    AI[ai_engine_node]
+  end
+
+  subgraph tier2 [Tier 2 — xiangqi_planner]
+    TP[task_planner_node]
+  end
+
+  subgraph tier1 [Tier 1 — reactive]
+    VN[vision_node]
+    MN[manipulation_node]
+    GR[gripper_controller_node]
+  end
+
+  GM -->|"AiMoveCommand"| TP
+  TP -->|"AiCommandAck / AiExecutionResult"| GM
+  GM -->|"GetBestMove"| AI
+  TP -->|"PickAndPlace"| MN
+  TP -->|"GetBoardState"| VN
+  MN -->|"GetBoardTransform"| VN
+  GR -->|"GripperControl"| MN
+
+  msgs -.-> tier3
+  msgs -.-> tier2
+  msgs -.-> tier1

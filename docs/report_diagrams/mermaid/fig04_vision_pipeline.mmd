@@ -1,0 +1,29 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  CAM["Camera image<br/>RealSense color topic"]
+  ARUCO["ArUco detection<br/>DICT_4X4_50 IDs 0–3"]
+  HOMO["Homography + warp<br/>800 × 890 top-down"]
+  PRE["Optional preprocess<br/>gamma / CLAHE"]
+  YOLO["YOLOv8 ONNX<br/>piece type + colour"]
+  OCC["ResNet-34 occupancy<br/>binary per cell"]
+  STAB_Y["GridStabilizer<br/>YOLO temporal filter"]
+  STAB_O["Occupancy stabilizer"]
+  PUB_Y["/xiangqi/board_state<br/>int8 grid ±1…±7"]
+  PUB_O["/xiangqi/occupancy_state<br/>0 empty / 1 occupied"]
+  TURN["TurnDetector<br/>stability_frames"]
+  HMD["/xiangqi/human_move_detected"]
+
+  CAM --> ARUCO
+  ARUCO -->|4 markers OK| HOMO
+  HOMO --> PRE
+  PRE --> YOLO
+  HOMO --> OCC
+  YOLO --> STAB_Y --> PUB_Y
+  OCC --> STAB_O --> PUB_O
+  STAB_Y --> TURN
+  TURN -->|watching mode| HMD
+
+  SRV["Services:<br/>GetBoardState<br/>GetBoardTransform"]
+
+  PUB_Y --> SRV
+  HOMO --> SRV

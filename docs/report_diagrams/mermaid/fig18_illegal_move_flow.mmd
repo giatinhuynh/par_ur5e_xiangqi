@@ -1,0 +1,13 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  DETECT["_flag_illegal_move()<br/>human, robot, or interference"]
+  PAUSE["GameState: PENDING_ILLEGAL"]
+  PUB["GameStatus.pending_illegal_alert<br/>+ illegal_move_alert topic"]
+  UI["Dashboard modal:<br/>confirm game over or override"]
+  API["POST /api/confirm_illegal"]
+  CB["game_manager confirm_illegal_cb"]
+
+  DETECT --> PAUSE --> PUB --> UI
+  UI --> API --> CB
+  CB -->|confirm| GO["GAME_OVER illegal_move"]
+  CB -->|override if allowed| RESUME["resume game flow"]

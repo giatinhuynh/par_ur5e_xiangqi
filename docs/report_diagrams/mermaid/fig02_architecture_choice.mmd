@@ -1,0 +1,19 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  TASK["Project task:<br/>autonomous Xiangqi with<br/>vision + planning + manipulation"]
+
+  subgraph options [Architecture options considered]
+    SPA["Sense-Plan-Act<br/>monolithic planner"]
+    SUB["Subsumption<br/>layered reactive behaviours"]
+    TIER["Three-tier hierarchical<br/>deliberative / sequencing / reactive"]
+  end
+
+  TASK --> SPA
+  TASK --> SUB
+  TASK --> TIER
+
+  SPA --> SPA_X["− No explicit multi-step<br/>capture-verify structure"]
+  SUB --> SUB_X["− Chess-scale search<br/>does not fit reactive layers"]
+  TIER --> TIER_OK["✓ Separates FEN/AI deliberation<br/>from BT motion sequencing<br/>from real-time perception/control"]
+
+  TIER_OK --> CHOSEN["Chosen: three-tier ROS 2<br/>implementation"]

@@ -1,0 +1,36 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart LR
+  subgraph msgs [xiangqi_msgs]
+    M1["BoardState, GameStatus"]
+    M2["AiMoveCommand / Ack / Result"]
+    M3["PickAndPlace.action"]
+  end
+
+  subgraph bringup [xiangqi_bringup]
+    B1["launch + YAML configs"]
+  end
+
+  subgraph tier1 [Tier 1]
+    V[xiangqi_vision]
+    MAN[xiangqi_manipulation]
+  end
+
+  subgraph tier2 [Tier 2]
+    P[xiangqi_planner]
+  end
+
+  subgraph tier3 [Tier 3]
+    A[xiangqi_ai]
+  end
+
+  D[xiangqi_dashboard]
+
+  bringup --> V
+  bringup --> MAN
+  bringup --> P
+  bringup --> A
+  bringup --> D
+  msgs --> V
+  msgs --> MAN
+  msgs --> P
+  msgs --> A

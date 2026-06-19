@@ -1,0 +1,20 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  FEN["Input: FEN + move history"]
+  LEGAL["pyffish legal_moves"]
+  ORDER["Move ordering<br/>captures / checks first"]
+  ID["Iterative deepening<br/>alpha-beta pruning"]
+  EVAL["evaluation.py<br/>material + position + mobility"]
+  REP["Repetition detection<br/>prior_moves hash"]
+  OUT["Output: best_move, depth, eval_cp"]
+
+  FEN --> LEGAL --> ORDER --> ID
+  ID --> EVAL
+  ID --> REP
+  ID --> OUT
+
+  subgraph compare [UG comparison baseline]
+    FSF["Fairy-Stockfish UCI<br/>NNUE, skill 1–20"]
+  end
+
+  OUT -.->|compare in report| FSF

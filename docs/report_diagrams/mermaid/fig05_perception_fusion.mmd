@@ -1,0 +1,28 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  subgraph vision [vision_node outputs]
+    Y["YOLO grid<br/>type + colour per cell"]
+    O["Occupancy grid<br/>reliable empty detection"]
+  end
+
+  subgraph gm [game_manager_node — original fusion logic]
+    COLLECT["Multi-round collection<br/>6 occ + 3 YOLO frames"]
+    FUSE["Per-cell fusion:<br/>occupied if YOLO OR occupancy"]
+    TYPE["Type from YOLO where occupied;<br/>empty forced where occupancy=0"]
+    DELTA["Delta vs authoritative FEN"]
+    PYF["pyffish legal move match<br/>human_move_grid_tolerance"]
+  end
+
+  OUT_OK["Apply human move → AI turn"]
+  OUT_ILL["PENDING_ILLEGAL<br/>dashboard confirm"]
+
+  Y --> COLLECT
+  O --> COLLECT
+  COLLECT --> FUSE --> TYPE --> DELTA --> PYF
+  PYF -->|unique legal move| OUT_OK
+  PYF -->|illegal / ambiguous| OUT_ILL
+
+  subgraph ai_turn [During robot move]
+    WATCH["Occupancy-only watch<br/>detect human interference"]
+  end
+  O --> WATCH

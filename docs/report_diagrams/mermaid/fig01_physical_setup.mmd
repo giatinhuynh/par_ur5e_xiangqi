@@ -1,0 +1,25 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '14px'}}}%%
+flowchart LR
+  subgraph lab [VXLab cell]
+    subgraph hw [Hardware]
+      UR5e["UR5e cobot<br/>10.234.6.49"]
+      RG2["OnRobot RG2<br/>EyeBox Modbus"]
+      CAM["Intel RealSense<br/>arm-mounted"]
+      BOARD["Xiangqi board mat<br/>4×A3 + ArUco corners"]
+      GY["Graveyard zones<br/>captured pieces"]
+    end
+    subgraph sw [Software on dev box 10.234.7.84]
+      DOCKER["Docker UR5e_Env<br/>+ xiangqi image"]
+      ROS["ROS 2 Humble stack<br/>7 xiangqi packages"]
+      WEB["Web dashboard<br/>:5000"]
+    end
+  end
+
+  CAM -->|USB3| DOCKER
+  UR5e -->|External Control :50002| DOCKER
+  RG2 -->|Modbus TCP| DOCKER
+  DOCKER --> ROS
+  ROS --> WEB
+  UR5e -->|pick-and-place| BOARD
+  UR5e -->|capture moves| GY
+  CAM -->|scan pose view| BOARD

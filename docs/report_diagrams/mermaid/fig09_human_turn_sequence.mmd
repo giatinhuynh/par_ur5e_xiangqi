@@ -1,0 +1,26 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '12px'}}}%%
+sequenceDiagram
+  participant H as Human player
+  participant DB as dashboard
+  participant GM as game_manager
+  participant MN as manipulation
+  participant VN as vision
+
+  GM->>MN: move_to_scan_pose
+  GM->>VN: start_watching=true
+  alt Vision stability path
+    VN->>VN: TurnDetector stability_frames
+    VN->>GM: human_move_detected
+  else Confirm move fallback
+    H->>DB: Confirm move
+    DB->>GM: human_ready
+  end
+  GM->>GM: collect 6 occ + 3 YOLO frames
+  GM->>GM: fuse grids + infer move (pyffish)
+  alt Legal move
+    GM->>GM: apply move → COMPUTING_AI
+  else Illegal / ambiguous
+    GM->>DB: pending_illegal alert
+    H->>DB: confirm or override
+    DB->>GM: confirm_illegal
+  end

@@ -1,0 +1,34 @@
+stateDiagram-v2
+  [*] --> IDLE
+
+  IDLE --> WAITING_HUMAN: new_game (human first)\nor after AI move
+  IDLE --> COMPUTING_AI: new_game (AI first)
+
+  WAITING_HUMAN --> DETECTING_MOVE: human_move_detected\nor human_ready
+  DETECTING_MOVE --> WAITING_HUMAN: inference failed
+  DETECTING_MOVE --> PENDING_ILLEGAL: illegal / ambiguous
+  DETECTING_MOVE --> COMPUTING_AI: legal human move
+
+  PENDING_ILLEGAL --> GAME_OVER: confirm game over
+  PENDING_ILLEGAL --> COMPUTING_AI: override → continue
+
+  COMPUTING_AI --> EXECUTING_MOVE: ExecuteMove dispatched
+  COMPUTING_AI --> GAME_OVER: terminal position
+  COMPUTING_AI --> WAITING_HUMAN: sim / no robot turn
+
+  EXECUTING_MOVE --> WAITING_HUMAN: move complete or verify fail handled
+  EXECUTING_MOVE --> COMPUTING_AI: AI vs AI next side
+  EXECUTING_MOVE --> IDLE: estop
+
+  WAITING_HUMAN --> GAME_OVER: checkmate / draw / limit
+  GAME_OVER --> IDLE: reset
+
+  note right of DETECTING_MOVE
+    Human inference in game_manager
+    not in behaviour tree
+  end note
+
+  note right of PENDING_ILLEGAL
+    VALIDATING_MOVE exists in enum
+    but is unused in current code
+  end note

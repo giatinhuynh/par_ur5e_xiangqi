@@ -1,0 +1,15 @@
+flowchart LR
+  subgraph allowed [Allowed cross-tier paths]
+    D3["Deliberative<br/>game_manager + ai_engine"]
+    D2["Sequencing<br/>task_planner BT"]
+    D1["Reactive<br/>vision + manipulation + gripper"]
+  end
+
+  D3 -->|"AiMoveCommand only"| D2
+  D2 -->|"PickAndPlace, GetBoardState"| D1
+  D2 -->|"AiExecutionResult"| D3
+  D1 -->|"BoardState, occupancy"| D3
+
+  subgraph blocked [Blocked — no direct link]
+    X["game_manager -/-> manipulation_node<br/>game_manager -/-> vision_node for motion"]
+  end

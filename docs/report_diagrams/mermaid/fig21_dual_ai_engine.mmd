@@ -1,0 +1,12 @@
+flowchart TB
+  GM[game_manager_node]
+  SRV[GetBestMove service]
+  FSF[Fairy-Stockfish UCI<br/>skill 1-20, NNUE]
+  MM[Custom minimax<br/>alpha-beta, depth 6, 5s budget<br/>prior_moves repetition]
+
+  GM --> SRV
+  SRV --> FSF
+  SRV --> MM
+  FSF --> OUT[best_move + eval]
+  MM --> OUT
+  OUT --> GM

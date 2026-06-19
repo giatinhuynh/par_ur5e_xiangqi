@@ -2,6 +2,17 @@
 
 **Full system design, architecture, interfaces, and setup:** [repository README](../README.md).
 
+## Report (COSC2781)
+
+| Document | Description |
+|----------|-------------|
+| [report_diagrams/README.md](report_diagrams/README.md) | **Figure index** — 21 Mermaid diagrams for the final report |
+| [../.cursor/plans/xiangqi_report_diagrams.plan.md](../.cursor/plans/xiangqi_report_diagrams.plan.md) | **All diagrams inline** — open in Cursor to preview (like system plan) |
+| [report_diagrams/report_tables.md](report_diagrams/report_tables.md) | Results tables to fill with lab metrics |
+| [report_draft.md](report_draft.md) | **Report prose draft** — sections with figure/table references |
+| [report_diagrams/evaluation_runbook.md](report_diagrams/evaluation_runbook.md) | Lab runbook to collect Results data before June 21 |
+| [assignment_rubric_checklist.md](assignment_rubric_checklist.md) | Rubric mapping and full-marks checklist |
+
 ## Physical setup
 
 | Document | Description |

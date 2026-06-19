@@ -1,0 +1,26 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart LR
+  subgraph phases [PickAndPlace action phases]
+    P1["1 Open gripper"]
+    P2["2 Approach pick"]
+    P3["3 Grasp / close RG2"]
+    P4["4 Lift to transit height"]
+    P5["5 Transit to place"]
+    P6["6 Approach place"]
+    P7["7 Place / release"]
+    P8["8 Lift clear"]
+  end
+
+  subgraph motion [Motion backends on UR5e]
+    J["Joint /move_action<br/>scan pose, taught cells"]
+    B["4-patch bilinear<br/>joint interpolation"]
+    C["Cartesian /par_moveit/waypoint_move<br/>vertical descend/lift"]
+    G["/rg2/set_width<br/>gripper"]
+  end
+
+  P1 --> P2 --> P3 --> P4 --> P5 --> P6 --> P7 --> P8
+  P2 -.-> B
+  P2 -.-> C
+  P3 -.-> G
+  P7 -.-> G
+  P4 -.-> J

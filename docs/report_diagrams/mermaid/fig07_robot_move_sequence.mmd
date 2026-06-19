@@ -1,0 +1,25 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '12px'}}}%%
+sequenceDiagram
+  participant GM as game_manager
+  participant AI as ai_engine
+  participant TP as task_planner BT
+  participant MT as move_translator
+  participant MN as manipulation
+  participant VN as vision
+
+  GM->>AI: GetBestMove(fen, moves[])
+  AI-->>GM: best_move, eval, depth
+  GM->>TP: AiMoveCommand(dispatch_id, move, is_capture, expected_fen)
+  TP-->>GM: AiCommandAck(accepted)
+  TP->>MT: SetupMoveCoordinates
+  alt is_capture
+    TP->>MN: PickAndPlace(piece → graveyard)
+  end
+  TP->>MN: PickAndPlace(main move)
+  TP->>MN: move_to_scan_pose
+  TP->>VN: GetBoardState(force_rescan)
+  VN-->>TP: grid
+  TP->>TP: VerifyBoardState vs expected_fen
+  TP-->>GM: AiExecutionResult(ROBOT_MOVE_COMPLETE | FAILED)
+  GM->>GM: commit FEN if complete
+  GM->>VN: start_watching=true

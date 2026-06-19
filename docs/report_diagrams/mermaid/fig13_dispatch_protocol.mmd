@@ -1,0 +1,22 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+sequenceDiagram
+  participant GM as game_manager
+  participant TP as task_planner
+
+  Note over GM,TP: dispatch_id monotonic per pending AI move
+
+  GM->>GM: GetBestMove (FEN not yet updated)
+  GM->>TP: AiMoveCommand(id=N, move, is_capture, expected_fen)
+  alt planner busy
+    TP-->>GM: AiCommandAck(accepted=false)
+    GM->>GM: retry / abort
+  else accepted
+    TP-->>GM: AiCommandAck(accepted=true, id=N)
+    TP->>TP: execute BT motion + verify
+    TP-->>GM: AiExecutionResult(id=N, status, message)
+    alt id matches && ROBOT_MOVE_COMPLETE
+      GM->>GM: commit expected_fen
+    else mismatch or failure
+      GM->>GM: discard pending move
+    end
+  end

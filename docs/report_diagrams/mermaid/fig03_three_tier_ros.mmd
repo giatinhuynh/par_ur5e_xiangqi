@@ -1,0 +1,39 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '12px'}}}%%
+graph TB
+  subgraph deliberative [Tier 3 — Deliberative]
+    GM["game_manager_node<br/>FEN, fusion inference, dispatch"]
+    AI["ai_engine_node<br/>Fairy-Stockfish | minimax"]
+  end
+
+  subgraph sequencing [Tier 2 — Sequencing]
+    TP["task_planner_node<br/>py_trees BT @ 10 Hz"]
+    MT["move_translator.py<br/>grid → joints / poses"]
+  end
+
+  subgraph reactive [Tier 1 — Reactive]
+    VN["vision_node<br/>ArUco + YOLO + occupancy"]
+    MN["manipulation_node"]
+    GR["gripper_controller_node"]
+    SF["safety_monitor_node"]
+  end
+
+  subgraph cross [Cross-cutting HMI]
+    DB["dashboard_node<br/>Flask :5000"]
+  end
+
+  GM -->|AiMoveCommand| TP
+  TP -->|AiCommandAck| GM
+  TP -->|AiExecutionResult| GM
+  GM -->|move_to_scan_pose| MN
+  GM -->|start_watching| VN
+  AI -->|GetBestMove| GM
+  VN -->|board_state, occupancy_state| GM
+  VN -->|human_move_detected| GM
+  TP -->|PickAndPlace| MN
+  TP -->|GetBoardState| VN
+  MN -->|GetBoardTransform| VN
+  TP --> MT
+  SF -.->|estop| TP
+  SF -.->|estop| GM
+  GM -.->|GameStatus| DB
+  VN -.->|debug_image| DB

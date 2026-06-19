@@ -1,0 +1,20 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  START(["calibration_tool"])
+  S1["Step 1: Teach scan pose<br/>scan_joint_positions"]
+  S2["Step 2: ArUco homography<br/>SPACE to capture H matrix"]
+  S3["Step 3: Teach board corners<br/>+ optional midpoints<br/>approach/grasp joints per cell patch"]
+  S4["Step 4: Teach graveyard<br/>red/black capture zones"]
+  OUT["board_calibration.yaml<br/>+ vision_config path"]
+
+  START --> S1 --> S2 --> S3 --> S4 --> OUT
+
+  subgraph consumers [Shared by vision and manipulation]
+    V["vision_node<br/>warp + grid spacing"]
+    M["move_translator<br/>grid → world / joints"]
+    MN["manipulation_node<br/>GetBoardTransform at startup"]
+  end
+
+  OUT --> V
+  OUT --> M
+  OUT --> MN

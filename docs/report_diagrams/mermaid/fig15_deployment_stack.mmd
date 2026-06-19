@@ -1,0 +1,27 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  subgraph host [Lab host]
+    DC["docker-compose<br/>UR5e_Env"]
+    IMG["ur5e_xiangqi:latest<br/>Dockerfile extensions"]
+  end
+
+  subgraph container [ROS 2 container]
+    DRV["VXLab drivers<br/>arm_drivers<br/>moveit_config_driver"]
+    LAUNCH["xiangqi_system.launch.py"]
+    PKG["7 ROS packages<br/>workspace/src"]
+    CFG["YAML configs<br/>+ board_calibration.yaml"]
+  end
+
+  subgraph external [External lab interfaces]
+    MA["/move_action"]
+    WP["/par_moveit/waypoint_move"]
+    RG["/rg2/set_width"]
+  end
+
+  DC --> IMG --> DRV
+  IMG --> LAUNCH
+  LAUNCH --> PKG
+  PKG --> CFG
+  PKG --> MA
+  PKG --> WP
+  PKG --> RG

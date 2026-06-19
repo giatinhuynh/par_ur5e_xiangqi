@@ -1,0 +1,13 @@
+%%{init: {'theme': 'base', 'themeVariables': { 'fontSize': '13px'}}}%%
+flowchart TB
+  UI["Dashboard: Scan Board button"]
+  POSE["move_to_scan_pose<br/>arm to camera view"]
+  ROUNDS["3× GetBoardState<br/>force_rescan"]
+  VOTE["Majority vote per cell<br/>best_cell_grid"]
+  FEN["Build FEN from merged grid"]
+  STORE["prescan_fen stored"]
+  START["User: Start Game"]
+  GM["game_manager uses prescan_fen<br/>instead of standard start"]
+
+  UI --> POSE --> ROUNDS --> VOTE --> FEN --> STORE
+  STORE --> START --> GM

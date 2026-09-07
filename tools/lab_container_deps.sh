@@ -70,6 +70,8 @@ install_fairy_stockfish() {
   make -C /opt/fairy-stockfish/src -j"$(nproc)" ARCH=x86-64-modern build largeboards=yes
   cp /opt/fairy-stockfish/src/stockfish /usr/local/bin/fairy-stockfish
   chmod +x /usr/local/bin/fairy-stockfish
+  # Ultralytics/torch may pull setuptools>=80, which breaks pyffish egg_info and colcon-core.
+  pip3 install --no-cache-dir 'setuptools>=65,<80' 'packaging>=23'
   pip3 install --no-cache-dir /opt/fairy-stockfish
 }
 

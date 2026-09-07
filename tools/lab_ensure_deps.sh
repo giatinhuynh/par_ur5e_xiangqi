@@ -73,6 +73,7 @@ if ! docker exec "$CONTAINER" python3 -c "import pyffish" 2>/dev/null; then
       cp /opt/fairy-stockfish/src/stockfish /usr/local/bin/fairy-stockfish
       chmod +x /usr/local/bin/fairy-stockfish
     fi
+    pip3 install --no-cache-dir "setuptools>=65,<80" "packaging>=23"
     pip3 install --no-cache-dir /opt/fairy-stockfish
   '
 fi

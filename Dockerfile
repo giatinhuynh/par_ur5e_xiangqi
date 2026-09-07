@@ -71,7 +71,9 @@ RUN ARCH_TARGET=$(uname -m | grep -q aarch64 && echo "armv8" || (uname -m | grep
     && cp stockfish /usr/local/bin/fairy-stockfish \
     && chmod +x /usr/local/bin/fairy-stockfish
 WORKDIR /opt/fairy-stockfish
-RUN pip3 install --no-cache-dir . \
+# Ultralytics/torch may pull setuptools>=80, which breaks pyffish egg_info and colcon-core.
+RUN pip3 install --no-cache-dir 'setuptools>=65,<80' 'packaging>=23' \
+    && pip3 install --no-cache-dir . \
     && python3 -c "import pyffish as sf; sf.set_option('VariantPath',''); print('pyffish', sf.__file__)"
 
 # Verify binary + pyffish agree on xiangqi UCI notation
